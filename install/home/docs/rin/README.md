@@ -1,0 +1,117 @@
+# Rin Runtime Reference
+
+Authoritative execution-time reference for Rin local architecture. 
+Precedence: This file overrides upstream Pi documentation for Rin-specific behavior. Use Pi docs only for SDK or TUI API technical details.
+
+## 1. Canonical Roots
+
+- **Runtime Root:** `~/.rin`
+- **Docs Root:** `~/.rin/docs/rin`
+- **Data Root:** `~/.rin/data`
+- **Source Repo:** Distinct from runtime state (e.g., `~/rin-src`).
+
+Operational Rule: Reference `~/.rin` directly. Do not derive it from subpaths (cache, sessions, or data).
+
+## 2. Runtime Surfaces
+
+- `rin`: Local TUI (`InteractiveMode`).
+- `rin restart`: Restart the background daemon service.
+- `rin update`: Reinstalls from source and refreshes runtime.
+- `rin uninstall`: Interactive uninstallation.
+- `rin-daemon.service`: Background bridge and scheduler.
+
+Internal behavior (chat delivery, trust, schedules, memory) is exposed via the agent runtime, not CLI subcommands.
+
+## 3. Session Model
+
+Active Pi contexts:
+1. **Local TUI:** Started by `rin`. Local-only; not a daemon client.
+2. **Daemon Sessions:** Used for bridge, timers, and inspection.
+
+Execution State:
+- Async brain capture runs in-process per session.
+- `#RIN_CONTINUE` is the exclusive control token persisted across TUI and daemon contexts.
+
+## 4. Auto-Loaded Content
+
+Rin discovers content exclusively within `~/.rin`.
+- **Config:** `AGENTS.md`, `auth.json`, `settings.json`, `models.json`
+- **Logic:** `skills/**`
+- **Reference:** `docs/rin/**`
+- **State:** `data/**`
+
+Settings:
+- Use global `~/.rin/settings.json`.
+- Project-local `.pi/settings.json` is ignored.
+
+## 5. Non-Discovered Content
+
+The following are NOT auto-discovered:
+- `AGENTS.md` outside `~/.rin`.
+- Project-local `.pi/` resources (skills, prompts, etc.).
+- `~/.agents/skills`.
+- Legacy resource chains.
+
+Manual Inspection: If a task targets a directory, manually check for `AGENTS.md` or `.rin/` content as an explicit step.
+
+## 6. Path Semantics
+
+Rin has no ambient project working directory. Runtime root is `~/.rin`.
+Tools inherit Pi's `cwd` requirement, pinned to `$HOME`.
+- **Relative paths:** Resolve from `$HOME`.
+- **TUI sessions:** `~/.rin/sessions/default`.
+- **Daemon sessions:** `~/.rin/data/chats/...`.
+
+Operation:
+- Use absolute paths.
+- Explicitly `cd` within `bash` calls.
+- Do not assume a project-local working directory.
+
+## 7. Tool Surface
+
+Core Tools: `read`, `bash`, `edit`, `write`.
+Rin Tools: `rin_brain`, `rin_koishi`, `rin_schedule`.
+
+Constraints:
+- Follow tool schemas for parameters.
+- Do not use deprecated names: `rin_memory`, `rin_send`, `rin_identity`.
+
+## 8. Constraints
+
+Naming:
+- Identity: `rin`.
+- Background service: `daemon`.
+- Prohibited terms: `guardian`.
+- Pi is an SDK/implementation detail, not the product identity.
+
+Architecture:
+- Minimal public CLI surface.
+- Minimal runtime prompts.
+- Move delivery/protocol logic to code, not prompts, unless inference-critical.
+- Avoid legacy aliases or compatibility wrappers.
+
+## 9. Documentation Usage
+
+- **Rin Architecture/Behavior:** Reference this file.
+- **Upstream Pi/SDK/TUI:** Reference `docs/` and `examples/`.
+
+Mapping:
+- SDK: `docs/sdk.md`
+- TUI: `docs/tui.md`
+- Extensions: `docs/extensions.md`
+- Skills: `docs/skills.md`
+- Keybindings: `docs/keybindings.md`
+- Models/Providers: `docs/models.md`, `docs/providers.md`, `docs/custom-provider.md`
+
+## 10. Execution Guidance
+
+Internal Edits:
+- Runtime/private files: `~/.rin`.
+- Source changes: Repository checkout.
+- Inspect state directly; do not rely on assumptions.
+- Verify behavior via resulting state changes.
+
+External Targets:
+- Directories are explicit targets, not working-directory context.
+- Manually inspect target files.
+- Ensure Rin runtime state remains in `~/.rin`.
