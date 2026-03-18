@@ -13,6 +13,7 @@ import {
   acquireExclusiveFileLock,
   resolveRinLayout,
 } from './runtime'
+import { cleanupLegacyExternalWebSearch } from './web-search'
 
 const fs = require('node:fs')
 const os = require('node:os')
@@ -163,6 +164,7 @@ const INTERNAL_SKILL_NAMES = new Set([
   'rin-schedule',
   'rin-send',
   'rin-identity',
+  'web-search',
 ])
 
 const DEFAULT_INSTALL_SOURCE_REPO = 'https://github.com/THE-cattail/rin.git'
@@ -243,6 +245,7 @@ function ensureWorkspaceBaseline(home, { overwriteManaged = false } = {}) {
     'memory/README.md',
     'routines/README.md',
     'locale/en-US.default.json',
+    'skills/web-search',
   ].forEach(removeIfPresent)
 
   return {
@@ -572,10 +575,13 @@ function writeInstallMetadata(stateRoot, data) {
 function performInstall({ targetUser, homeDir, migrateFrom = '', overwriteManaged = true, sourceRepo = '', sourceRef = '' } = {}) {
   const userHome = path.resolve(homeDir)
   const stateRoot = installStateRootForHome(userHome)
+  const currentUser = currentUserRecord()
+  const stopLegacyWebSearchSystemd = Boolean(targetUser && targetUser.username && targetUser.username === currentUser.username)
   ensureDir(stateRoot)
   const baseline = ensureWorkspaceBaseline(stateRoot, { overwriteManaged })
   const bundle = installRuntimeBundle(stateRoot)
   const migrated = migrateFrom ? migrateLegacyWorkspaceToState({ from: migrateFrom, to: stateRoot, overwrite: true }) : null
+  const legacyWebSearchCleanup = cleanupLegacyExternalWebSearch({ stateRoot, userHome, stopSystemd: stopLegacyWebSearchSystemd })
   const customizeMigration = migrateLegacyCustomizeToAgents(stateRoot)
   const bootstrap = ensurePiBootstrapAt({ agentDir: stateRoot, stateRoot, homeDir: userHome })
   const launcherPath = createInstalledLauncher({ stateRoot, userHome })
@@ -602,6 +608,7 @@ function performInstall({ targetUser, homeDir, migrateFrom = '', overwriteManage
     baseline,
     bundle,
     migrated,
+    legacyWebSearchCleanup,
     customizeMigration,
     bootstrap,
     metadataPath,

@@ -8,6 +8,8 @@ import { spawn } from 'node:child_process'
 
 import { Type } from '@sinclair/typebox'
 
+import { searchWeb } from './web-search'
+
 function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true })
 }
@@ -203,6 +205,7 @@ const INTERNALIZED_SKILL_NAMES = new Set([
   'rin-schedule',
   'rin-send',
   'rin-identity',
+  'web-search',
 ])
 
 function safeString(value: any): string {
@@ -1122,7 +1125,139 @@ function toolResultFromText(text: string, details: any = {}, isError = false) {
   }
 }
 
-function createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey = '' }: { repoRoot: string, stateRoot: string, currentChatKey?: string }) {
+function createRinBuiltinTools({
+  repoRoot,
+  stateRoot,
+  currentChatKey = '',
+  pi,
+  agentDir,
+  authStorage,
+  modelRegistry,
+  resourceLoader,
+}: {
+  repoRoot: string
+  stateRoot: string
+  currentChatKey?: string
+  pi: any
+  agentDir: string
+  authStorage: any
+  modelRegistry: any
+  resourceLoader: any
+}) {
+  function summarizeModel(model: any, currentModel?: any) {
+    const provider = safeString(model && model.provider).trim()
+    const id = safeString(model && model.id).trim()
+    const currentProvider = safeString(currentModel && currentModel.provider).trim()
+    const currentId = safeString(currentModel && currentModel.id).trim()
+    return {
+      provider,
+      model: id,
+      name: safeString(model && (model.name || model.id)).trim() || id,
+      reasoning: Boolean(model && model.reasoning),
+      input: Array.isArray(model && model.input)
+        ? model.input.map((value: any) => safeString(value).trim()).filter(Boolean)
+        : ['text'],
+      contextWindow: Number(model && model.contextWindow) || 0,
+      maxTokens: Number(model && model.maxTokens) || 0,
+      current: !!provider && !!id && provider === currentProvider && id === currentId,
+    }
+  }
+
+  function listAvailableModels(ctx?: any) {
+    const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
+    const currentModel = ctx && ctx.model ? ctx.model : null
+    const models = Array.isArray(registry && typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
+      ? (registry.getAvailable() as any[])
+      : []
+    return models
+      .slice()
+      .sort((a: any, b: any) => {
+        const ap = safeString(a && a.provider).trim()
+        const bp = safeString(b && b.provider).trim()
+        if (ap !== bp) return ap.localeCompare(bp)
+        return safeString(a && a.id).trim().localeCompare(safeString(b && b.id).trim())
+      })
+      .map((model: any) => summarizeModel(model, currentModel))
+  }
+
+  function isHiddenSkillPathLocal(filePath: any): boolean {
+    const raw = safeString(filePath).trim()
+    if (!raw) return false
+    return path.resolve(raw).split(path.sep).filter(Boolean).includes('.hidden')
+  }
+
+  function normalizeSkillRecordLocal(skill: any): any {
+    if (!skill || typeof skill !== 'object') return null
+    const filePath = safeString(skill && skill.filePath).trim()
+    const baseDir = safeString(skill && skill.baseDir).trim() || (filePath ? path.dirname(filePath) : '')
+    const hidden = Boolean(skill && skill.disableModelInvocation) || isHiddenSkillPathLocal(filePath) || isHiddenSkillPathLocal(baseDir)
+    return {
+      ...skill,
+      name: safeString(skill && skill.name).trim(),
+      description: safeString(skill && skill.description).trim(),
+      filePath,
+      baseDir,
+      disableModelInvocation: hidden,
+    }
+  }
+
+  function stripSkillFrontmatterLocal(text: string): string {
+    if (!text.startsWith('---')) return text.trim()
+    const end = text.indexOf('\n---', 3)
+    if (end < 0) return text.trim()
+    return text.slice(end + 4).trim()
+  }
+
+  function listRuntimeSkills() {
+    const loaded = resourceLoader && typeof resourceLoader.getSkills === 'function'
+      ? resourceLoader.getSkills()
+      : { skills: [] }
+    const skills = Array.isArray(loaded && loaded.skills) ? loaded.skills : []
+    return skills
+      .map((skill: any) => normalizeSkillRecordLocal(skill))
+      .filter((skill: any) => skill && safeString(skill.name).trim() && !INTERNALIZED_SKILL_NAMES.has(safeString(skill.name).trim()))
+      .sort((a: any, b: any) => safeString(a && a.name).trim().localeCompare(safeString(b && b.name).trim()))
+  }
+
+  function resolveSkillLinkTarget(rawTarget: string): string {
+    let target = safeString(rawTarget).trim()
+    if (!target) return ''
+    if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1).trim()
+    if (!target || target.startsWith('#')) return ''
+    if (/^(?:[a-z]+:)?\/\//i.test(target) || /^(?:mailto|data|javascript):/i.test(target)) return ''
+    target = target.replace(/[?#].*$/, '').trim()
+    return target
+  }
+
+  function collectSkillReferences(skillBody: string, baseDir: string) {
+    const matches = new Map<string, any>()
+    const linkPattern = /\[[^\]]*\]\(([^)]+)\)/g
+    for (const match of skillBody.matchAll(linkPattern)) {
+      const rawTarget = safeString(match && match[1]).trim()
+      const target = resolveSkillLinkTarget(rawTarget)
+      if (!target) continue
+      const resolvedPath = path.resolve(baseDir || process.cwd(), target)
+      if (matches.has(resolvedPath)) continue
+      let exists = false
+      let stat: fs.Stats | null = null
+      try {
+        stat = fs.statSync(resolvedPath)
+        exists = true
+      } catch {}
+      matches.set(resolvedPath, {
+        path: resolvedPath,
+        relativePath: baseDir ? path.relative(baseDir, resolvedPath) || path.basename(resolvedPath) : target,
+        exists,
+        kind: exists && stat
+          ? stat.isDirectory()
+            ? 'directory'
+            : path.extname(resolvedPath).slice(1).toLowerCase() || 'file'
+          : 'missing',
+      })
+    }
+    return [...matches.values()]
+  }
+
   const brainTool = {
     name: 'rin_brain',
     label: 'Rin Brain',
@@ -1293,7 +1428,111 @@ function createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey = '' }: { r
     },
   }
 
-  return [brainTool, koishiTool, scheduleTool]
+  const webSearchTool = {
+    name: 'web_search',
+    label: 'Web Search',
+    description: 'Search the live public web. Use this when a task needs current public information, official docs, release notes, pricing, or source-backed verification.',
+    promptSnippet: 'Search the live public web when the task needs current public information, official docs, release notes, pricing, or source-backed verification.',
+    parameters: Type.Object({
+      query: Type.String(),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
+      freshness: Type.Optional(Type.Union([
+        Type.Literal('day'),
+        Type.Literal('week'),
+        Type.Literal('month'),
+        Type.Literal('year'),
+      ])),
+      safe: Type.Optional(Type.Union([
+        Type.Literal('off'),
+        Type.Literal('moderate'),
+        Type.Literal('strict'),
+      ])),
+      provider: Type.Optional(Type.String()),
+      providers: Type.Optional(Type.Array(Type.String())),
+      noCache: Type.Optional(Type.Boolean()),
+    }),
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
+      try {
+        const result = await searchWeb({
+          stateRoot,
+          query: safeString(params && params.query || ''),
+          limit: params && params.limit != null ? Number(params.limit) : undefined,
+          freshness: safeString(params && params.freshness || ''),
+          safe: safeString(params && params.safe || ''),
+          provider: safeString(params && params.provider || ''),
+          providers: Array.isArray(params && params.providers) ? params.providers.map((item: any) => safeString(item)) : undefined,
+          noCache: Boolean(params && params.noCache),
+        })
+        return toolResultFromText(JSON.stringify(result, null, 2), result, !result.ok)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  const listModelsTool = {
+    name: 'list_models',
+    label: 'List Models',
+    description: 'List available models in the Rin runtime. Use this to verify model IDs before calling switch_model.',
+    promptSnippet: 'List configured models before switching models.',
+    promptGuidelines: [
+      'Call list_models before switch_model if available model IDs are unknown.',
+    ],
+    parameters: Type.Object({}),
+    execute: async (_toolCallId: string, _params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
+      try {
+        const models = listAvailableModels(ctx)
+        return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  const loadSkillTool = {
+    name: 'load_skill',
+    label: 'Load Skill',
+    description: 'Load a skill by name from the runtime registry, including hidden skills under skills/.hidden/. Use this instead of reading SKILL.md files manually.',
+    promptSnippet: 'Load a skill by name when you need its full instructions.',
+    promptGuidelines: [
+      'Use load_skill instead of reading SKILL.md files manually.',
+      'Call it with the exact skill name from available_skills or from runtime hints.',
+      'Hidden skills under skills/.hidden/ are available through this tool even though they are not listed in available_skills.',
+    ],
+    parameters: Type.Object({
+      name: Type.String({ description: 'Skill name to load.' }),
+      includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references from the skill body. Default: true.' })),
+    }),
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
+      try {
+        const requestedName = safeString(params && params.name).trim()
+        if (!requestedName) throw new Error('missing_skill_name')
+        const skill = listRuntimeSkills().find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
+        if (!skill) throw new Error(`skill_not_found:${requestedName}`)
+        let content = ''
+        try { content = fs.readFileSync(skill.filePath, 'utf8') } catch {}
+        if (!content.trim()) throw new Error(`skill_read_failed:${requestedName}`)
+        const body = stripSkillFrontmatterLocal(content)
+        const includeReferences = params && params.includeReferences !== false
+        const references = includeReferences ? collectSkillReferences(body, skill.baseDir) : []
+        const result = {
+          name: skill.name,
+          description: skill.description,
+          hidden: Boolean(skill.disableModelInvocation),
+          content,
+          body,
+          baseDir: skill.baseDir,
+          filePath: skill.filePath,
+          references,
+        }
+        return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  return [brainTool, koishiTool, scheduleTool, webSearchTool, listModelsTool, loadSkillTool]
 }
 
 function createRinBuiltinExtensionFactory({
@@ -1307,6 +1546,107 @@ function createRinBuiltinExtensionFactory({
 }) {
   return (pi: any) => {
     try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
+
+    function normalizeToolThinkingLevel(value: any): string | undefined {
+      const next = safeString(value).trim().toLowerCase()
+      if (!next) return undefined
+      if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(next)) return undefined
+      return next
+    }
+
+    function resolveSwitchModel(ctx: any, params: any) {
+      const registry = ctx && ctx.modelRegistry
+      const requestedProvider = safeString(params && params.provider).trim()
+      const requestedModel = safeString(params && params.model).trim()
+      if (!registry) throw new Error('missing_model_registry')
+      if (!requestedModel) throw new Error('missing_model')
+
+      const allModels = Array.isArray(typeof registry.getAll === 'function' ? registry.getAll() : [])
+        ? registry.getAll()
+        : []
+      const availableModels = Array.isArray(typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
+        ? registry.getAvailable()
+        : []
+
+      if (requestedProvider) {
+        const found = typeof registry.find === 'function' ? registry.find(requestedProvider, requestedModel) : undefined
+        if (!found) throw new Error(`model_not_found:${requestedProvider}/${requestedModel}`)
+        const available = availableModels.find((entry: any) => safeString(entry && entry.provider).trim() === requestedProvider && safeString(entry && entry.id).trim() === requestedModel)
+        if (!available) throw new Error(`model_not_available:${requestedProvider}/${requestedModel}`)
+        return available
+      }
+
+      const availableMatches = availableModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
+      if (availableMatches.length === 1) return availableMatches[0]
+      if (availableMatches.length > 1) {
+        const providers = availableMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
+        throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+      }
+
+      const allMatches = allModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
+      if (allMatches.length === 1) {
+        const only = allMatches[0]
+        throw new Error(`model_not_available:${safeString(only && only.provider).trim()}/${requestedModel}`)
+      }
+      if (allMatches.length > 1) {
+        const providers = allMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
+        throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+      }
+
+      throw new Error(`model_not_found:${requestedModel}`)
+    }
+
+    pi.registerTool({
+      name: 'switch_model',
+      label: 'Switch Model',
+      description: 'Switch the current session to another configured model. Use list_models to find available IDs.',
+      promptSnippet: 'Switch the active session model.',
+      promptGuidelines: [
+        'Use when a different model is better suited for the remaining conversation.',
+        'Call list_models if the target ID is unknown.',
+        'This updates the session model directly rather than invoking a sub-agent.',
+      ],
+      parameters: Type.Object({
+        provider: Type.Optional(Type.String({ description: 'Provider ID, such as anthropic or openai. Optional if the model ID is unique among available models.' })),
+        model: Type.String({ description: 'Target model ID. Use list_models first if unsure.' }),
+        thinking: Type.Optional(Type.Union([
+          Type.Literal('off'),
+          Type.Literal('minimal'),
+          Type.Literal('low'),
+          Type.Literal('medium'),
+          Type.Literal('high'),
+          Type.Literal('xhigh'),
+        ])),
+      }),
+      async execute(_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) {
+        try {
+          const targetModel = resolveSwitchModel(ctx, params)
+          const previousProvider = safeString(ctx && ctx.model && ctx.model.provider).trim()
+          const previousModel = safeString(ctx && ctx.model && ctx.model.id).trim()
+          const previousThinking = typeof pi.getThinkingLevel === 'function' ? safeString(pi.getThinkingLevel()).trim() : ''
+          const success = await pi.setModel(targetModel)
+          if (!success) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
+
+          const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
+          if (requestedThinking) pi.setThinkingLevel(requestedThinking as any)
+          const nextThinking = typeof pi.getThinkingLevel === 'function' ? safeString(pi.getThinkingLevel()).trim() : requestedThinking || previousThinking
+
+          return toolResultFromText(
+            `Model switched to ${safeString(targetModel.provider)}/${safeString(targetModel.id)}.`,
+            {
+              previous: previousProvider || previousModel ? { provider: previousProvider, model: previousModel, thinking: previousThinking || undefined } : undefined,
+              current: {
+                provider: safeString(targetModel.provider),
+                model: safeString(targetModel.id),
+                thinking: nextThinking || undefined,
+              },
+            },
+          )
+        } catch (e: any) {
+          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+        }
+      },
+    })
 
     pi.on('message_start', async (event: any) => {
       const message = event && event.message
@@ -1423,7 +1763,7 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 let piSdkModulePromise: Promise<PiSdkModule> | null = null
 
 const PI_DEFAULT_OPENING = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.'
-const RIN_OPENING = "You are Rin, the user's general intelligent assistant. Answer all of the user's questions and fulfill all of the user's requests."
+const RIN_OPENING = "You are Rin, the user's general intelligent assistant. Answer all of the user's questions and fulfill all of the user's requests yourself rather than telling the user to do the work. Unless you have confirmed that a task is genuinely beyond your capabilities, complete it directly instead of instructing the user to handle it themselves. Only decline a task when it is truly beyond your capabilities."
 
 function safeString(value: any): string {
   if (value == null) return ''
@@ -1587,6 +1927,8 @@ function restrictPackageManagerToRuntimeRoot(packageManager: any, runtimeRoot: s
   }
 }
 
+const HIDDEN_SKILL_DIR = '.hidden'
+
 function escapeXml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -1596,13 +1938,35 @@ function escapeXml(text: string): string {
     .replace(/'/g, '&apos;')
 }
 
+function isHiddenSkillPath(filePath: any): boolean {
+  const raw = safeString(filePath).trim()
+  if (!raw) return false
+  return path.resolve(raw).split(path.sep).filter(Boolean).includes(HIDDEN_SKILL_DIR)
+}
+
+function normalizeSkillRecord(skill: any): any {
+  if (!skill || typeof skill !== 'object') return null
+  const filePath = safeString(skill && skill.filePath).trim()
+  const baseDir = safeString(skill && skill.baseDir).trim() || (filePath ? path.dirname(filePath) : '')
+  const hidden = Boolean(skill && skill.disableModelInvocation) || isHiddenSkillPath(filePath) || isHiddenSkillPath(baseDir)
+  return {
+    ...skill,
+    name: safeString(skill && skill.name).trim(),
+    description: safeString(skill && skill.description).trim(),
+    filePath,
+    baseDir,
+    disableModelInvocation: hidden,
+  }
+}
+
 function formatSkillsForPrompt(skills: Array<any>): string {
-  const visibleSkills = (Array.isArray(skills) ? skills : []).filter(Boolean)
+  const visibleSkills = (Array.isArray(skills) ? skills : [])
+    .map((skill) => normalizeSkillRecord(skill))
+    .filter((skill) => skill && !skill.disableModelInvocation)
   if (!visibleSkills.length) return ''
   const lines = [
-    'The following skills provide specialized instructions for specific tasks.',
-    "Use the read tool to load a skill's file when the task matches its description.",
-    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+    'Available skills provide specialized instructions for specific tasks.',
+    'Invoke `load_skill` by name when a task matches a skill\'s description.',
     '',
     '<available_skills>',
   ]
@@ -1610,14 +1974,13 @@ function formatSkillsForPrompt(skills: Array<any>): string {
     lines.push('  <skill>')
     lines.push(`    <name>${escapeXml(safeString(skill && skill.name))}</name>`)
     lines.push(`    <description>${escapeXml(safeString(skill && skill.description))}</description>`)
-    lines.push(`    <location>${escapeXml(safeString(skill && skill.filePath))}</location>`)
     lines.push('  </skill>')
   }
   lines.push('</available_skills>')
   return lines.join('\n')
 }
 
-function parseSkillFrontmatter(filePath: string): { name: string, description: string } | null {
+function parseSkillFrontmatter(filePath: string): { name: string, description: string, disableModelInvocation: boolean } | null {
   const text = readTextIfExists(filePath)
   if (!text.startsWith('---')) return null
   const end = text.indexOf('\n---', 3)
@@ -1625,6 +1988,7 @@ function parseSkillFrontmatter(filePath: string): { name: string, description: s
   const frontmatter = text.slice(3, end).trim()
   let name = ''
   let description = ''
+  let disableModelInvocation = false
   for (const line of frontmatter.split(/\r?\n/)) {
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
     if (!match) continue
@@ -1633,39 +1997,73 @@ function parseSkillFrontmatter(filePath: string): { name: string, description: s
     value = value.replace(/^['"]|['"]$/g, '')
     if (key === 'name') name = value
     if (key === 'description') description = value
+    if (key === 'disable-model-invocation') disableModelInvocation = value.toLowerCase() === 'true'
   }
   if (!name) return null
-  return { name, description }
+  return { name, description, disableModelInvocation }
+}
+
+function stripSkillFrontmatter(text: string): string {
+  if (!text.startsWith('---')) return text.trim()
+  const end = text.indexOf('\n---', 3)
+  if (end < 0) return text.trim()
+  return text.slice(end + 4).trim()
 }
 
 function collectManualSkills(skillDirs: string[]): Array<any> {
   const seen = new Set<string>()
   const out: Array<any> = []
-  for (const dir of skillDirs) {
-    if (!dir || !fs.existsSync(dir)) continue
+
+  const pushSkill = (skill: any) => {
+    const normalized = normalizeSkillRecord(skill)
+    const skillName = safeString(normalized && normalized.name).trim()
+    if (!normalized || !skillName || INTERNALIZED_SKILL_NAMES.has(skillName) || seen.has(skillName)) return
+    seen.add(skillName)
+    out.push(normalized)
+  }
+
+  const addSkillFile = (filePath: string, baseDir: string, fallbackName: string) => {
+    const parsed = parseSkillFrontmatter(filePath)
+    pushSkill({
+      name: safeString(parsed && parsed.name || fallbackName).trim(),
+      description: safeString(parsed && parsed.description).trim(),
+      filePath,
+      baseDir,
+      source: 'manual',
+      disableModelInvocation: Boolean(parsed && parsed.disableModelInvocation),
+    })
+  }
+
+  const visitDir = (dir: string, rootDir: string) => {
+    if (!dir || !fs.existsSync(dir)) return
+    const skillFile = path.join(dir, 'SKILL.md')
+    try {
+      if (fs.existsSync(skillFile) && fs.statSync(skillFile).isFile()) {
+        addSkillFile(skillFile, dir, path.basename(dir))
+        return
+      }
+    } catch {}
+
     let names: string[] = []
     try { names = fs.readdirSync(dir) } catch {}
     for (const name of names.sort()) {
-      if (!name || name.startsWith('.')) continue
-      const baseDir = path.join(dir, name)
-      const filePath = path.join(baseDir, 'SKILL.md')
-      try {
-        if (!fs.statSync(baseDir).isDirectory() || !fs.existsSync(filePath)) continue
-      } catch {
+      if (!name || name === '.' || name === '..') continue
+      if (name.startsWith('.') && name !== HIDDEN_SKILL_DIR) continue
+      const entryPath = path.join(dir, name)
+      let stat: fs.Stats | null = null
+      try { stat = fs.statSync(entryPath) } catch {}
+      if (!stat) continue
+      if (stat.isDirectory()) {
+        visitDir(entryPath, rootDir)
         continue
       }
-      const parsed = parseSkillFrontmatter(filePath)
-      const skillName = safeString(parsed && parsed.name || name).trim()
-      if (!skillName || INTERNALIZED_SKILL_NAMES.has(skillName) || seen.has(skillName)) continue
-      seen.add(skillName)
-      out.push({
-        name: skillName,
-        description: safeString(parsed && parsed.description).trim(),
-        filePath,
-        baseDir,
-      })
+      if (path.resolve(dir) !== path.resolve(rootDir)) continue
+      if (!stat.isFile() || path.extname(name).toLowerCase() !== '.md' || name === 'SKILL.md') continue
+      addSkillFile(entryPath, dir, path.basename(name, '.md'))
     }
   }
+
+  for (const dir of skillDirs) visitDir(path.resolve(dir), path.resolve(dir))
   return out
 }
 
@@ -1889,16 +2287,18 @@ async function createRinPiSession({
       const seen = new Set<string>()
       const mergedSkills: Array<any> = []
       for (const skill of filterRuntimeResources(current && current.skills, (entry: any) => entry && entry.filePath)) {
-        const name = safeString(skill && skill.name).trim()
-        if (!name || INTERNALIZED_SKILL_NAMES.has(name) || seen.has(name)) continue
+        const normalized = normalizeSkillRecord(skill)
+        const name = safeString(normalized && normalized.name).trim()
+        if (!normalized || !name || INTERNALIZED_SKILL_NAMES.has(name) || seen.has(name)) continue
         seen.add(name)
-        mergedSkills.push(skill)
+        mergedSkills.push(normalized)
       }
       for (const skill of manualSkills) {
-        const name = safeString(skill && skill.name).trim()
-        if (!name || seen.has(name)) continue
+        const normalized = normalizeSkillRecord(skill)
+        const name = safeString(normalized && normalized.name).trim()
+        if (!normalized || !name || seen.has(name)) continue
         seen.add(name)
-        mergedSkills.push(skill)
+        mergedSkills.push(normalized)
       }
       return {
         skills: mergedSkills,
@@ -1949,7 +2349,7 @@ async function createRinPiSession({
     model: resolvedModel,
     thinkingLevel: normalizeThinkingLevel(thinking),
     tools: pi.createCodingTools(path.resolve(sessionCwd)),
-    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey }),
+    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, pi, agentDir, authStorage, modelRegistry, resourceLoader }),
   })
 
   if (!created || !created.session) {

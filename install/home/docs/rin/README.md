@@ -70,7 +70,9 @@ Operation:
 ## 7. Tool Surface
 
 Core Tools: `read`, `bash`, `edit`, `write`.
-Rin Tools: `rin_brain`, `rin_koishi`, `rin_schedule`.
+Rin Tools: `rin_brain`, `rin_koishi`, `rin_schedule`, `web_search`.
+Web search runtime config lives under `~/.rin/data/web-search/config.json`.
+Default web search uses the built-in vanilla SearxNG sidecar against Google Web. Users can point SearxNG at another base URL/API key or add their own Serper API in that config file.
 
 Constraints:
 - Follow tool schemas for parameters.

@@ -4,7 +4,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 
 import { Loader, Logger, h } from 'koishi'
-import { queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { loadPiSdkModule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { ensureSearxngSidecar, stopSearxngSidecar } from './web-search'
 
 const yaml = require('js-yaml') as {
   dump(value: any, options?: any): string
@@ -902,6 +903,32 @@ const rinBridge = (() => {
     const nextSessionFile = safeString(value || '').trim()
     ;(state as any).piSessionFile = nextSessionFile
     return nextSessionFile
+  }
+
+  async function readPiSessionContextSummary(sessionFile: any) {
+    const filePath = safeString(sessionFile || '').trim()
+    if (!filePath || !fs.existsSync(filePath)) return null
+    try {
+      const pi = await loadPiSdkModule()
+      const sessionManager = pi && pi.SessionManager && typeof pi.SessionManager.open === 'function'
+        ? pi.SessionManager.open(filePath)
+        : null
+      if (!sessionManager || typeof sessionManager.buildSessionContext !== 'function') return null
+      const context = sessionManager.buildSessionContext()
+      const model = context && context.model && typeof context.model === 'object' ? context.model : null
+      const thinkingLevel = safeString(context && context.thinkingLevel || '').trim()
+      const provider = safeString(model && model.provider || '').trim()
+      const modelId = safeString(model && model.modelId || '').trim()
+      if (!provider && !modelId && !thinkingLevel) return null
+      return {
+        provider,
+        modelId,
+        thinkingLevel,
+      }
+    } catch (e) {
+      logger.warn(`status read pi session context failed file=${filePath} err=${safeString(e && e.message ? e.message : e)}`)
+      return null
+    }
   }
 
   function normalizeRuntimeKind(_value: any) {
@@ -3388,12 +3415,21 @@ const rinBridge = (() => {
 	      const inboundPreview = lastInboundText
 	        ? decodeEscapedControlsIfLikely(lastInboundText).replace(/\s+/g, ' ').slice(0, 120)
 	        : ''
-        const piSession = readPiSessionFile(state)
+      const piSession = readPiSessionFile(state)
+      const piSessionContext = await readPiSessionContextSummary(piSession)
+      const currentModelLine = piSessionContext && (piSessionContext.provider || piSessionContext.modelId)
+        ? `${piSessionContext.provider || '(unknown provider)'}/${piSessionContext.modelId || '(unknown model)'}`
+        : 'n/a'
+      const currentThinkingLine = piSessionContext && piSessionContext.thinkingLevel
+        ? piSessionContext.thinkingLevel
+        : 'n/a'
 
       const parts = [
         `Last inbound: ${formatStatusTime(lastInboundAt)}${lastInboundSeq ? ` (seq ${lastInboundSeq})` : ''}`,
         `Agent: ${statusLine}`,
         'Runtime: pi',
+        `Current model: ${currentModelLine}`,
+        `Current thinking: ${currentThinkingLine}`,
         `Last result after that inbound: ${resultLine}`,
       ]
       if (piSession) parts.push(`Pi session: ${piSession}`)
@@ -5785,6 +5821,12 @@ async function gracefulShutdown(signal: string) {
     const remaining = await waitForPidsExit(pids, 15_000)
     if (remaining.length) logger.warn(`shutdown: agent still alive after wait pids=${JSON.stringify(remaining)}`)
 
+    try {
+      await stopSearxngSidecar(homeRoot, { logger })
+    } catch (e: any) {
+      logger.warn(`shutdown: searxng stop failed: ${(e && e.message) ? e.message : String(e)}`)
+    }
+
     let shutdownAnnounced = false
     const restartChatKey = topSafeString(restartIntent && restartIntent.chatKey || '').trim()
     if (restartChatKey) {
@@ -6240,6 +6282,16 @@ async function main() {
 
   await app.start()
   installTelegramPollingSelfHeal(app, dataDir)
+
+  try {
+    const resp = await ensureSearxngSidecar(homeRoot, { logger })
+    if (resp && resp.ok) logger.info(`web-search: searxng ready baseUrl=${topSafeString(resp.baseUrl || '')}`)
+    else if (resp && resp.skipped) logger.info(`web-search: searxng skipped reason=${topSafeString(resp.skipped || '')}`)
+    else if (resp && resp.error) logger.warn(`web-search: searxng unavailable error=${topSafeString(resp.error || '')}`)
+  } catch (e: any) {
+    logger.warn(`web-search: searxng startup failed: ${(e && e.message) ? e.message : String(e)}`)
+  }
+
   const bots = app.bots.map((b: any) => ({ platform: b.platform, selfId: b.selfId, status: b.status }))
   logger.info(`started bots=${JSON.stringify(bots)}`)
 

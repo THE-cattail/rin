@@ -35,10 +35,11 @@ Rin loads skills from:
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
 
 Discovery rules:
-- Direct `.md` files in the skills directory root
-- Recursive `SKILL.md` files under subdirectories
+- Top-level `.md` files in the skills directory
+- `SKILL.md` files in subdirectories (searched recursively)
+- Skills in `skills/.hidden/` are discovered but omitted from `available_skills` by default
 
-Disable discovery with `--no-skills` (explicit `--skill` paths still load).
+Use `--no-skills` to disable discovery; explicit `--skill` paths remain active.
 
 ### Using Skills from Other Harnesses
 
@@ -63,12 +64,13 @@ For project-level Claude Code skills, add to `.rin/settings.json`:
 
 ## How Skills Work
 
-1. At startup, rin scans skill locations and extracts names and descriptions
-2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
-3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
-4. The agent follows the instructions, using relative paths to reference scripts and assets
+1. Rin scans skill locations at startup to extract names and descriptions.
+2. Public skills are included in the system prompt (XML format) per the [specification](https://agentskills.io/integrate-skills).
+3. Skills in `skills/.hidden/` are omitted from `available_skills` by default but callable via `/skill:name` or `load_skill`.
+4. When a task matches, the agent invokes `load_skill` to retrieve full instructions.
+5. The agent executes instructions, resolving relative paths for scripts and assets.
 
-This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
+This provides progressive disclosure: public descriptions stay in context, while full instructions and hidden skills load on-demand.
 
 ## Skill Commands
 
@@ -79,7 +81,7 @@ Skills register as `/skill:name` commands:
 /skill:pdf-tools extract      # Load skill with arguments
 ```
 
-Arguments after the command are appended to the skill content as `User: <args>`.
+Arguments after the command are appended to the skill content as `User: <args>`. This works for hidden skills as well.
 
 Toggle skill commands via `/settings` in interactive mode or in `settings.json`:
 
@@ -146,7 +148,7 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
-| `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. |
+| `disable-model-invocation` | No | If `true`, the skill is hidden from the prompt. Access remains via `/skill:name` or `load_skill`. Paths matching `skills/.hidden/**` are hidden by default. |
 
 ### Name Rules
 
