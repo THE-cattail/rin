@@ -1,87 +1,30 @@
 # rin
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-`rin` 是一个面向聊天连接式 Agent 工作流的本地优先运行时。
-
-## 你会得到什么
-
-- 用于交互使用的 `rin`
-- 用于重启守护进程的 `rin restart`
-- 用于从仓库版本更新安装的 `rin update`
-- 用于卸载运行时的 `rin uninstall`
-- 存放在 `~/.rin` 下的运行时状态
-
-Rin 运行在安装后的 `~/.rin` 中，而不是源码目录里。
+面向聊天连接代理工作流的本地优先运行环境。
 
 ## 环境要求
 
-- Node.js 22+
-- npm
-- git
-- 当前安装流程支持的类 Linux 环境
+- Node.js >= 22
+- npm, git, mktemp
+- 兼容 Linux 的环境
 
 ## 安装
 
-当前用户安装：
+通过 `install.sh` 进行安装。注意：`rin install` 不是公开命令。
 
 ```bash
+# 标准安装
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# 安装特定版本 (ref)
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
 ```
 
-指定版本安装：
+启动器将安装至 `~/.local/bin/rin`。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
-  RIN_REF=main sh
-```
-
-为另一个现有用户安装：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
-  sh -s -- --user existing-user --yes
-```
-
-## 日常命令
-
-启动交互模式：
-
-```bash
-rin
-```
-
-重启守护进程：
-
-```bash
-rin restart
-```
-
-更新已安装运行时：
-
-```bash
-rin update
-```
-
-从指定仓库或版本更新：
-
-```bash
-rin update --repo https://github.com/THE-cattail/rin.git --ref main
-```
-
-卸载程序但保留 `~/.rin`：
-
-```bash
-rin uninstall --keep-state --yes
-```
-
-彻底删除：
-
-```bash
-rin uninstall --purge --yes
-```
-
-## 从源码开发
+### 源码安装
 
 ```bash
 git clone https://github.com/THE-cattail/rin.git
@@ -91,41 +34,18 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-运行校验：
+## 基本用法
 
-```bash
-npm run check
-```
+- **启动**: `rin` (进入交互模式)
+- **重启**: `rin restart` (重启后台守护进程)
+- **更新**: `rin update` 
+- **自定义更新**: `rin update --repo https://github.com/THE-cattail/rin.git --ref main` 
 
-## 仓库结构
+## 卸载
 
-```text
-src/                 运行时代码
-install.sh           引导安装脚本
-install/home/        安装时复制进 ~/.rin 的内置文件
-test/                自动化测试
-```
+- **保留数据**: `rin uninstall --keep-state --yes` 
+- **彻底清除**: `rin uninstall --purge --yes` 
 
-## 运行时结构
+## 数据存储
 
-```text
-~/.rin/
-  AGENTS.md
-  app/current/
-  auth.json
-  data/
-  docs/
-  locale/
-  settings.json
-  skills/
-```
-
-安装后的启动入口：
-
-```text
-~/.local/bin/rin
-```
-
-## 许可
-
-[MIT](LICENSE)
+运行数据和状态存储在 `~/.rin` 目录下。

@@ -1,87 +1,30 @@
 # rin
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-`rin` は、チャット接続型のエージェント運用向けローカルファーストランタイムです。
+チャット接続されたエージェントワークフローのためのローカルファーストなランタイム。
 
-## できること
+## 必要条件
 
-- 対話実行の `rin`
-- デーモン再起動の `rin restart`
-- リポジトリ ref からの更新用 `rin update`
-- ランタイム削除用 `rin uninstall`
-- `~/.rin` に保存されるランタイム状態
-
-Rin はソースチェックアウトではなく、インストール後の `~/.rin` から動作します。
-
-## 必要環境
-
-- Node.js 22+
-- npm
-- git
-- 現在のインストーラーフローに対応した Linux 系環境
+- Node.js >= 22
+- npm, git, mktemp
+- Linux 互換環境
 
 ## インストール
 
-現在のユーザーにインストール:
+`install.sh` を使用してインストールします。注意：`rin install` は公開コマンドではありません。
 
 ```bash
+# 標準インストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# 特定の ref を指定してインストール
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
 ```
 
-特定 ref を使う場合:
+ランチャーは `~/.local/bin/rin` にインストールされます。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
-  RIN_REF=main sh
-```
-
-既存ユーザー向けにインストール:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
-  sh -s -- --user existing-user --yes
-```
-
-## 日常コマンド
-
-対話モード開始:
-
-```bash
-rin
-```
-
-デーモン再起動:
-
-```bash
-rin restart
-```
-
-インストール済みランタイム更新:
-
-```bash
-rin update
-```
-
-リポジトリや ref を指定して更新:
-
-```bash
-rin update --repo https://github.com/THE-cattail/rin.git --ref main
-```
-
-`~/.rin` を残してアプリだけ削除:
-
-```bash
-rin uninstall --keep-state --yes
-```
-
-完全削除:
-
-```bash
-rin uninstall --purge --yes
-```
-
-## ソースから開発する
+### ソースからのインストール
 
 ```bash
 git clone https://github.com/THE-cattail/rin.git
@@ -91,41 +34,18 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-検証を実行:
+## 使い方
 
-```bash
-npm run check
-```
+- **起動**: `rin` (対話モードを開始)
+- **再起動**: `rin restart` (バックグラウンドデーモンを再起動)
+- **アップデート**: `rin update` 
+- **カスタムアップデート**: `rin update --repo https://github.com/THE-cattail/rin.git --ref main` 
 
-## リポジトリ構成
+## アンインストール
 
-```text
-src/                 ランタイム実装
-install.sh           ブートストラップインストーラー
-install/home/        install 時に ~/.rin へコピーされる標準ファイル
-test/                自動テスト
-```
+- **データを残す**: `rin uninstall --keep-state --yes` 
+- **完全に削除**: `rin uninstall --purge --yes` 
 
-## ランタイム構成
+## データ保存先
 
-```text
-~/.rin/
-  AGENTS.md
-  app/current/
-  auth.json
-  data/
-  docs/
-  locale/
-  settings.json
-  skills/
-```
-
-インストール後のランチャー:
-
-```text
-~/.local/bin/rin
-```
-
-## ライセンス
-
-[MIT](LICENSE)
+ランタイムのデータや状態は `~/.rin` に保存されます。
