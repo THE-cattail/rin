@@ -739,6 +739,140 @@ async function getChatHistoryMessage({
   return resp
 }
 
+type TranscriptEntry = {
+  ts: number
+  iso: string
+  role: string
+  text: string
+  source: 'session' | 'chat'
+  filePath: string
+  messageId?: string
+}
+
+function extractTranscriptText(message: any): string {
+  if (!message) return ''
+  const content = Array.isArray(message.content) ? message.content : []
+  if (typeof message.content === 'string') return safeString(message.content).trim()
+  const out: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    if (block.type === 'text') out.push(safeString(block.text))
+  }
+  return out.join('\n').trim()
+}
+
+function readSessionTranscriptFile(filePath: string): TranscriptEntry[] {
+  if (!filePath || !fs.existsSync(filePath)) return []
+  const text = fs.readFileSync(filePath, 'utf8')
+  const rows: TranscriptEntry[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (safeString(parsed && parsed.type) !== 'message') continue
+      const message = parsed && parsed.message
+      const role = safeString(message && message.role)
+      if (!['user', 'assistant', 'toolResult'].includes(role)) continue
+      const body = extractTranscriptText(message)
+      if (!body) continue
+      const iso = safeString(parsed && parsed.timestamp) || new Date(Number(message && message.timestamp || Date.now())).toISOString()
+      const ts = Date.parse(iso) || Number(message && message.timestamp || 0) || Date.now()
+      rows.push({ ts, iso: new Date(ts).toISOString(), role, text: body, source: 'session', filePath })
+    } catch {}
+  }
+  rows.sort((a, b) => a.ts - b.ts)
+  return rows
+}
+
+function findLatestSessionFile(sessionDir: string): string {
+  const dir = safeString(sessionDir).trim()
+  if (!dir || !fs.existsSync(dir)) return ''
+  const files = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.jsonl'))
+    .sort()
+  return files.length ? path.join(dir, files[files.length - 1]) : ''
+}
+
+function readChatTranscriptFiles(stateRoot: string, chatKey: string): TranscriptEntry[] {
+  const key = safeString(chatKey).trim()
+  const match = key.match(/^([^:]+):(.+)$/)
+  if (!match) return []
+  const [, platform, chatId] = match
+  const logsDir = path.join(stateRoot, 'data', 'chats', platform, chatId, 'logs')
+  if (!fs.existsSync(logsDir)) return []
+  const files = fs.readdirSync(logsDir)
+    .filter((name) => name.endsWith('.jsonl'))
+    .sort()
+  const rows: TranscriptEntry[] = []
+  for (const name of files) {
+    const filePath = path.join(logsDir, name)
+    const text = fs.readFileSync(filePath, 'utf8')
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const parsed = JSON.parse(trimmed)
+        const body = safeString(parsed && parsed.text).trim()
+        if (!body) continue
+        const senderTrust = safeString(parsed && parsed.sender && parsed.sender.trust)
+        const role = senderTrust === 'BOT' ? 'assistant' : 'user'
+        const ts = Number(parsed && parsed.ts || 0) * 1000
+        const iso = ts > 0 ? new Date(ts).toISOString() : new Date().toISOString()
+        rows.push({ ts: ts || Date.now(), iso, role, text: body, source: 'chat', filePath, messageId: safeString(parsed && parsed.messageId) || undefined })
+      } catch {}
+    }
+  }
+  rows.sort((a, b) => a.ts - b.ts)
+  return rows
+}
+
+function transcriptSearchScore(query: string, entry: TranscriptEntry): number {
+  const needle = safeString(query).trim().toLowerCase()
+  if (!needle) return 0
+  const hay = `${entry.role} ${entry.text}`.toLowerCase()
+  if (hay.includes(needle)) return 10 + (entry.ts / 1e15)
+  const parts = needle.split(/\s+/).filter(Boolean)
+  if (!parts.length) return 0
+  let hits = 0
+  for (const part of parts) {
+    if (hay.includes(part)) hits += 1
+  }
+  if (!hits) return 0
+  return hits + (entry.ts / 1e15)
+}
+
+function formatTranscriptEntries(rows: TranscriptEntry[]): string {
+  if (!rows.length) return 'No transcript entries found.'
+  return rows.map((row) => `[${row.iso}] ${row.role}: ${row.text}`).join('\n\n')
+}
+
+function readConversationTranscript({
+  stateRoot,
+  currentChatKey = '',
+  sessionDir = '',
+  sessionFile = '',
+  source = 'auto',
+}: {
+  stateRoot: string
+  currentChatKey?: string
+  sessionDir?: string
+  sessionFile?: string
+  source?: string
+}): TranscriptEntry[] {
+  const mode = safeString(source).trim() || 'auto'
+  const rows: TranscriptEntry[] = []
+  if (mode === 'auto' || mode === 'session') {
+    const effectiveSessionFile = safeString(sessionFile).trim() || findLatestSessionFile(sessionDir)
+    if (effectiveSessionFile) rows.push(...readSessionTranscriptFile(effectiveSessionFile))
+  }
+  if ((mode === 'auto' || mode === 'chat') && safeString(currentChatKey).trim()) {
+    rows.push(...readChatTranscriptFiles(stateRoot, currentChatKey))
+  }
+  rows.sort((a, b) => a.ts - b.ts)
+  return rows
+}
+
 function identityPathForState(stateRoot: string) {
   return path.join(stateRoot, 'data', 'identity.json')
 }
@@ -1128,6 +1262,8 @@ function createRinBuiltinTools({
   repoRoot,
   stateRoot,
   currentChatKey = '',
+  sessionDir = '',
+  sessionFile = '',
   pi,
   agentDir,
   authStorage,
@@ -1137,6 +1273,8 @@ function createRinBuiltinTools({
   repoRoot: string
   stateRoot: string
   currentChatKey?: string
+  sessionDir?: string
+  sessionFile?: string
   pi: any
   agentDir: string
   authStorage: any
@@ -1260,8 +1398,8 @@ function createRinBuiltinTools({
   const brainTool = {
     name: 'rin_brain',
     label: 'Rin Brain',
-    description: 'Search or update Rin memory, conversation history, and indexed knowledge.',
-    promptSnippet: 'Search or update Rin memory, conversation history, and indexed knowledge.',
+    description: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge. Do not use this for verbatim transcript reads.',
+    promptSnippet: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge.',
     promptGuidelines: [],
     parameters: Type.Object({
       action: Type.Union([
@@ -1311,8 +1449,8 @@ function createRinBuiltinTools({
   const koishiTool = {
     name: 'rin_koishi',
     label: 'Rin Koishi',
-    description: 'Send bridge messages, inspect chat history, and manage trusted platform identities.',
-    promptSnippet: 'Send bridge messages, inspect chat history, and manage trusted platform identities.',
+    description: 'Send bridge messages, fetch one bridged message by chatKey and messageId, or manage trusted platform identities.',
+    promptSnippet: 'Send bridge messages, fetch one bridged message, or manage trusted platform identities.',
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('send'),
@@ -1380,11 +1518,65 @@ function createRinBuiltinTools({
     },
   }
 
+  const historyTool = {
+    name: 'rin_history',
+    label: 'Rin History',
+    description: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
+    promptSnippet: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal('recent'),
+        Type.Literal('search'),
+      ]),
+      query: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1 })),
+      source: Type.Optional(Type.Union([
+        Type.Literal('auto'),
+        Type.Literal('session'),
+        Type.Literal('chat'),
+      ])),
+    }),
+    execute: async (_toolCallId: string, params: any) => {
+      const action = safeString(params && params.action).trim()
+      const limit = Math.max(1, Number(params && params.limit || 10) || 10)
+      const source = safeString(params && params.source || 'auto').trim() || 'auto'
+      const rows = readConversationTranscript({ stateRoot, currentChatKey, sessionDir, sessionFile, source })
+      if (action === 'recent') {
+        const picked = rows.slice(-limit)
+        return toolResultFromText(formatTranscriptEntries(picked), {
+          action,
+          source,
+          count: picked.length,
+          entries: picked,
+        })
+      }
+      if (action === 'search') {
+        const query = safeString(params && params.query).trim()
+        if (!query) return toolResultFromText('missing_query', {}, true)
+        const picked = rows
+          .map((row) => ({ row, score: transcriptSearchScore(query, row) }))
+          .filter((entry) => entry.score > 0)
+          .sort((a, b) => Number(b.score) - Number(a.score) || b.row.ts - a.row.ts)
+          .slice(0, limit)
+          .map((entry) => entry.row)
+          .sort((a, b) => a.ts - b.ts)
+        return toolResultFromText(formatTranscriptEntries(picked), {
+          action,
+          source,
+          query,
+          count: picked.length,
+          entries: picked,
+        }, picked.length === 0)
+      }
+      return toolResultFromText('unsupported_action', {}, true)
+    },
+  }
+
   const scheduleTool = {
     name: 'rin_schedule',
     label: 'Rin Schedule',
-    description: 'List, create, run, and manage timers or inspect scheduled jobs.',
-    promptSnippet: 'List, create, run, and manage timers or inspect scheduled jobs.',
+    description: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
+    promptSnippet: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
     parameters: Type.Object({
       kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
       action: Type.Union([
@@ -1428,10 +1620,10 @@ function createRinBuiltinTools({
   }
 
   const webSearchTool = {
-    name: 'web_search',
+    name: 'rin_web_search',
     label: 'Web Search',
-    description: 'Search the live web for current public information, official docs, release notes, pricing, or source-backed verification.',
-    promptSnippet: 'Search the live web for current public information, official docs, release notes, pricing, or source-backed verification.',
+    description: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
+    promptSnippet: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
     parameters: Type.Object({
       query: Type.String(),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
@@ -1568,20 +1760,18 @@ function createRinBuiltinTools({
     }
   }
 
-  const runtimeTool = {
-    name: 'rin_runtime',
-    label: 'Rin Runtime',
-    description: 'Inspect runtime resources and switch models. Use this for configured models, skill instructions, and AGENTS.md context files.',
-    promptSnippet: 'Inspect runtime resources and switch models.',
+  const modelTool = {
+    name: 'rin_models',
+    label: 'Rin Models',
+    description: 'List configured models or switch the current session to another available model.',
+    promptSnippet: 'List configured models or switch the current session model.',
     parameters: Type.Object({
       action: Type.Union([
-        Type.Literal('models_list'),
-        Type.Literal('model_switch'),
-        Type.Literal('skill_get'),
-        Type.Literal('context_get'),
+        Type.Literal('list'),
+        Type.Literal('switch'),
       ]),
-      provider: Type.Optional(Type.String({ description: 'Provider ID for model_switch.' })),
-      model: Type.Optional(Type.String({ description: 'Model ID for model_switch.' })),
+      provider: Type.Optional(Type.String({ description: 'Provider ID for switch.' })),
+      model: Type.Optional(Type.String({ description: 'Model ID for switch.' })),
       thinking: Type.Optional(Type.Union([
         Type.Literal('off'),
         Type.Literal('minimal'),
@@ -1590,18 +1780,15 @@ function createRinBuiltinTools({
         Type.Literal('high'),
         Type.Literal('xhigh'),
       ])),
-      name: Type.Optional(Type.String({ description: 'Skill name for skill_get.' })),
-      includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references for skill_get. Default: true.' })),
-      path: Type.Optional(Type.String({ description: 'Target file or directory for context_get. Defaults to the current working directory.' })),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       try {
         const action = safeString(params && params.action).trim()
-        if (action === 'models_list') {
+        if (action === 'list') {
           const models = listAvailableModels(ctx)
           return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
         }
-        if (action === 'model_switch') {
+        if (action === 'switch') {
           const targetModel = resolveSwitchModel(ctx, params)
           const previousProvider = safeString(ctx && ctx.model && ctx.model.provider).trim()
           const previousModel = safeString(ctx && ctx.model && ctx.model.id).trim()
@@ -1625,7 +1812,38 @@ function createRinBuiltinTools({
             },
           )
         }
-        if (action === 'skill_get') {
+        throw new Error(`unsupported_action:${action}`)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  const skillTool = {
+    name: 'rin_skills',
+    label: 'Rin Skills',
+    description: 'List available skills or load one skill body, optionally with resolved local markdown references.',
+    promptSnippet: 'List available skills or load one skill body when needed.',
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal('list'),
+        Type.Literal('get'),
+      ]),
+      name: Type.Optional(Type.String({ description: 'Skill name for get.' })),
+      includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references for get. Default: true.' })),
+    }),
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
+      try {
+        const action = safeString(params && params.action).trim()
+        if (action === 'list') {
+          const skills = listRuntimeSkills().map((skill: any) => ({
+            name: skill.name,
+            description: skill.description,
+            hidden: Boolean(skill.disableModelInvocation),
+          }))
+          return toolResultFromText(JSON.stringify(skills, null, 2), { count: skills.length, skills }, false)
+        }
+        if (action === 'get') {
           const requestedName = safeString(params && params.name).trim()
           if (!requestedName) throw new Error('missing_skill_name')
           const skill = listRuntimeSkills().find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
@@ -1648,10 +1866,6 @@ function createRinBuiltinTools({
           }
           return toolResultFromText(JSON.stringify(result, null, 2), result, false)
         }
-        if (action === 'context_get') {
-          const result = collectContextFiles(safeString(params && params.path))
-          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
-        }
         throw new Error(`unsupported_action:${action}`)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
@@ -1659,7 +1873,25 @@ function createRinBuiltinTools({
     },
   }
 
-  return [brainTool, koishiTool, scheduleTool, webSearchTool, runtimeTool]
+  const contextTool = {
+    name: 'rin_context',
+    label: 'Rin Context',
+    description: 'Inspect the AGENTS.md chain and local .rin resources that apply to a target file or directory.',
+    promptSnippet: 'Inspect the AGENTS.md chain and local .rin resources for a target path.',
+    parameters: Type.Object({
+      path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
+    }),
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
+      try {
+        const result = collectContextFiles(safeString(params && params.path))
+        return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, modelTool, skillTool, contextTool]
 }
 
 function createRinBuiltinExtensionFactory({
@@ -2257,11 +2489,6 @@ function syncRinPiSettings(agentDir: string) {
   fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), 'utf8')
 }
 
-function cleanupLegacyAppendSystem(agentDir: string) {
-  const targetPath = path.join(agentDir, 'APPEND_SYSTEM.md')
-  try { fs.rmSync(targetPath, { force: true }) } catch {}
-}
-
 async function createRinPiSession({
   repoRoot,
   workspaceRoot,
@@ -2284,7 +2511,6 @@ async function createRinPiSession({
   seedPiAgentDirFromStock(agentDir)
   ensureDir(agentDir)
   syncRinPiSettings(agentDir)
-  cleanupLegacyAppendSystem(agentDir)
 
   const authStorage = pi.AuthStorage.create(path.join(agentDir, 'auth.json'))
   const modelRegistry = new pi.ModelRegistry(authStorage, path.join(agentDir, 'models.json'))
@@ -2348,10 +2574,7 @@ async function createRinPiSession({
     extensionFactories: [
       createRinBuiltinExtensionFactory({ repoRoot, stateRoot, brainChatKey }),
     ],
-    appendSystemPromptOverride: (base: any) => {
-      const out = Array.isArray(base) ? base.slice() : []
-      return out.filter((entry: any) => !safeString(entry).includes('synced from RIN CUSTOMIZE.md'))
-    },
+    appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
   })
   restrictPackageManagerToRuntimeRoot(resourceLoader && resourceLoader.packageManager, agentDir)
   await resourceLoader.reload()
@@ -2381,7 +2604,7 @@ async function createRinPiSession({
     model: resolvedModel,
     thinkingLevel: normalizeThinkingLevel(thinking),
     tools: pi.createCodingTools(path.resolve(sessionCwd)),
-    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, pi, agentDir, authStorage, modelRegistry, resourceLoader }),
+    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader }),
   })
 
   if (!created || !created.session) {
@@ -2758,4 +2981,18 @@ export {
   loadPiSdkModule,
   createRinPiSession,
   runPiSdkTurn,
+}
+SdkTurn,
+}
+}
+SdkTurn,
+}
+n,
+}
+SdkTurn,
+}
+}
+SdkTurn,
+}
+Turn,
 }

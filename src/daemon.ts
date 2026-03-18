@@ -5503,39 +5503,11 @@ function normalizeKoishiAdapterConfig(value: any, defaults: Record<string, any> 
   return { ...defaults, ...current }
 }
 
-function migrateLegacyDaemonConfigIntoSettings(settings: RinHomeSettings) {
-  const legacyPath = daemonLegacyConfigPath()
-  if (!fs.existsSync(legacyPath)) return { settings, migrated: false }
-  let legacy: any = null
-  try { legacy = yaml.load(fs.readFileSync(legacyPath, 'utf8')) } catch { legacy = null }
-  if (!legacy || typeof legacy !== 'object') return { settings, migrated: false }
-
-  const next = settings && typeof settings === 'object' ? JSON.parse(JSON.stringify(settings)) : {}
-  if (!next.koishi || typeof next.koishi !== 'object') next.koishi = {}
-
-  const plugins = legacy && typeof legacy.plugins === 'object' ? legacy.plugins : {}
-  const onebot = findPluginConfig(plugins, 'adapter-onebot') as Record<string, any> | null
-  const telegram = findPluginConfig(plugins, 'adapter-telegram') as Record<string, any> | null
-  if (onebot && (!next.koishi.onebot || typeof next.koishi.onebot !== 'object')) next.koishi.onebot = JSON.parse(JSON.stringify(onebot))
-  if (telegram && (!next.koishi.telegram || typeof next.koishi.telegram !== 'object')) next.koishi.telegram = JSON.parse(JSON.stringify(telegram))
-
-  const bridge = legacy && typeof (legacy as any).rinBridge === 'object' ? (legacy as any).rinBridge : {}
-  if (!topSafeString(next.defaultProvider).trim()) next.defaultProvider = configString(bridge.provider || bridge.piProvider, '') || undefined
-  if (!topSafeString(next.defaultModel).trim()) next.defaultModel = configString(bridge.model || bridge.piModel, '') || undefined
-  if (!topSafeString(next.defaultThinkingLevel).trim()) next.defaultThinkingLevel = configString(bridge.thinking || bridge.piThinking, '') || undefined
-
-  writeJsonAtomic(daemonSettingsPath(), next)
-  try { fs.rmSync(legacyPath, { force: true }) } catch {}
-  return { settings: next, migrated: true }
-}
-
 function loadDaemonHomeSettings(): RinHomeSettings {
   const settingsPath = daemonSettingsPath()
   const current = readJson<RinHomeSettings>(settingsPath, {} as RinHomeSettings) || {}
   const next = current && typeof current === 'object' ? JSON.parse(JSON.stringify(current)) : {}
   if (next.enableSkillCommands == null) next.enableSkillCommands = true
-  const migrated = migrateLegacyDaemonConfigIntoSettings(next)
-  if (migrated.migrated) return migrated.settings
   return next
 }
 

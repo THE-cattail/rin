@@ -156,28 +156,36 @@ function sidecarStateFileForState(stateRoot: string): string {
   return path.join(dataRootForState(stateRoot), 'searxng-sidecar.json')
 }
 
-function legacyConfigDirForHome(homeDir = os.homedir()): string {
-  return path.join(path.resolve(homeDir), '.config', 'rin-chan', 'web-search')
+function sidecarConfigDirForState(stateRoot: string): string {
+  return path.join(dataRootForState(stateRoot), 'searxng')
 }
 
-function legacyConfigFileForHome(homeDir = os.homedir()): string {
-  return path.join(legacyConfigDirForHome(homeDir), 'config.json')
+function sidecarSettingsFileForState(stateRoot: string): string {
+  return path.join(sidecarConfigDirForState(stateRoot), 'settings.yml')
 }
 
-function legacyCacheDirForHome(homeDir = os.homedir()): string {
-  return path.join(path.resolve(homeDir), '.cache', 'rin-chan', 'web-search')
-}
-
-function legacyServiceDirForHome(homeDir = os.homedir()): string {
-  return path.join(path.resolve(homeDir), '.config', 'systemd', 'user')
-}
-
-function legacyServiceUnitPathForHome(homeDir = os.homedir()): string {
-  return path.join(legacyServiceDirForHome(homeDir), 'rin-searxng.service')
-}
-
-function legacyServiceWantsPathForHome(homeDir = os.homedir()): string {
-  return path.join(legacyServiceDirForHome(homeDir), 'default.target.wants', 'rin-searxng.service')
+function writeSearxngSettingsForState(stateRoot: string, config: any) {
+  const settingsPath = sidecarSettingsFileForState(stateRoot)
+  ensurePrivateDir(path.dirname(settingsPath))
+  const baseUrl = normalizeBaseUrl(config && config.searxng && config.searxng.baseUrl || managedBaseUrl(config)) || managedBaseUrl(config)
+  const secret = crypto.createHash('sha256').update(`${baseUrl}|${stateRoot}|rin-web-search`).digest('hex').slice(0, 32)
+  const yaml = [
+    'use_default_settings: true',
+    '',
+    'search:',
+    '  formats:',
+    '    - html',
+    '    - json',
+    '',
+    'server:',
+    `  base_url: ${JSON.stringify(`${baseUrl}/`)}`,
+    `  secret_key: ${JSON.stringify(secret)}`,
+    '  limiter: false',
+    '  bind_address: "0.0.0.0"',
+    '',
+  ].join('\n')
+  fs.writeFileSync(settingsPath, yaml, { mode: 0o600 })
+  return settingsPath
 }
 
 function normalizeProviderList(value: unknown, fallback: string[] = []): string[] {
@@ -326,18 +334,6 @@ function shouldManageLocalSearxng(config: any): boolean {
   return !baseUrl || baseUrl === normalizeBaseUrl(managedBaseUrl(config))
 }
 
-function migrateLegacyWebSearchConfigIntoState({ stateRoot, userHome = os.homedir() }: { stateRoot: string, userHome?: string }) {
-  const nextConfigPath = configFileForState(stateRoot)
-  if (fs.existsSync(nextConfigPath)) return { ok: true, migrated: false, configPath: nextConfigPath }
-  const legacyPath = legacyConfigFileForHome(userHome)
-  if (!fs.existsSync(legacyPath)) return { ok: true, migrated: false, configPath: nextConfigPath }
-  const legacy = readJson<any>(legacyPath, null)
-  if (!legacy || typeof legacy !== 'object') return { ok: false, migrated: false, reason: 'legacy_config_invalid', configPath: nextConfigPath }
-  const merged = normalizeConfigShape(legacy)
-  writeJsonAtomic(nextConfigPath, merged)
-  return { ok: true, migrated: true, configPath: nextConfigPath }
-}
-
 function normalizeStateConfigFile(stateRoot: string) {
   const configPath = configFileForState(stateRoot)
   const current = readJson<any>(configPath, null)
@@ -351,7 +347,6 @@ function normalizeStateConfigFile(stateRoot: string) {
 }
 
 function loadConfigResolved(stateRoot: string) {
-  migrateLegacyWebSearchConfigIntoState({ stateRoot })
   const fileConfig = readJson<any>(configFileForState(stateRoot), null)
   return applyEnv(fileConfig || {})
 }
@@ -571,6 +566,7 @@ async function ensureSearxngSidecar(stateRoot: string, options: { logger?: any, 
     const containerName = nonEmpty(config.searxng.containerName) || DEFAULT_CONFIG.searxng.containerName
     const port = toPositiveInt(config.searxng.hostPort, DEFAULT_CONFIG.searxng.hostPort)
     const image = nonEmpty(config.searxng.dockerImage) || DEFAULT_CONFIG.searxng.dockerImage
+    const settingsPath = writeSearxngSettingsForState(stateRoot, config)
 
     if (current && Number(current.pid) > 1 && isPidAlive(current.pid)) {
       try { process.kill(Number(current.pid), 'SIGTERM') } catch {}
@@ -582,6 +578,7 @@ async function ensureSearxngSidecar(stateRoot: string, options: { logger?: any, 
       '--rm',
       '--name', containerName,
       '-p', `127.0.0.1:${port}:8080`,
+      '-v', `${settingsPath}:/etc/searxng/settings.yml:ro`,
       '-e', 'SEARXNG_BIND_ADDRESS=0.0.0.0',
       '-e', `SEARXNG_BASE_URL=${baseUrl}/`,
       '-e', 'SEARXNG_LIMITER=false',
@@ -898,58 +895,9 @@ async function searchWeb({ stateRoot, query, limit = 8, freshness = '', safe = '
   return lastSuccess
 }
 
-function cleanupLegacyExternalWebSearch({
-  stateRoot,
-  userHome = os.homedir(),
-  stopSystemd = false,
-}: {
-  stateRoot: string
-  userHome?: string
-  stopSystemd?: boolean
-}) {
-  const migrated = migrateLegacyWebSearchConfigIntoState({ stateRoot, userHome })
-  const configPath = configFileForState(stateRoot)
-  if (!fs.existsSync(configPath)) writeJsonAtomic(configPath, normalizeConfigShape({}))
-  const normalized = normalizeStateConfigFile(stateRoot)
-  const removed: string[] = []
-
-  if (stopSystemd) {
-    try {
-      const systemctl = findExecutableOnPath('systemctl')
-      if (systemctl) spawnSync(systemctl, ['--user', 'disable', '--now', 'rin-searxng.service'], { stdio: 'ignore', env: process.env })
-    } catch {}
-  }
-
-  try {
-    const docker = findExecutableOnPath('docker')
-    if (docker) spawnSync(docker, ['rm', '-f', DEFAULT_CONFIG.searxng.containerName], { stdio: 'ignore' })
-  } catch {}
-
-  for (const target of [
-    legacyServiceWantsPathForHome(userHome),
-    legacyServiceUnitPathForHome(userHome),
-    legacyConfigDirForHome(userHome),
-    legacyCacheDirForHome(userHome),
-    path.join(path.resolve(stateRoot), 'skills', 'web-search'),
-    path.join(path.resolve(stateRoot), 'data', 'web-search', 'searxng'),
-    sidecarStateFileForState(stateRoot),
-    sidecarLockPathForState(stateRoot),
-  ]) {
-    if (!fs.existsSync(target)) continue
-    try {
-      fs.rmSync(target, { recursive: true, force: true })
-      removed.push(target)
-    } catch {}
-  }
-
-  return { ok: true, migrated, normalized, removed }
-}
-
 export {
   DEFAULT_CONFIG,
   loadConfigResolved,
-  migrateLegacyWebSearchConfigIntoState,
-  cleanupLegacyExternalWebSearch,
   ensureSearxngSidecar,
   stopSearxngSidecar,
   searchWeb,

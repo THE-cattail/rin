@@ -13,7 +13,6 @@ import {
   acquireExclusiveFileLock,
   resolveRinLayout,
 } from './runtime'
-import { cleanupLegacyExternalWebSearch } from './web-search'
 
 const fs = require('node:fs')
 const os = require('node:os')
@@ -121,39 +120,6 @@ function detectInstallSourceRef(fallback = DEFAULT_INSTALL_SOURCE_REF) {
   const branch = gitOutput(['rev-parse', '--abbrev-ref', 'HEAD'])
   if (branch && branch !== 'HEAD') return branch
   return gitOutput(['rev-parse', 'HEAD']) || fallback
-}
-
-function convertCustomizeTextToAgents(text) {
-  let next = safeString(text)
-  if (!next.trim()) return ''
-  next = next.replace('# Customize Handbook', '# AGENTS.md')
-  next = next.replace('When new knowledge appears, first decide whether it belongs in `CUSTOMIZE.md`, memory, or both.', 'When new knowledge appears, decide whether it belongs in `AGENTS.md`, memory, or both.')
-  next = next.replace(/`CUSTOMIZE\.md`/g, '`AGENTS.md`')
-
-  const newLayout = [
-    '### Local working layout',
-    '',
-    '- Treat the install/state root as the runtime tree for local overlays and private state.',
-    '- If Rin source exists in a separate git checkout, keep source changes there.',
-    '- Keep runtime-only files in the install/state root.',
-  ].join('\n')
-  next = next.replace(/### Local working layout[\s\S]*?(?=\n## |\n### |$)/, newLayout)
-  return `${next.trimEnd()}\n`
-}
-
-function migrateLegacyCustomizeToAgents(stateRoot) {
-  const customizePath = path.join(stateRoot, 'CUSTOMIZE.md')
-  if (!fs.existsSync(customizePath)) return { ok: false, reason: 'customize_missing' }
-  const content = convertCustomizeTextToAgents(fs.readFileSync(customizePath, 'utf8'))
-  if (!content.trim()) {
-    try { fs.rmSync(customizePath, { force: true }) } catch {}
-    return { ok: false, reason: 'customize_empty' }
-  }
-  const agentsPath = path.join(stateRoot, 'AGENTS.md')
-  ensureDir(path.dirname(agentsPath))
-  fs.writeFileSync(agentsPath, content, 'utf8')
-  try { fs.rmSync(customizePath, { force: true }) } catch {}
-  return { ok: true, agentsPath }
 }
 
 const INTERNAL_SKILL_NAMES = new Set([
@@ -310,13 +276,6 @@ function syncPiSettings(agentDir) {
   return { ok: true, settingsPath }
 }
 
-function cleanupLegacyAppendSystem(agentDir) {
-  const targetPath = path.join(agentDir, 'APPEND_SYSTEM.md')
-  const existed = fs.existsSync(targetPath)
-  try { fs.rmSync(targetPath, { force: true }) } catch {}
-  return { ok: true, targetPath, removed: existed }
-}
-
 function seedPiAgentDirFromStock(agentDir, { homeDir = os.homedir() } = {}) {
   const stockDir = stockPiAgentDir(homeDir)
   if (!stockDir || path.resolve(stockDir) === path.resolve(agentDir) || !fs.existsSync(stockDir)) {
@@ -334,8 +293,7 @@ function ensurePiBootstrapAt({ agentDir, stateRoot = rootDir(), homeDir = os.hom
   ensureDir(resolvedAgentDir)
   const seeded = seedPiAgentDirFromStock(resolvedAgentDir, { homeDir })
   const settings = syncPiSettings(resolvedAgentDir)
-  const appendSystemCleanup = cleanupLegacyAppendSystem(resolvedAgentDir)
-  return { agentDir: resolvedAgentDir, seeded, settings, appendSystemCleanup }
+  return { agentDir: resolvedAgentDir, seeded, settings }
 }
 
 function ensurePiBootstrap() {
@@ -496,93 +454,18 @@ function createInstalledLauncher({ stateRoot, userHome }) {
   return launcherPath
 }
 
-function migrateSkillsIntoState({ from, to, overwrite = true } = {}) {
-  const srcRoot = path.join(from, 'skills')
-  if (!fs.existsSync(srcRoot)) return { migrated: [], skippedInternal: [] }
-  const migrated = []
-  const skippedInternal = []
-  for (const name of fs.readdirSync(srcRoot).sort()) {
-    if (!name || name.startsWith('.')) continue
-    const src = path.join(srcRoot, name)
-    try {
-      if (!fs.statSync(src).isDirectory()) continue
-    } catch {
-      continue
-    }
-    if (INTERNAL_SKILL_NAMES.has(name)) {
-      skippedInternal.push(name)
-      continue
-    }
-    if (syncTree(src, path.join(to, 'skills', name), { overwrite })) migrated.push(path.join('skills', name))
-  }
-  return { migrated, skippedInternal }
-}
-
-function migrateLegacyWorkspaceToState({ from, to, overwrite = true } = {}) {
-  const sourceRoot = path.resolve(from)
-  const targetRoot = path.resolve(to)
-  const migrated = []
-  const backedUp = []
-  const skipped = []
-
-  const copyFileFrom = (rel, dstRel = rel) => {
-    const src = path.join(sourceRoot, rel)
-    const dst = path.join(targetRoot, dstRel)
-    if (syncFile(src, dst, { overwrite })) migrated.push(dstRel)
-  }
-  const copyTreeFrom = (rel, dstRel = rel) => {
-    const src = path.join(sourceRoot, rel)
-    const dst = path.join(targetRoot, dstRel)
-    if (syncTree(src, dst, { overwrite })) migrated.push(dstRel)
-  }
-  copyFileFrom('CUSTOMIZE.md')
-  copyFileFrom('settings.json')
-  copyFileFrom('data/identity.json')
-  copyFileFrom('data/schedules.json')
-  copyFileFrom('data/schedules.state.json')
-  copyFileFrom('data/rin/identity.json', 'data/identity.json')
-  copyFileFrom('data/rin/schedules.json', 'data/schedules.json')
-  copyFileFrom('data/rin/schedules.state.json', 'data/schedules.state.json')
-
-  copyTreeFrom('kb/vault')
-  copyTreeFrom('memory')
-  copyTreeFrom('routines')
-  copyTreeFrom('data/chats', 'data/chats')
-  copyTreeFrom('data/inspects', 'data/inspects')
-  copyTreeFrom('data/jobs', 'data/jobs')
-  copyTreeFrom('data/kb-index', 'data/kb-index')
-  copyTreeFrom('data/memory', 'data/memory')
-  copyTreeFrom('data/rin/chats', 'data/chats')
-  copyTreeFrom('data/rin/inspects', 'data/inspects')
-  copyTreeFrom('data/rin/jobs', 'data/jobs')
-  copyTreeFrom('data/rin/kb-index', 'data/kb-index')
-  copyTreeFrom('data/rin/memory', 'data/memory')
-
-  const skillMigration = migrateSkillsIntoState({ from: sourceRoot, to: targetRoot, overwrite })
-  migrated.push(...skillMigration.migrated)
-  if (syncFile(path.join(sourceRoot, 'AGENTS.md'), path.join(targetRoot, 'AGENTS.md'), { overwrite })) migrated.push('AGENTS.md')
-  skipped.push(...skillMigration.skippedInternal.map((name) => `skills/${name}`))
-
-  return { migrated, backedUp, skipped }
-}
-
 function writeInstallMetadata(stateRoot, data) {
   const file = path.join(stateRoot, 'install.json')
   writeJsonAtomic(file, data)
   return file
 }
 
-function performInstall({ targetUser, homeDir, migrateFrom = '', overwriteManaged = true, sourceRepo = '', sourceRef = '' } = {}) {
+function performInstall({ targetUser, homeDir, overwriteManaged = true, sourceRepo = '', sourceRef = '' } = {}) {
   const userHome = path.resolve(homeDir)
   const stateRoot = installStateRootForHome(userHome)
-  const currentUser = currentUserRecord()
-  const stopLegacyWebSearchSystemd = Boolean(targetUser && targetUser.username && targetUser.username === currentUser.username)
   ensureDir(stateRoot)
   const baseline = ensureWorkspaceBaseline(stateRoot, { overwriteManaged })
   const bundle = installRuntimeBundle(stateRoot)
-  const migrated = migrateFrom ? migrateLegacyWorkspaceToState({ from: migrateFrom, to: stateRoot, overwrite: true }) : null
-  const legacyWebSearchCleanup = cleanupLegacyExternalWebSearch({ stateRoot, userHome, stopSystemd: stopLegacyWebSearchSystemd })
-  const customizeMigration = migrateLegacyCustomizeToAgents(stateRoot)
   const bootstrap = ensurePiBootstrapAt({ agentDir: stateRoot, stateRoot, homeDir: userHome })
   const launcherPath = createInstalledLauncher({ stateRoot, userHome })
   const metadataPath = writeInstallMetadata(stateRoot, {
@@ -591,7 +474,6 @@ function performInstall({ targetUser, homeDir, migrateFrom = '', overwriteManage
     appRoot: bundle.currentRoot,
     launcherPath,
     targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
-    migratedFrom: migrateFrom ? path.resolve(migrateFrom) : '',
     installSource: {
       repo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
       ref: safeString(sourceRef).trim() || detectInstallSourceRef(),
@@ -607,9 +489,6 @@ function performInstall({ targetUser, homeDir, migrateFrom = '', overwriteManage
     launcherPath,
     baseline,
     bundle,
-    migrated,
-    legacyWebSearchCleanup,
-    customizeMigration,
     bootstrap,
     metadataPath,
   }
@@ -823,7 +702,7 @@ function usage(exitCode = 2) {
     'Usage:',
     '  rin',
     '  rin restart',
-    '  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--migrate-from <legacy-path>]',
+    '  rin update [--repo <git-url>] [--ref <branch|tag|commit>]',
     '  rin uninstall [--yes] [--keep-state | --purge]',
     '',
     'Notes:',
@@ -863,21 +742,19 @@ async function cmdInstall(argv) {
   let mode = ''
   let targetUserName = ''
   let createUserName = ''
-  let migrateFrom = ''
   let sourceRepo = safeString(process.env.RIN_INSTALL_SOURCE_REPO).trim()
   let sourceRef = safeString(process.env.RIN_INSTALL_SOURCE_REF).trim()
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--yes' || a === '-y') { yes = true; continue }
-    if (a === '--migrate-from') { migrateFrom = argv[i + 1] || ''; i++; continue }
     if (a === '--source-repo') { sourceRepo = argv[i + 1] || ''; i++; continue }
     if (a === '--source-ref') { sourceRef = argv[i + 1] || ''; i++; continue }
     if (a === '--current-user') { mode = 'current'; continue }
     if (a === '--user') { mode = 'existing'; targetUserName = argv[i + 1] || ''; i++; continue }
     if (a === '--create-user') { mode = 'create'; createUserName = argv[i + 1] || ''; i++; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin install [--yes] [--migrate-from <legacy-path>] [--current-user | --user <name> | --create-user <name>]')
+      console.error('Usage:\n  rin install [--yes] [--current-user | --user <name> | --create-user <name>]')
       process.exit(0)
     }
     console.error(`Unknown arg: ${a}`)
@@ -885,13 +762,6 @@ async function cmdInstall(argv) {
   }
 
   const currentUser = currentUserRecord()
-  const currentStateRoot = installStateRootForHome(currentUser.homeDir)
-  const alreadyInstalled = fs.existsSync(path.join(currentStateRoot, 'install.json'))
-  const legacyDefault = (!migrateFrom && !alreadyInstalled && fs.existsSync(rootDir()) && path.resolve(rootDir()) !== currentStateRoot)
-    ? path.resolve(rootDir())
-    : ''
-  if (!migrateFrom) migrateFrom = legacyDefault
-
   if (!mode && !yes && process.stdin.isTTY && process.stdout.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
     try {
@@ -902,7 +772,6 @@ async function cmdInstall(argv) {
       ])
       if (mode === 'existing') targetUserName = await promptInstallText(rl, 'Existing username')
       if (mode === 'create') createUserName = await promptInstallText(rl, 'New username')
-      migrateFrom = await promptInstallText(rl, 'Migrate legacy state from', migrateFrom)
       console.error('Warning: Rin operates from the target user\'s installed state and user-home file space.')
       const confirmed = await promptInstallYesNo(rl, 'Proceed with this install', true)
       if (!confirmed) process.exit(1)
@@ -937,7 +806,6 @@ async function cmdInstall(argv) {
   const result = performInstall({
     targetUser,
     homeDir: targetUser.homeDir,
-    migrateFrom: migrateFrom ? path.resolve(expandHome(migrateFrom)) : '',
     overwriteManaged: true,
     sourceRepo,
     sourceRef,
@@ -951,15 +819,13 @@ async function cmdInstall(argv) {
 async function cmdUpdate(argv) {
   let repo = ''
   let ref = ''
-  let migrateFrom = ''
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--repo') { repo = argv[i + 1] || ''; i += 1; continue }
     if (a === '--ref') { ref = argv[i + 1] || ''; i += 1; continue }
-    if (a === '--migrate-from') { migrateFrom = argv[i + 1] || ''; i += 1; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--migrate-from <legacy-path>]')
+      console.error('Usage:\n  rin update [--repo <git-url>] [--ref <branch|tag|commit>]')
       process.exit(0)
     }
     console.error(`Unknown arg: ${a}`)
@@ -1002,7 +868,6 @@ async function cmdUpdate(argv) {
       '--source-repo', repoUrl,
       '--source-ref', sourceRef,
     ]
-    if (migrateFrom) installArgs.push('--migrate-from', path.resolve(expandHome(migrateFrom)))
     await spawnChecked(process.execPath, installArgs, {
       cwd: cloneDir,
     })

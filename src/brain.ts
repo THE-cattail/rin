@@ -287,24 +287,8 @@ class RuntimePaths {
     return path.join(this.memoryDir, 'candidates.sqlite');
   }
 
-  get eventsLegacyJsonl(): string {
-    return path.join(this.memoryDir, 'events.jsonl');
-  }
-
   get eventsDir(): string {
     return path.join(this.memoryDir, 'events');
-  }
-
-  get memoryMigrationState(): string {
-    return path.join(this.memoryDir, 'migration-state.json');
-  }
-
-  get legacyMemoryStore(): string {
-    return path.join(this.root, 'memory', 'store');
-  }
-
-  get legacyMemoryDb(): string {
-    return path.join(this.legacyMemoryStore, 'memory.sqlite');
   }
 
   get kbDir(): string {
@@ -511,7 +495,6 @@ class MemoryRuntime {
 
   private async iterEventFiles(): Promise<string[]> {
     const out: string[] = [];
-    if (await pathExists(this.paths.eventsLegacyJsonl)) out.push(this.paths.eventsLegacyJsonl);
     const walk = async (dir: string): Promise<void> => {
       if (!(await pathExists(dir))) return;
       const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -528,8 +511,7 @@ class MemoryRuntime {
   private normalizeEventRow(row: any, sourcePath: string): EventRow | null {
     if (!row || typeof row !== 'object') return null;
     const meta = typeof row.meta === 'object' && row.meta ? { ...row.meta } : {};
-    const fallback = sourcePath === this.paths.eventsLegacyJsonl ? 'legacy:unknown' : this.defaultChatKey();
-    const chatKey = this.resolveChatKey(safeString(row.chat_key || ''), meta, fallback);
+    const chatKey = this.resolveChatKey(safeString(row.chat_key || ''), meta, this.defaultChatKey());
     const shard = safeString(row.shard || '').trim() || path.relative(this.paths.memoryDir, sourcePath);
     return {
       id: safeString(row.id || crypto.randomUUID()),
@@ -580,21 +562,25 @@ class MemoryRuntime {
     return row;
   }
 
-  async readRecentEvents(hours: number, limit: number, _chatKey?: string): Promise<EventRow[]> {
+  async readRecentEvents(hours: number, limit: number, chatKey?: string): Promise<EventRow[]> {
     const cutoff = Date.now() - hours * 60 * 60 * 1000;
+    const wantChatKey = safeString(chatKey).trim();
     const rows = (await this.readAllEvents()).filter((row) => {
       const ts = parseIso(row.ts);
       if (!ts) return false;
+      if (wantChatKey && safeString(row.chat_key).trim() !== wantChatKey) return false;
       return ts.getTime() >= cutoff;
     });
     rows.sort((a, b) => b.ts.localeCompare(a.ts));
     return rows.slice(0, limit);
   }
 
-  async searchEvents(query: string, limit: number, _chatKey?: string): Promise<EventRow[]> {
+  async searchEvents(query: string, limit: number, chatKey?: string): Promise<EventRow[]> {
     const needle = query.trim();
     if (!needle) return [];
+    const wantChatKey = safeString(chatKey).trim();
     const rows = (await this.readAllEvents())
+      .filter((row) => !wantChatKey || safeString(row.chat_key).trim() === wantChatKey)
       .map((row) => {
         const haystack = `${row.type} ${row.content} ${row.chat_key} ${JSON.stringify(row.meta)}`;
         const score = recallLexicalScore(needle, haystack) + recencyScore(row.ts);
@@ -605,37 +591,6 @@ class MemoryRuntime {
       .slice(0, limit)
       .map((entry) => entry.row);
     return rows;
-  }
-
-  async migrateLegacyEvents(): Promise<Json> {
-    if (!(await pathExists(this.paths.eventsLegacyJsonl))) {
-      return { status: 'skip', reason: 'no legacy events.jsonl found' };
-    }
-    const content = await readText(this.paths.eventsLegacyJsonl).catch(() => '');
-    let migrated = 0;
-    let skipped = 0;
-    for (const line of content.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const parsed = JSON.parse(trimmed);
-        const row = this.normalizeEventRow(parsed, this.paths.eventsLegacyJsonl);
-        if (!row) {
-          skipped += 1;
-          continue;
-        }
-        const ts = parseIso(row.ts) || new Date();
-        const shardPath = this.eventShardPath(row.chat_key, ts);
-        row.shard = path.relative(this.paths.memoryDir, shardPath);
-        await appendJsonLine(shardPath, row);
-        migrated += 1;
-      } catch {
-        skipped += 1;
-      }
-    }
-    const backup = path.join(this.paths.memoryDir, `events.single-file.backup.${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.jsonl`);
-    await fs.rename(this.paths.eventsLegacyJsonl, backup);
-    return { status: 'ok', migrated, skipped, backup, events_dir: this.paths.eventsDir };
   }
 
   private mem0Config(): Record<string, unknown> {
@@ -738,7 +693,6 @@ class MemoryRuntime {
           return text;
         },
       };
-      await this.bootstrapMem0FromHistory(this.mem0);
     }
     return this.mem0;
   }
@@ -752,65 +706,6 @@ class MemoryRuntime {
       return Number(row?.n || 0);
     } catch {
       return 0;
-    }
-  }
-
-  private legacyMem0TextsFromHistory(): string[] {
-    if (!fssync.existsSync(this.paths.mem0HistoryDb)) return [];
-    try {
-      const db = new DatabaseSync(this.paths.mem0HistoryDb);
-      const hasHistoryTable = db.prepare(`
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table' AND name = 'history'
-      `).get() as { name?: string } | undefined;
-      if (!hasHistoryTable?.name) {
-        db.close();
-        return [];
-      }
-      const rows = db.prepare(`
-        SELECT memory_id, old_memory, new_memory, event, created_at, is_deleted
-        FROM history
-        ORDER BY datetime(created_at) ASC, rowid ASC
-      `).all() as Array<Record<string, unknown>>;
-      db.close();
-      const current = new Map<string, string>();
-      for (const row of rows) {
-        const memoryId = safeString(row.memory_id).trim();
-        if (!memoryId) continue;
-        const event = safeString(row.event).toUpperCase();
-        const deleted = Number(row.is_deleted || 0) !== 0 || event === 'DELETE';
-        if (deleted) {
-          current.delete(memoryId);
-          continue;
-        }
-        const nextText = safeString(row.new_memory || row.old_memory).trim();
-        if (!nextText) continue;
-        current.set(memoryId, nextText);
-      }
-      return [...new Set([...current.values()].filter((text) => {
-        if (!text) return false;
-        if (text.includes('events.jsonl')) return false;
-        if (text.includes('Current memory backend uses Mem0 under data/memory/mem0')) return false;
-        return true;
-      }))];
-    } catch {
-      return [];
-    }
-  }
-
-  private async bootstrapMem0FromHistory(memory: Mem0Memory): Promise<void> {
-    if (this.vectorStoreRowCount() > 0) return;
-    const texts = this.legacyMem0TextsFromHistory();
-    if (!texts.length) return;
-    for (const text of texts) {
-      await memory.add(text, {
-        ...this.scope(),
-        infer: false,
-        metadata: {
-          source: 'legacy-mem0-history-bootstrap',
-        },
-      } as any);
     }
   }
 
@@ -1470,8 +1365,7 @@ class MemoryRuntime {
       memory_dir: this.paths.memoryDir,
       events_dir: this.paths.eventsDir,
       events_dir_exists: await pathExists(this.paths.eventsDir),
-      events_shard_files: shardFiles.filter((file) => file !== this.paths.eventsLegacyJsonl).length,
-      events_legacy_jsonl_exists: await pathExists(this.paths.eventsLegacyJsonl),
+      events_shard_files: shardFiles.length,
       mem0_history_db_exists: await pathExists(this.paths.mem0HistoryDb),
       mem0_vector_db_exists: await pathExists(this.paths.mem0VectorDb),
       candidate_db_exists: candidateDbExists,
@@ -1479,52 +1373,10 @@ class MemoryRuntime {
       embed_model: this.embeddings.model,
       llm_ready: await this.memoryInferReady(),
       memory_model: this.readMemoryModelSettings(),
-      legacy_memory_db_exists: await pathExists(this.paths.legacyMemoryDb),
     });
     return 0;
   }
 
-  async cmdMigrateFromVault(): Promise<number> {
-    if (!(await pathExists(this.paths.legacyMemoryDb))) {
-      printJson({ status: 'skip', reason: 'no legacy memory sqlite found' });
-      return 0;
-    }
-    const prior = (await readJson<{ imported_ids?: string[] }>(this.paths.memoryMigrationState)) || { imported_ids: [] };
-    const seen = new Set(prior.imported_ids || []);
-    const db = new DatabaseSync(this.paths.legacyMemoryDb);
-    const rows = db.prepare(`
-      SELECT id, type, key, value, status, created_at, updated_at
-      FROM records
-      WHERE status = 'active' AND key != 'memory.canonical_paths'
-      ORDER BY datetime(created_at) ASC
-    `).all() as Array<Record<string, unknown>>;
-    const memory = await this.getMem0();
-    let added = 0;
-    for (const row of rows) {
-      const id = safeString(row.id);
-      if (!id || seen.has(id)) continue;
-      const text = safeString(row.value);
-      if (!text) continue;
-      await memory.add(text, {
-        ...this.scope(),
-        infer: false,
-        metadata: {
-          source: 'legacy-record',
-          legacy_id: id,
-          legacy_type: safeString(row.type),
-          legacy_key: safeString(row.key),
-          created_at: safeString(row.created_at),
-          updated_at: safeString(row.updated_at),
-        },
-      } as any);
-      seen.add(id);
-      added += 1;
-    }
-    db.close();
-    await writeJson(this.paths.memoryMigrationState, { imported_ids: [...seen] });
-    printJson({ status: 'ok', added, legacy_records: rows.length });
-    return 0;
-  }
 }
 
 class KBRuntime {
@@ -1844,11 +1696,9 @@ function usage(exitCode = 2): never {
     '  rin-brain brain finalize [--chatKey <key>] [--reason done|reset|manual] [--limit N] [--scope user|chat|agent|run]',
     '  rin-brain brain history recent [--hours H] [--limit N] [--chatKey <key>]',
     '  rin-brain brain history search <query> [--limit N] [--chatKey <key>]',
-    '  rin-brain brain history migrate-legacy',
     '  rin-brain brain preheat [--limit N]',
     '  rin-brain brain tidy',
     '  rin-brain brain doctor',
-    '  rin-brain brain migrate-from-vault',
     '  rin-brain knowledge index',
     '  rin-brain knowledge search <query> [--limit N] [--mode bm25|vector|hybrid]',
     '  rin-brain knowledge doctor',
@@ -1883,7 +1733,6 @@ export async function runBrainCli(argvInput = process.argv.slice(2), rootOverrid
     if (cmd === 'preheat') return await runtime.cmdShow(parseArgs(argv));
     if (cmd === 'tidy') return await runtime.cmdTidy(parseArgs(argv));
     if (cmd === 'doctor') return await runtime.cmdDoctor();
-    if (cmd === 'migrate-from-vault') return await runtime.cmdMigrateFromVault();
     if (cmd === 'candidate') {
       const sub = argv.shift();
       if (sub === 'add') return await runtime.cmdCandidateAdd(parseArgs(argv));
@@ -1893,7 +1742,6 @@ export async function runBrainCli(argvInput = process.argv.slice(2), rootOverrid
       const sub = argv.shift();
       if (sub === 'recent') return await runtime.cmdEventsRecent(parseArgs(argv));
       if (sub === 'search') return await runtime.cmdEventsSearch(parseArgs(argv));
-      if (sub === 'migrate-legacy') { printJson(await runtime.migrateLegacyEvents()); return 0; }
     }
     usage(2);
   }
