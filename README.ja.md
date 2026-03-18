@@ -2,47 +2,74 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-`rin` は、チャット接続型のエージェント運用を前提にしたローカルファーストのランタイムです。
+`rin` は、チャット接続型のエージェント運用向けローカルファーストランタイムです。
 
-## このリポジトリに含めるもの
+## できること
 
-公開リポジトリには、再利用しやすく共有しやすい内容だけを置きます。
+- 対話実行の `rin`
+- デーモン再起動の `rin restart`
+- リポジトリ ref からの更新用 `rin update`
+- ランタイム削除用 `rin uninstall`
+- `~/.rin` に保存されるランタイム状態
 
-- `src/` の TypeScript 実装
-- GitHub からの導入用ブートストラップ `install.sh`
-- インストール時に `~/.rin` へ配置する公開ドキュメント資産 `install/home/`
-- CI とコントリビューション用の補助ファイル
-
-実行時の状態や個人データは `~/.rin` に残し、ソースチェックアウトとは分離します。
+Rin はソースチェックアウトではなく、インストール後の `~/.rin` から動作します。
 
 ## 必要環境
 
 - Node.js 22+
 - npm
 - git
+- 現在のインストーラーフローに対応した Linux 系環境
 
 ## インストール
+
+現在のユーザーにインストール:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 ```
 
-特定の ref を使う場合:
+特定 ref を使う場合:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
   RIN_REF=main sh
 ```
 
-## 更新
+既存ユーザー向けにインストール:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
+  sh -s -- --user existing-user --yes
+```
+
+## 日常コマンド
+
+対話モード開始:
+
+```bash
+rin
+```
+
+デーモン再起動:
+
+```bash
+rin restart
+```
+
+インストール済みランタイム更新:
 
 ```bash
 rin update
 ```
 
-## アンインストール
+リポジトリや ref を指定して更新:
 
-状態を残してアプリだけ削除:
+```bash
+rin update --repo https://github.com/THE-cattail/rin.git --ref main
+```
+
+`~/.rin` を残してアプリだけ削除:
 
 ```bash
 rin uninstall --keep-state --yes
@@ -54,7 +81,7 @@ rin uninstall --keep-state --yes
 rin uninstall --purge --yes
 ```
 
-## ソースから開発する場合
+## ソースから開発する
 
 ```bash
 git clone https://github.com/THE-cattail/rin.git
@@ -64,44 +91,40 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-検証:
+検証を実行:
 
 ```bash
 npm run check
 ```
 
-## ランタイム配置
+## リポジトリ構成
 
-ライブ状態は `~/.rin` に保存されます。主な内容:
+```text
+src/                 ランタイム実装
+install.sh           ブートストラップインストーラー
+install/home/        install 時に ~/.rin へコピーされる標準ファイル
+test/                自動テスト
+```
 
-- `AGENTS.md`
-- `settings.json`
-- `auth.json`
-- `data/`
-- `docs/`
-- `skills/`
-- `locale/`
-- 必要に応じて生成される `kb/` や `routines/`
+## ランタイム構成
 
-`~/.local/bin/rin` は `~/.rin/app/current/dist/index.js` を指します。
+```text
+~/.rin/
+  AGENTS.md
+  app/current/
+  auth.json
+  data/
+  docs/
+  locale/
+  settings.json
+  skills/
+```
 
-## 公開コマンド
+インストール後のランチャー:
 
-- `rin`
-- `rin restart`
-- `rin update`
-- `rin uninstall`
-
-メモリ、ブリッジ、スケジュールなどはランタイム内部機能であり、公開シェルサブコマンドではありません。
-
-## 開発方針
-
-- 端末固有・環境固有の前提を避ける
-- 再現可能な install / build / update を優先する
-- 振る舞い変更時はドキュメントと自動検証も更新する
-- 公開コードとローカル実行状態の境界を明確に保つ
-
-詳細は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。
+```text
+~/.local/bin/rin
+```
 
 ## ライセンス
 

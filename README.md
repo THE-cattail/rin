@@ -8,34 +8,22 @@
 
 Languages: [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-## What Rin is
+## What you get
 
-Rin keeps the public repository focused on reusable runtime code and install assets, while keeping user data and private runtime state in `~/.rin`.
+- `rin` for interactive use
+- `rin restart` to restart the daemon
+- `rin update` to reinstall from a repository ref
+- `rin uninstall` to remove the installed runtime
+- runtime state stored under `~/.rin`
 
-It is designed for people who want:
-
-- a single local runtime entrypoint (`rin`)
-- chat-connected automation and background workflows
-- a clear public/private boundary
-- source checkouts that stay separate from live runtime state
-
-## Current public scope
-
-This repository intentionally tracks only the reusable pieces:
-
-- TypeScript application source under `src/`
-- the GitHub/bootstrap installer (`install.sh`)
-- install-time stock documentation under `install/home/`
-- contributor guidance and verification files
-
-Runtime-created state stays local under `~/.rin`.
+Rin runs from the installed runtime in `~/.rin`, not from the source checkout.
 
 ## Requirements
 
 - Node.js 22+
 - npm
 - git
-- Linux or another environment that can run the current Node.js runtime and installer flow
+- a Linux-like environment supported by the current installer flow
 
 ## Install
 
@@ -59,29 +47,39 @@ curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
   sh -s -- --user existing-user --yes
 ```
 
-The installer clones the requested ref to a temporary directory, installs dependencies, builds the runtime, and installs it into the target user's `~/.rin`.
+## Daily commands
 
-## Update
+Start interactive mode:
+
+```bash
+rin
+```
+
+Restart the daemon:
+
+```bash
+rin restart
+```
+
+Update the installed runtime:
 
 ```bash
 rin update
 ```
 
-Override the source when needed:
+Update from a specific repository or ref:
 
 ```bash
 rin update --repo https://github.com/THE-cattail/rin.git --ref main
 ```
 
-## Uninstall
-
-Keep local state but remove the installed app bundle:
+Remove the installed app but keep `~/.rin`:
 
 ```bash
 rin uninstall --keep-state --yes
 ```
 
-Remove Rin completely:
+Remove everything:
 
 ```bash
 rin uninstall --purge --yes
@@ -97,86 +95,40 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-Verification:
+Run the verification suite:
 
 ```bash
 npm run check
 ```
 
+## Repository layout
+
+```text
+src/                 runtime source
+install.sh           bootstrap installer
+install/home/        stock files copied into ~/.rin on install
+test/                automated tests
+```
+
 ## Runtime layout
 
-Rin does not use the source checkout as the live workspace.
+```text
+~/.rin/
+  AGENTS.md
+  app/current/
+  auth.json
+  data/
+  docs/
+  locale/
+  settings.json
+  skills/
+```
 
-Installed runtime state lives under `~/.rin`, including:
-
-- `~/.rin/AGENTS.md`
-- `~/.rin/settings.json`
-- `~/.rin/auth.json`
-- `~/.rin/data/`
-- `~/.rin/docs/`
-- `~/.rin/skills/`
-- `~/.rin/locale/` for optional local overrides
-- on-demand directories such as `kb/` and `routines/`
-
-The installed launcher is:
+Installed launcher:
 
 ```text
 ~/.local/bin/rin
 ```
-
-and points to:
-
-```text
-~/.rin/app/current/dist/index.js
-```
-
-## User-facing command surface
-
-Rin intentionally keeps a small public CLI surface:
-
-- `rin` — interactive mode
-- `rin restart` — restart the daemon service
-- `rin update` — reinstall from source
-- `rin uninstall` — remove the installed runtime
-
-Operational internals such as memory, bridge delivery, and scheduling are runtime capabilities, not public shell subcommands.
-
-## Repository layout
-
-```text
-src/                 TypeScript runtime source
-install.sh           Bootstrap installer
-install/home/        Stock files seeded into ~/.rin on install
-.github/workflows/   CI verification
-```
-
-## Runtime privacy boundary
-
-Tracked in git:
-
-- source code
-- install-time stock docs and assets
-- contributor and CI files
-
-Kept local under `~/.rin`:
-
-- user prompt/context files
-- auth and model credentials
-- private bridge and schedule state
-- memory stores, event logs, and local knowledge bases
-- local routines, local skills, and local overrides
-
-## Engineering expectations
-
-This repository aims to stay portable and reviewable:
-
-- avoid machine-specific assumptions
-- prefer reproducible install/update paths
-- keep code and docs aligned in the same change
-- add or update automated checks when behavior changes
-- favor smaller, reusable surfaces over local-only convenience features
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules.
 
 ## License
 
