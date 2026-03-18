@@ -2025,7 +2025,7 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 let piSdkModulePromise: Promise<PiSdkModule> | null = null
 
 const PI_DEFAULT_OPENING = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.'
-const RIN_OPENING = "You are Rin, the user's general intelligent assistant. Follow the user's instructions and carry them out directly. Prioritize doing the work yourself, and only guide the user when you are certain a task is beyond your capabilities."
+const RIN_OPENING = "You are Rin, the user's general assistant. Carry out the request directly. Do the work yourself unless the task is beyond your capabilities."
 
 function safeString(value: any): string {
   if (value == null) return ''
@@ -2339,13 +2339,11 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
 
   const docsRoot = path.join(stateRoot, 'docs')
   const docsBlock = [
-    'Rin documentation (read only when the user asks about Rin itself, its SDK, extensions, themes, skills, or TUI):',
-    `- Main documentation: ${path.join(docsRoot, 'rin', 'README.md')}`,
-    `- Additional docs: ${path.join(docsRoot, 'rin', 'docs')}`,
-    `- Examples: ${path.join(docsRoot, 'rin', 'examples')} (extensions, custom tools, SDK)`,
-    '- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), package docs (docs/packages.md)',
-    '- When working on Rin topics, read the docs and examples, and follow .md cross-references before implementing',
-    '- Always read Rin .md files completely and follow links to related docs (e.g., tui.md for TUI API details)',
+    'Rin docs (read only for Rin, SDK, extensions, themes, skills, prompt templates, package docs, or TUI requests):',
+    `- README: ${path.join(docsRoot, 'rin', 'README.md')}`,
+    `- Docs dir: ${path.join(docsRoot, 'rin', 'docs')}`,
+    `- Examples dir: ${path.join(docsRoot, 'rin', 'examples')}`,
+    '- For Rin work, read the relevant .md files fully and follow local markdown links before implementing.',
   ].join('\n')
   next = next.replace(/Pi documentation \(read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI\):[\s\S]*?(?=\n\n<!-- synced|\n\n# Project Context|\n\nThe following skills|\nCurrent date:|\nCurrent working directory:|$)/, docsBlock)
 
