@@ -1,6 +1,24 @@
 {
   "name": "rin",
   "private": true,
+  "description": "Local-first runtime for chat-connected agent workflows.",
+  "license": "MIT",
+  "homepage": "https://github.com/THE-cattail/rin#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/THE-cattail/rin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/THE-cattail/rin/issues"
+  },
+  "keywords": [
+    "agent",
+    "chat",
+    "cli",
+    "local-first",
+    "runtime",
+    "tui"
+  ],
   "type": "commonjs",
   "main": "dist/index.js",
   "bin": {
@@ -10,7 +28,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --pretty false && chmod +x dist/index.js"
+    "build": "tsc -p tsconfig.json --pretty false && chmod +x dist/index.js",
+    "test:unit": "node --test test/**/*.test.js",
+    "test": "npm run build && npm run test:unit",
+    "check": "npm run test"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",

@@ -122,6 +122,13 @@ function detectInstallSourceRef(fallback = DEFAULT_INSTALL_SOURCE_REF) {
   return gitOutput(['rev-parse', 'HEAD']) || fallback
 }
 
+function npmInstallArgsFor(dir) {
+  const useCi = fs.existsSync(path.join(dir, 'package-lock.json'))
+  return useCi
+    ? ['ci', '--no-fund', '--no-audit']
+    : ['install', '--no-fund', '--no-audit']
+}
+
 const INTERNAL_SKILL_NAMES = new Set([
   'brain',
   'memory',
@@ -857,7 +864,7 @@ async function cmdUpdate(argv) {
       if (sourceRef) await spawnChecked(git, ['-C', cloneDir, 'checkout', sourceRef], { cwd: tmpRoot })
     }
 
-    await spawnChecked('npm', ['install', '--no-fund', '--no-audit'], { cwd: cloneDir })
+    await spawnChecked('npm', npmInstallArgsFor(cloneDir), { cwd: cloneDir })
     await spawnChecked('npm', ['run', '-s', 'build'], { cwd: cloneDir })
 
     const installArgs = [

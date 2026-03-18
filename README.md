@@ -1,21 +1,45 @@
 # rin
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
 ![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)
 
 `rin` is a local-first runtime for chat-connected agent workflows.
 
-Public source keeps only:
+Languages: [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-- the TypeScript application source
-- the GitHub/bootstrap installer
-- install-time stock assets under `install/home`
+## What Rin is
 
-Runtime state lives only under `~/.rin`. Runtime-created directories such as `kb/` and `routines/` appear only when features actually use them.
+Rin keeps the public repository focused on reusable runtime code and install assets, while keeping user data and private runtime state in `~/.rin`.
 
-## Install from GitHub
+It is designed for people who want:
 
-Current user install:
+- a single local runtime entrypoint (`rin`)
+- chat-connected automation and background workflows
+- a clear public/private boundary
+- source checkouts that stay separate from live runtime state
+
+## Current public scope
+
+This repository intentionally tracks only the reusable pieces:
+
+- TypeScript application source under `src/`
+- the GitHub/bootstrap installer (`install.sh`)
+- install-time stock documentation under `install/home/`
+- contributor guidance and verification files
+
+Runtime-created state stays local under `~/.rin`.
+
+## Requirements
+
+- Node.js 22+
+- npm
+- git
+- Linux or another environment that can run the current Node.js runtime and installer flow
+
+## Install
+
+Install for the current user:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
@@ -28,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
   RIN_REF=main sh
 ```
 
-Advanced installs can still pass target-user flags:
+Install for another existing user:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | \
   sh -s -- --user existing-user --yes
 ```
 
-The bootstrap clones the repo to a temporary directory, builds the root TypeScript package, and installs Rin into the target user's `~/.rin`.
+The installer clones the requested ref to a temporary directory, installs dependencies, builds the runtime, and installs it into the target user's `~/.rin`.
 
-## Update an existing install
+## Update
 
 ```bash
 rin update
@@ -49,100 +73,111 @@ Override the source when needed:
 rin update --repo https://github.com/THE-cattail/rin.git --ref main
 ```
 
-## Source checkout workflow
+## Uninstall
 
-If you are developing Rin from source:
+Keep local state but remove the installed app bundle:
+
+```bash
+rin uninstall --keep-state --yes
+```
+
+Remove Rin completely:
+
+```bash
+rin uninstall --purge --yes
+```
+
+## Develop from source
 
 ```bash
 git clone https://github.com/THE-cattail/rin.git
 cd rin
-npm install
+npm ci
 npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-## Runtime location
+Verification:
 
-Rin does not treat the source checkout as a runtime workspace.
+```bash
+npm run check
+```
 
-Runtime state lives only under `~/.rin`, including:
+## Runtime layout
+
+Rin does not use the source checkout as the live workspace.
+
+Installed runtime state lives under `~/.rin`, including:
 
 - `~/.rin/AGENTS.md`
 - `~/.rin/settings.json`
+- `~/.rin/auth.json`
 - `~/.rin/data/`
 - `~/.rin/docs/`
-- `~/.rin/locale/` (optional user locale overrides)
 - `~/.rin/skills/`
+- `~/.rin/locale/` for optional local overrides
+- on-demand directories such as `kb/` and `routines/`
 
-The installed runtime reads `AGENTS.md` from `~/.rin`, not from the shell's current directory.
+The installed launcher is:
 
-## Single entrypoint
+```text
+~/.local/bin/rin
+```
 
-The only user-facing entrypoint in PATH is `rin`.
+and points to:
 
-Installed `rin` exposes only the user-facing runtime commands:
+```text
+~/.rin/app/current/dist/index.js
+```
 
-- `rin` (default interactive mode)
-- `rin restart`
-- `rin update`
-- `rin uninstall`
+## User-facing command surface
 
-Daily `rin` usage uses Pi's native terminal UI.
+Rin intentionally keeps a small public CLI surface:
 
-Install is handled by `install.sh`.
+- `rin` — interactive mode
+- `rin restart` — restart the daemon service
+- `rin update` — reinstall from source
+- `rin uninstall` — remove the installed runtime
 
-Operational features such as brain, koishi, daemon control, and schedule are internal runtime capabilities, not public shell subcommands.
+Operational internals such as memory, bridge delivery, and scheduling are runtime capabilities, not public shell subcommands.
 
 ## Repository layout
 
 ```text
-src/
-  ...              TypeScript source
-install/
-  home/            stock files seeded into ~/.rin on install
+src/                 TypeScript runtime source
+install.sh           Bootstrap installer
+install/home/        Stock files seeded into ~/.rin on install
+.github/workflows/   CI verification
 ```
 
-## Installed app layout
-
-```text
-~/.rin/app/current/
-  dist/
-  node_modules/
-  install/
-  package.json
-  package-lock.json
-```
-
-`~/.local/bin/rin` points to `~/.rin/app/current/dist/index.js`.
-
-## Installed state layout
-
-```text
-~/.rin/
-  AGENTS.md
-  app/current/
-  data/
-  docs/
-  locale/          optional user locale overrides
-  settings.json
-  skills/
-  ...              generated on demand (for example kb/, routines/)
-```
-
-## What is tracked vs local-only
+## Runtime privacy boundary
 
 Tracked in git:
 
-- source code under `src/`
-- install-time stock assets under `install/home/`
-- the GitHub bootstrap installer (`install.sh`)
+- source code
+- install-time stock docs and assets
+- contributor and CI files
 
 Kept local under `~/.rin`:
 
-- user-editable prompt docs such as `AGENTS.md`
-- bridge/timer/inspect runtime state
-- trust mappings and private config
-- KB notes, memory stores, and event logs
-- local routines, skills, and their helper scripts
-- installed docs and runtime bundle
- docs and runtime bundle
+- user prompt/context files
+- auth and model credentials
+- private bridge and schedule state
+- memory stores, event logs, and local knowledge bases
+- local routines, local skills, and local overrides
+
+## Engineering expectations
+
+This repository aims to stay portable and reviewable:
+
+- avoid machine-specific assumptions
+- prefer reproducible install/update paths
+- keep code and docs aligned in the same change
+- add or update automated checks when behavior changes
+- favor smaller, reusable surfaces over local-only convenience features
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules.
+
+## License
+
+[MIT](LICENSE)

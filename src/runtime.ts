@@ -9,6 +9,7 @@ import nodeUtil from 'node:util'
 import { Type } from '@sinclair/typebox'
 
 import { runBrainCli } from './brain'
+import { promptSessionWithRetry } from './session-prompt'
 import { searchWeb } from './web-search'
 
 function ensureDir(dir: string): void {
@@ -1939,10 +1940,10 @@ function buildRinBuiltinPromptBlock({
   return [
     '',
     'Rin runtime:',
-    `- Install/state root: ${stateRoot}`,
-    `- Rin documentation root: ${docsRinRoot}`,
-    `- Main documentation: ${path.join(docsRinRoot, 'README.md')}`,
-    `- Additional docs: ${path.join(docsRinRoot, 'docs')}`,
+    `- Runtime root: ${stateRoot}`,
+    `- Docs root: ${docsRinRoot}`,
+    `- README: ${path.join(docsRinRoot, 'README.md')}`,
+    `- Docs dir: ${path.join(docsRinRoot, 'docs')}`,
     `- Examples: ${path.join(docsRinRoot, 'examples')}`,
     '',
   ].join('\n')
@@ -2403,7 +2404,7 @@ function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: st
 }
 
 const RIN_CONTINUE_TOKEN = '#RIN_CONTINUE'
-const RIN_CONTINUE_FOLLOWUP = 'Continue with the unfinished work. If it is still not complete, reply with exactly `#RIN_CONTINUE`; otherwise reply normally.'
+const RIN_CONTINUE_FOLLOWUP = 'Continue the unfinished work. If still incomplete, reply exactly `#RIN_CONTINUE`; otherwise reply normally.'
 
 function extractAssistantTextFromSessionEventMessage(message: any): string {
   if (!message || typeof message !== 'object') return ''
@@ -2452,7 +2453,7 @@ function patchSessionPromptAutoContinue(session: any) {
           }
         })
         try {
-          await originalPrompt(nextText, nextOptions)
+          await promptSessionWithRetry(session, originalPrompt, nextText, nextOptions)
         } finally {
           try { unsubscribe() } catch {}
         }
@@ -2875,7 +2876,7 @@ async function runPiSdkTurn({
       }
     }
 
-    const promptPromise = session.prompt(payload.message || '', {
+    const promptPromise = promptSessionWithRetry(session, session.prompt.bind(session), payload.message || '', {
       images: payload.images,
     }).catch((error: any) => {
       promptError = safeString(error && error.message ? error.message : error) || 'pi_sdk_prompt_failed'
@@ -2981,18 +2982,4 @@ export {
   loadPiSdkModule,
   createRinPiSession,
   runPiSdkTurn,
-}
-SdkTurn,
-}
-}
-SdkTurn,
-}
-n,
-}
-SdkTurn,
-}
-}
-SdkTurn,
-}
-Turn,
 }

@@ -897,6 +897,11 @@ async function searchWeb({ stateRoot, query, limit = 8, freshness = '', safe = '
 
 export {
   DEFAULT_CONFIG,
+  normalizeProviderList,
+  normalizeStringList,
+  normalizeBaseUrl,
+  normalizeConfigShape,
+  reserveSerperFallbackSlot,
   loadConfigResolved,
   ensureSearxngSidecar,
   stopSearxngSidecar,

@@ -17,6 +17,14 @@ need_cmd node
 need_cmd npm
 need_cmd mktemp
 
+run_npm_install() {
+  if [ -f package-lock.json ]; then
+    npm ci --no-fund --no-audit
+  else
+    npm install --no-fund --no-audit
+  fi
+}
+
 if [ "$#" -eq 0 ]; then
   set -- --current-user --yes
 fi
@@ -37,6 +45,6 @@ if ! git clone --depth 1 --branch "$REF" "$REPO_URL" "$CLONE_DIR"; then
 fi
 
 cd "$CLONE_DIR"
-npm install --no-fund --no-audit
+run_npm_install
 npm run -s build
 node ./dist/index.js __install "$@" --source-repo "$REPO_URL" --source-ref "$REF"
