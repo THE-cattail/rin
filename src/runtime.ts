@@ -4,10 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import nodeCrypto from 'node:crypto'
 import net from 'node:net'
-import { spawn } from 'node:child_process'
+import nodeUtil from 'node:util'
 
 import { Type } from '@sinclair/typebox'
 
+import { runBrainCli } from './brain'
 import { searchWeb } from './web-search'
 
 function ensureDir(dir: string): void {
@@ -240,45 +241,7 @@ function collectMessageText(message: any): string {
   return parts.join('\n\n').trim()
 }
 
-async function runNodeEntrypoint({
-  entryPath,
-  repoRoot,
-  stateRoot,
-  args,
-  signal,
-}: {
-  entryPath: string
-  repoRoot: string
-  stateRoot: string
-  args: string[]
-  signal?: AbortSignal
-}): Promise<{ code: number, stdout: string, stderr: string }> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [entryPath, ...args], {
-      cwd: stateRoot,
-      env: {
-        ...process.env,
-        RIN_REPO_ROOT: repoRoot,
-        PI_SKIP_VERSION_CHECK: safeString(process.env.PI_SKIP_VERSION_CHECK || '1') || '1',
-        MEM0_TELEMETRY: safeString(process.env.MEM0_TELEMETRY || 'false') || 'false',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += String(chunk) })
-    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-    child.on('error', reject)
-    child.on('exit', (code) => resolve({ code: Number(code ?? 1), stdout: trimText(stdout), stderr: trimText(stderr) }))
-    if (signal) {
-      const abort = () => {
-        try { child.kill('SIGTERM') } catch {}
-      }
-      if (signal.aborted) abort()
-      else signal.addEventListener('abort', abort, { once: true })
-    }
-  })
-}
+let brainCommandSerial: Promise<void> = Promise.resolve()
 
 async function runRinBrainCommand({
   repoRoot,
@@ -291,13 +254,49 @@ async function runRinBrainCommand({
   args: string[]
   signal?: AbortSignal
 }): Promise<{ code: number, stdout: string, stderr: string }> {
-  return await runNodeEntrypoint({
-    entryPath: path.join(repoRoot, 'dist', 'brain.js'),
-    repoRoot,
-    stateRoot,
-    args,
-    signal,
-  })
+  void repoRoot
+  if (signal?.aborted) return { code: 1, stdout: '', stderr: 'aborted' }
+  const previous = brainCommandSerial
+  let release!: () => void
+  brainCommandSerial = new Promise<void>((resolve) => { release = resolve })
+  await previous
+  let stdout = ''
+  let stderr = ''
+  const originalLog = console.log
+  const originalError = console.error
+  const append = (target: 'stdout' | 'stderr', parts: any[]) => {
+    const text = nodeUtil.format(...parts)
+    if (target === 'stdout') stdout += `${text}\n`
+    else stderr += `${text}\n`
+  }
+  try {
+    console.log = (...parts: any[]) => { append('stdout', parts) }
+    console.error = (...parts: any[]) => { append('stderr', parts) }
+    const originalRepoRoot = process.env.RIN_REPO_ROOT
+    const originalSkipVersion = process.env.PI_SKIP_VERSION_CHECK
+    const originalMem0Telemetry = process.env.MEM0_TELEMETRY
+    try {
+      process.env.RIN_REPO_ROOT = repoRoot
+      process.env.PI_SKIP_VERSION_CHECK = safeString(process.env.PI_SKIP_VERSION_CHECK || '1') || '1'
+      process.env.MEM0_TELEMETRY = safeString(process.env.MEM0_TELEMETRY || 'false') || 'false'
+      const code = await runBrainCli(args, stateRoot)
+      return { code: Number(code ?? 0), stdout: trimText(stdout), stderr: trimText(stderr) }
+    } finally {
+      if (originalRepoRoot == null) delete process.env.RIN_REPO_ROOT
+      else process.env.RIN_REPO_ROOT = originalRepoRoot
+      if (originalSkipVersion == null) delete process.env.PI_SKIP_VERSION_CHECK
+      else process.env.PI_SKIP_VERSION_CHECK = originalSkipVersion
+      if (originalMem0Telemetry == null) delete process.env.MEM0_TELEMETRY
+      else process.env.MEM0_TELEMETRY = originalMem0Telemetry
+    }
+  } catch (error: any) {
+    append('stderr', [safeString(error && error.message ? error.message : error)])
+    return { code: 1, stdout: trimText(stdout), stderr: trimText(stderr) }
+  } finally {
+    console.log = originalLog
+    console.error = originalError
+    release()
+  }
 }
 
 function brainQueueRootForState(stateRoot: string) {
@@ -1261,8 +1260,8 @@ function createRinBuiltinTools({
   const brainTool = {
     name: 'rin_brain',
     label: 'Rin Brain',
-    description: 'Search and update memory, history, and knowledge.',
-    promptSnippet: 'Search and update memory, history, and knowledge.',
+    description: 'Search or update Rin memory, conversation history, and indexed knowledge.',
+    promptSnippet: 'Search or update Rin memory, conversation history, and indexed knowledge.',
     promptGuidelines: [],
     parameters: Type.Object({
       action: Type.Union([
@@ -1312,8 +1311,8 @@ function createRinBuiltinTools({
   const koishiTool = {
     name: 'rin_koishi',
     label: 'Rin Koishi',
-    description: 'Send messages, inspect chat history, and manage trusted platform identities.',
-    promptSnippet: 'Send messages, inspect chat history, and manage trusted platform identities.',
+    description: 'Send bridge messages, inspect chat history, and manage trusted platform identities.',
+    promptSnippet: 'Send bridge messages, inspect chat history, and manage trusted platform identities.',
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('send'),
@@ -1384,8 +1383,8 @@ function createRinBuiltinTools({
   const scheduleTool = {
     name: 'rin_schedule',
     label: 'Rin Schedule',
-    description: 'Manage timers and inspect schedules.',
-    promptSnippet: 'Manage timers and inspect schedules.',
+    description: 'List, create, run, and manage timers or inspect scheduled jobs.',
+    promptSnippet: 'List, create, run, and manage timers or inspect scheduled jobs.',
     parameters: Type.Object({
       kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
       action: Type.Union([
@@ -1431,8 +1430,8 @@ function createRinBuiltinTools({
   const webSearchTool = {
     name: 'web_search',
     label: 'Web Search',
-    description: 'Search the live public web. Use this when a task needs current public information, official docs, release notes, pricing, or source-backed verification.',
-    promptSnippet: 'Search the live public web when the task needs current public information, official docs, release notes, pricing, or source-backed verification.',
+    description: 'Search the live web for current public information, official docs, release notes, pricing, or source-backed verification.',
+    promptSnippet: 'Search the live web for current public information, official docs, release notes, pricing, or source-backed verification.',
     parameters: Type.Object({
       query: Type.String(),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
@@ -1470,156 +1469,139 @@ function createRinBuiltinTools({
     },
   }
 
-  const listModelsTool = {
-    name: 'list_models',
-    label: 'List Models',
-    description: 'List available models in the Rin runtime. Use this to verify model IDs before calling switch_model.',
-    promptSnippet: 'List configured models before switching models.',
-    promptGuidelines: [
-      'Call list_models before switch_model if available model IDs are unknown.',
-    ],
-    parameters: Type.Object({}),
-    execute: async (_toolCallId: string, _params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
-      try {
-        const models = listAvailableModels(ctx)
-        return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
-      } catch (e: any) {
-        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-      }
-    },
+  function normalizeToolThinkingLevel(value: any): string | undefined {
+    const next = safeString(value).trim().toLowerCase()
+    if (!next) return undefined
+    if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(next)) return undefined
+    return next
   }
 
-  const loadSkillTool = {
-    name: 'load_skill',
-    label: 'Load Skill',
-    description: 'Load a skill by name from the runtime registry, including hidden skills under skills/.hidden/. Use this instead of reading SKILL.md files manually.',
-    promptSnippet: 'Load a skill by name when you need its full instructions.',
-    promptGuidelines: [
-      'Use load_skill instead of reading SKILL.md files manually.',
-      'Call it with the exact skill name from available_skills or from runtime hints.',
-      'Hidden skills under skills/.hidden/ are available through this tool even though they are not listed in available_skills.',
-    ],
+  function resolveSwitchModel(ctx: any, params: any) {
+    const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
+    const requestedProvider = safeString(params && params.provider).trim()
+    const requestedModel = safeString(params && params.model).trim()
+    if (!registry) throw new Error('missing_model_registry')
+    if (!requestedModel) throw new Error('missing_model')
+
+    const allModels = Array.isArray(typeof registry.getAll === 'function' ? registry.getAll() : [])
+      ? registry.getAll()
+      : []
+    const availableModels = Array.isArray(typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
+      ? registry.getAvailable()
+      : []
+
+    if (requestedProvider) {
+      const found = typeof registry.find === 'function' ? registry.find(requestedProvider, requestedModel) : undefined
+      if (!found) throw new Error(`model_not_found:${requestedProvider}/${requestedModel}`)
+      const available = availableModels.find((entry: any) => safeString(entry && entry.provider).trim() === requestedProvider && safeString(entry && entry.id).trim() === requestedModel)
+      if (!available) throw new Error(`model_not_available:${requestedProvider}/${requestedModel}`)
+      return available
+    }
+
+    const availableMatches = availableModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
+    if (availableMatches.length === 1) return availableMatches[0]
+    if (availableMatches.length > 1) {
+      const providers = availableMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
+      throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+    }
+
+    const allMatches = allModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
+    if (allMatches.length === 1) {
+      const only = allMatches[0]
+      throw new Error(`model_not_available:${safeString(only && only.provider).trim()}/${requestedModel}`)
+    }
+    if (allMatches.length > 1) {
+      const providers = allMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
+      throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+    }
+
+    throw new Error(`model_not_found:${requestedModel}`)
+  }
+
+  function collectContextFiles(targetPath: string) {
+    const raw = safeString(targetPath).trim()
+    const resolvedTarget = path.resolve(raw || process.cwd())
+    let currentDir = resolvedTarget
+    try {
+      const stat = fs.statSync(resolvedTarget)
+      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
+    } catch {
+      currentDir = path.dirname(resolvedTarget)
+    }
+
+    const agentsFiles: Array<any> = []
+    const seen = new Set<string>()
+    let cursor = currentDir
+    while (true) {
+      const agentsPath = path.join(cursor, 'AGENTS.md')
+      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
+        seen.add(agentsPath)
+        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
+      }
+      const parent = path.dirname(cursor)
+      if (!parent || parent === cursor) break
+      cursor = parent
+    }
+
+    const localRinDir = path.join(currentDir, '.rin')
+    let localRinEntries: Array<any> = []
+    if (fs.existsSync(localRinDir)) {
+      try {
+        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
+          const entryPath = path.join(localRinDir, name)
+          let kind = 'missing'
+          try {
+            const stat = fs.statSync(entryPath)
+            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
+          } catch {}
+          return { name, path: entryPath, kind }
+        })
+      } catch {}
+    }
+
+    return {
+      targetPath: resolvedTarget,
+      directory: currentDir,
+      agentsFiles,
+      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
+      localRinEntries,
+    }
+  }
+
+  const runtimeTool = {
+    name: 'rin_runtime',
+    label: 'Rin Runtime',
+    description: 'Inspect runtime resources and switch models. Use this for configured models, skill instructions, and AGENTS.md context files.',
+    promptSnippet: 'Inspect runtime resources and switch models.',
     parameters: Type.Object({
-      name: Type.String({ description: 'Skill name to load.' }),
-      includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references from the skill body. Default: true.' })),
+      action: Type.Union([
+        Type.Literal('models_list'),
+        Type.Literal('model_switch'),
+        Type.Literal('skill_get'),
+        Type.Literal('context_get'),
+      ]),
+      provider: Type.Optional(Type.String({ description: 'Provider ID for model_switch.' })),
+      model: Type.Optional(Type.String({ description: 'Model ID for model_switch.' })),
+      thinking: Type.Optional(Type.Union([
+        Type.Literal('off'),
+        Type.Literal('minimal'),
+        Type.Literal('low'),
+        Type.Literal('medium'),
+        Type.Literal('high'),
+        Type.Literal('xhigh'),
+      ])),
+      name: Type.Optional(Type.String({ description: 'Skill name for skill_get.' })),
+      includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references for skill_get. Default: true.' })),
+      path: Type.Optional(Type.String({ description: 'Target file or directory for context_get. Defaults to the current working directory.' })),
     }),
-    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       try {
-        const requestedName = safeString(params && params.name).trim()
-        if (!requestedName) throw new Error('missing_skill_name')
-        const skill = listRuntimeSkills().find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
-        if (!skill) throw new Error(`skill_not_found:${requestedName}`)
-        let content = ''
-        try { content = fs.readFileSync(skill.filePath, 'utf8') } catch {}
-        if (!content.trim()) throw new Error(`skill_read_failed:${requestedName}`)
-        const body = stripSkillFrontmatterLocal(content)
-        const includeReferences = params && params.includeReferences !== false
-        const references = includeReferences ? collectSkillReferences(body, skill.baseDir) : []
-        const result = {
-          name: skill.name,
-          description: skill.description,
-          hidden: Boolean(skill.disableModelInvocation),
-          content,
-          body,
-          baseDir: skill.baseDir,
-          filePath: skill.filePath,
-          references,
+        const action = safeString(params && params.action).trim()
+        if (action === 'models_list') {
+          const models = listAvailableModels(ctx)
+          return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
         }
-        return toolResultFromText(JSON.stringify(result, null, 2), result, false)
-      } catch (e: any) {
-        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-      }
-    },
-  }
-
-  return [brainTool, koishiTool, scheduleTool, webSearchTool, listModelsTool, loadSkillTool]
-}
-
-function createRinBuiltinExtensionFactory({
-  repoRoot,
-  stateRoot,
-  brainChatKey = 'local:default',
-}: {
-  repoRoot: string
-  stateRoot: string
-  brainChatKey?: string
-}) {
-  return (pi: any) => {
-    try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
-
-    function normalizeToolThinkingLevel(value: any): string | undefined {
-      const next = safeString(value).trim().toLowerCase()
-      if (!next) return undefined
-      if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(next)) return undefined
-      return next
-    }
-
-    function resolveSwitchModel(ctx: any, params: any) {
-      const registry = ctx && ctx.modelRegistry
-      const requestedProvider = safeString(params && params.provider).trim()
-      const requestedModel = safeString(params && params.model).trim()
-      if (!registry) throw new Error('missing_model_registry')
-      if (!requestedModel) throw new Error('missing_model')
-
-      const allModels = Array.isArray(typeof registry.getAll === 'function' ? registry.getAll() : [])
-        ? registry.getAll()
-        : []
-      const availableModels = Array.isArray(typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
-        ? registry.getAvailable()
-        : []
-
-      if (requestedProvider) {
-        const found = typeof registry.find === 'function' ? registry.find(requestedProvider, requestedModel) : undefined
-        if (!found) throw new Error(`model_not_found:${requestedProvider}/${requestedModel}`)
-        const available = availableModels.find((entry: any) => safeString(entry && entry.provider).trim() === requestedProvider && safeString(entry && entry.id).trim() === requestedModel)
-        if (!available) throw new Error(`model_not_available:${requestedProvider}/${requestedModel}`)
-        return available
-      }
-
-      const availableMatches = availableModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
-      if (availableMatches.length === 1) return availableMatches[0]
-      if (availableMatches.length > 1) {
-        const providers = availableMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
-        throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
-      }
-
-      const allMatches = allModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
-      if (allMatches.length === 1) {
-        const only = allMatches[0]
-        throw new Error(`model_not_available:${safeString(only && only.provider).trim()}/${requestedModel}`)
-      }
-      if (allMatches.length > 1) {
-        const providers = allMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
-        throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
-      }
-
-      throw new Error(`model_not_found:${requestedModel}`)
-    }
-
-    pi.registerTool({
-      name: 'switch_model',
-      label: 'Switch Model',
-      description: 'Switch the current session to another configured model. Use list_models to find available IDs.',
-      promptSnippet: 'Switch the active session model.',
-      promptGuidelines: [
-        'Use when a different model is better suited for the remaining conversation.',
-        'Call list_models if the target ID is unknown.',
-        'This updates the session model directly rather than invoking a sub-agent.',
-      ],
-      parameters: Type.Object({
-        provider: Type.Optional(Type.String({ description: 'Provider ID, such as anthropic or openai. Optional if the model ID is unique among available models.' })),
-        model: Type.String({ description: 'Target model ID. Use list_models first if unsure.' }),
-        thinking: Type.Optional(Type.Union([
-          Type.Literal('off'),
-          Type.Literal('minimal'),
-          Type.Literal('low'),
-          Type.Literal('medium'),
-          Type.Literal('high'),
-          Type.Literal('xhigh'),
-        ])),
-      }),
-      async execute(_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) {
-        try {
+        if (action === 'model_switch') {
           const targetModel = resolveSwitchModel(ctx, params)
           const previousProvider = safeString(ctx && ctx.model && ctx.model.provider).trim()
           const previousModel = safeString(ctx && ctx.model && ctx.model.id).trim()
@@ -1642,11 +1624,55 @@ function createRinBuiltinExtensionFactory({
               },
             },
           )
-        } catch (e: any) {
-          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
         }
-      },
-    })
+        if (action === 'skill_get') {
+          const requestedName = safeString(params && params.name).trim()
+          if (!requestedName) throw new Error('missing_skill_name')
+          const skill = listRuntimeSkills().find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
+          if (!skill) throw new Error(`skill_not_found:${requestedName}`)
+          let content = ''
+          try { content = fs.readFileSync(skill.filePath, 'utf8') } catch {}
+          if (!content.trim()) throw new Error(`skill_read_failed:${requestedName}`)
+          const body = stripSkillFrontmatterLocal(content)
+          const includeReferences = params && params.includeReferences !== false
+          const references = includeReferences ? collectSkillReferences(body, skill.baseDir) : []
+          const result = {
+            name: skill.name,
+            description: skill.description,
+            hidden: Boolean(skill.disableModelInvocation),
+            content,
+            body,
+            baseDir: skill.baseDir,
+            filePath: skill.filePath,
+            references,
+          }
+          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+        }
+        if (action === 'context_get') {
+          const result = collectContextFiles(safeString(params && params.path))
+          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+        }
+        throw new Error(`unsupported_action:${action}`)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
+    },
+  }
+
+  return [brainTool, koishiTool, scheduleTool, webSearchTool, runtimeTool]
+}
+
+function createRinBuiltinExtensionFactory({
+  repoRoot,
+  stateRoot,
+  brainChatKey = 'local:default',
+}: {
+  repoRoot: string
+  stateRoot: string
+  brainChatKey?: string
+}) {
+  return (pi: any) => {
+    try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
 
     pi.on('message_start', async (event: any) => {
       const message = event && event.message
@@ -1686,8 +1712,6 @@ function buildRinBuiltinPromptBlock({
     `- Main documentation: ${path.join(docsRinRoot, 'README.md')}`,
     `- Additional docs: ${path.join(docsRinRoot, 'docs')}`,
     `- Examples: ${path.join(docsRinRoot, 'examples')}`,
-    '- If a task explicitly targets a directory and local instructions may matter, inspect that directory\'s `AGENTS.md` or `.rin/` contents yourself.',
-    '- If the current task is not yet complete, reply with exactly `#RIN_CONTINUE` and nothing else. The runtime will automatically continue in TUI and daemon-run scenes.',
     '',
   ].join('\n')
 }
@@ -1763,7 +1787,7 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 let piSdkModulePromise: Promise<PiSdkModule> | null = null
 
 const PI_DEFAULT_OPENING = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.'
-const RIN_OPENING = "You are Rin, the user's general intelligent assistant. Answer all of the user's questions and fulfill all of the user's requests yourself rather than telling the user to do the work. Unless you have confirmed that a task is genuinely beyond your capabilities, complete it directly instead of instructing the user to handle it themselves. Only decline a task when it is truly beyond your capabilities."
+const RIN_OPENING = "You are Rin, the user's general intelligent assistant. Follow the user's instructions and carry them out directly. Prioritize doing the work yourself, and only guide the user when you are certain a task is beyond your capabilities."
 
 function safeString(value: any): string {
   if (value == null) return ''
@@ -1966,7 +1990,6 @@ function formatSkillsForPrompt(skills: Array<any>): string {
   if (!visibleSkills.length) return ''
   const lines = [
     'Available skills provide specialized instructions for specific tasks.',
-    'Invoke `load_skill` by name when a task matches a skill\'s description.',
     '',
     '<available_skills>',
   ]
@@ -2090,6 +2113,11 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
 
   next = next.replace(/\nCurrent date:.*$/gm, '')
   next = next.replace(/\nCurrent working directory:.*$/gm, '')
+
+  const continueGuideline = '- If the current task is not yet complete, reply with exactly `#RIN_CONTINUE` and nothing else.'
+  if (!next.includes(continueGuideline)) {
+    next = next.replace('Show file paths clearly when working with files', `Show file paths clearly when working with files\n${continueGuideline}`)
+  }
 
   const builtinBlock = buildRinBuiltinPromptBlock({ stateRoot, docsRoot })
   const skillBlock = safeString(manualSkillBlock).trim()
@@ -2222,6 +2250,10 @@ function syncRinPiSettings(agentDir: string) {
   try { current = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) } catch {}
   const next = current && typeof current === 'object' ? JSON.parse(JSON.stringify(current)) : {}
   if (next.enableSkillCommands == null) next.enableSkillCommands = true
+  if (!next.memory || typeof next.memory !== 'object') next.memory = {}
+  if (next.memory.provider == null) next.memory.provider = 'openai-codex'
+  if (next.memory.model == null) next.memory.model = 'gpt-5.4'
+  if (next.memory.thinking == null) next.memory.thinking = 'minimal'
   fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), 'utf8')
 }
 

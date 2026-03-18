@@ -11,8 +11,11 @@ import { pipeline } from 'node:stream/promises';
 
 import { connect, Index } from '@lancedb/lancedb';
 import type { Table } from '@lancedb/lancedb';
-import { Memory as Mem0Memory } from 'mem0ai/oss';
 
+process.env.MEM0_TELEMETRY = typeof process.env.MEM0_TELEMETRY === 'string' && process.env.MEM0_TELEMETRY.trim()
+  ? process.env.MEM0_TELEMETRY
+  : 'false';
+const { Memory: Mem0Memory } = require('mem0ai/oss');
 const { TransformersEmbeddingFunction } = require('@lancedb/lancedb/embedding/transformers');
 const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (filename: string) => any };
 
@@ -202,46 +205,36 @@ function normalizeMemoryText(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function normalizeCandidateSourceText(input: string): string {
-  const raw = String(input || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  if (!raw.startsWith('#RIN_')) return raw;
-  const marker = '\n---\n\n';
-  const idx = raw.lastIndexOf(marker);
-  if (idx >= 0) return raw.slice(idx + marker.length);
-  return raw;
+function tokenizeRecallText(input: string): string[] {
+  return [...new Set(normalizeMemoryText(input)
+    .split(/[^a-z0-9\u4e00-\u9fff@._-]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2))];
 }
 
-function extractCandidateSnippets(input: string, limit = 8): string[] {
-  const raw = normalizeCandidateSourceText(input);
-  const seeds: string[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    if (trimmed.startsWith('```')) continue;
-    const stripped = trimmed.replace(/^[>\-*\d.)\]\s]+/, '').trim();
-    if (!stripped) continue;
-    if (stripped.length <= 220) seeds.push(stripped);
-    else {
-      for (const part of stripped.split(/[。！？!?；;]+/g)) {
-        const piece = part.trim();
-        if (piece) seeds.push(piece);
-      }
-    }
+function recallLexicalScore(query: string, text: string): number {
+  const rawQuery = normalizeMemoryText(query);
+  const rawText = normalizeMemoryText(text);
+  if (!rawQuery || !rawText) return 0;
+  let score = 0;
+  if (rawText.includes(rawQuery)) score += 2;
+  const queryTokens = tokenizeRecallText(rawQuery);
+  if (!queryTokens.length) return score;
+  for (const token of queryTokens) {
+    if (!token) continue;
+    if (rawText.includes(token)) score += token.length >= 4 ? 0.7 : 0.4;
   }
+  return score;
+}
 
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const seed of seeds) {
-    const clean = seed.replace(/\s+/g, ' ').trim();
-    if (clean.length < 12 || clean.length > 220) continue;
-    if (/^(chatKey|fromSeq|toSeq|logFiles|platform|chatId|chatType|botSelfId|messageId|quotedText|attachments)\s*:/.test(clean)) continue;
-    const norm = clean.toLowerCase().replace(/[\s`"'，。！？!?：:；;（）()\-]/g, '');
-    if (norm.length < 8 || seen.has(norm)) continue;
-    seen.add(norm);
-    out.push(clean);
-    if (out.length >= limit) break;
-  }
-  return out;
+function recencyScore(iso: string): number {
+  const ts = parseIso(iso)?.getTime();
+  if (!ts) return 0;
+  const ageHours = Math.max(0, (Date.now() - ts) / (1000 * 60 * 60));
+  if (ageHours <= 24) return 0.45;
+  if (ageHours <= 24 * 7) return 0.3;
+  if (ageHours <= 24 * 30) return 0.18;
+  return 0.05;
 }
 
 function findExecutableOnPath(name: string): string {
@@ -386,6 +379,7 @@ class MemoryRuntime {
   private paths: RuntimePaths;
   private embeddings: SharedEmbeddings;
   private mem0: Mem0Memory | null = null;
+  private memoryModelRuntimePromise: Promise<any> | null = null;
 
   constructor(paths: RuntimePaths) {
     this.paths = paths;
@@ -450,12 +444,53 @@ class MemoryRuntime {
     };
   }
 
-  private llmReady(): boolean {
-    return Boolean(process.env.RIN_MEMORY_OPENAI_API_KEY || process.env.OPENAI_API_KEY || process.env.RIN_MEMORY_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || process.env.OPENROUTER_API_KEY || process.env.RIN_MEMORY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST);
+  private readMemoryModelSettings(): { provider: string; model: string; thinking: string } {
+    let settings: any = {};
+    try {
+      settings = JSON.parse(fssync.readFileSync(path.join(this.paths.root, 'settings.json'), 'utf8'));
+    } catch {}
+    const memory = settings && typeof settings.memory === 'object' ? settings.memory : {};
+    const provider = safeString(process.env.RIN_MEMORY_MODEL_PROVIDER || memory.provider || settings.memoryProvider || settings.defaultProvider || 'openai-codex').trim() || 'openai-codex';
+    const model = safeString(process.env.RIN_MEMORY_MODEL || memory.model || settings.memoryModel || settings.defaultModel || 'gpt-5.4').trim() || 'gpt-5.4';
+    const thinking = safeString(process.env.RIN_MEMORY_MODEL_THINKING || memory.thinking || settings.memoryThinking || 'minimal').trim() || 'minimal';
+    return { provider, model, thinking };
   }
 
-  private defaultInfer(): boolean {
-    return this.llmReady() && process.env.RIN_MEMORY_INFER_WRITES !== '0';
+  private async getMemoryModelRuntime(): Promise<any> {
+    if (!this.memoryModelRuntimePromise) {
+      this.memoryModelRuntimePromise = (async () => {
+        const piSdkPath = path.join(__dirname, '..', 'node_modules', '@mariozechner', 'pi-coding-agent', 'dist', 'index.js');
+        const piAiPath = path.join(__dirname, '..', 'node_modules', '@mariozechner', 'pi-ai', 'dist', 'index.js');
+        const { AuthStorage, ModelRegistry } = require(piSdkPath);
+        const { completeSimple } = require(piAiPath);
+        const authPath = path.join(this.paths.root, 'auth.json');
+        const modelsPath = path.join(this.paths.root, 'models.json');
+        const authStorage = AuthStorage.create(authPath);
+        const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+        const selected = this.readMemoryModelSettings();
+        const model = modelRegistry.find(selected.provider, selected.model);
+        if (!model) throw new Error(`memory_model_not_found:${selected.provider}/${selected.model}`);
+        const apiKey = await modelRegistry.getApiKey(model);
+        if (!apiKey) throw new Error(`memory_model_auth_missing:${selected.provider}`);
+        return {
+          selected,
+          model,
+          apiKey,
+          completeSimple,
+        };
+      })();
+    }
+    return await this.memoryModelRuntimePromise;
+  }
+
+  private async memoryInferReady(): Promise<boolean> {
+    if (process.env.RIN_MEMORY_INFER_WRITES === '0') return false;
+    try {
+      await this.getMemoryModelRuntime();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private defaultChatKey(): string {
@@ -470,8 +505,8 @@ class MemoryRuntime {
     return fallback || this.defaultChatKey();
   }
 
-  private eventShardPath(chatKey: string, ts: Date): string {
-    return path.join(this.paths.eventsDir, `${ts.getUTCFullYear()}`, `${String(ts.getUTCMonth() + 1).padStart(2, '0')}`, `${String(ts.getUTCDate()).padStart(2, '0')}`, `${slugifyChatKey(chatKey)}.jsonl`);
+  private eventShardPath(_chatKey: string, ts: Date): string {
+    return path.join(this.paths.eventsDir, `${ts.getUTCFullYear()}`, `${String(ts.getUTCMonth() + 1).padStart(2, '0')}`, `${String(ts.getUTCDate()).padStart(2, '0')}`, 'events.jsonl');
   }
 
   private async iterEventFiles(): Promise<string[]> {
@@ -545,30 +580,31 @@ class MemoryRuntime {
     return row;
   }
 
-  async readRecentEvents(hours: number, limit: number, chatKey?: string): Promise<EventRow[]> {
+  async readRecentEvents(hours: number, limit: number, _chatKey?: string): Promise<EventRow[]> {
     const cutoff = Date.now() - hours * 60 * 60 * 1000;
-    const filterChat = safeString(chatKey || '').trim();
     const rows = (await this.readAllEvents()).filter((row) => {
       const ts = parseIso(row.ts);
       if (!ts) return false;
-      if (filterChat && row.chat_key !== filterChat) return false;
       return ts.getTime() >= cutoff;
     });
     rows.sort((a, b) => b.ts.localeCompare(a.ts));
     return rows.slice(0, limit);
   }
 
-  async searchEvents(query: string, limit: number, chatKey?: string): Promise<EventRow[]> {
-    const needle = query.trim().toLowerCase();
-    const filterChat = safeString(chatKey || '').trim();
+  async searchEvents(query: string, limit: number, _chatKey?: string): Promise<EventRow[]> {
+    const needle = query.trim();
     if (!needle) return [];
-    const rows = (await this.readAllEvents()).filter((row) => {
-      if (filterChat && row.chat_key !== filterChat) return false;
-      const haystack = `${row.type} ${row.content} ${row.chat_key} ${JSON.stringify(row.meta)}`.toLowerCase();
-      return haystack.includes(needle);
-    });
-    rows.sort((a, b) => b.ts.localeCompare(a.ts));
-    return rows.slice(0, limit);
+    const rows = (await this.readAllEvents())
+      .map((row) => {
+        const haystack = `${row.type} ${row.content} ${row.chat_key} ${JSON.stringify(row.meta)}`;
+        const score = recallLexicalScore(needle, haystack) + recencyScore(row.ts);
+        return { row, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || b.row.ts.localeCompare(a.row.ts))
+      .slice(0, limit)
+      .map((entry) => entry.row);
+    return rows;
   }
 
   async migrateLegacyEvents(): Promise<Json> {
@@ -643,6 +679,65 @@ class MemoryRuntime {
     if (!this.mem0) {
       await fs.mkdir(this.paths.mem0Dir, { recursive: true });
       this.mem0 = new Mem0Memory(this.mem0Config() as any);
+      (this.mem0 as any).llm = {
+        generateResponse: async (messages: Array<Record<string, unknown>>, responseFormat?: Record<string, unknown>) => {
+          const runtime = await this.getMemoryModelRuntime();
+          const baseSystemPrompt = (Array.isArray(messages) ? messages : [])
+            .filter((message) => safeString(message && message.role) === 'system')
+            .map((message) => safeString(message && message.content))
+            .join('\n\n')
+            .trim();
+          const baseChatMessages = (Array.isArray(messages) ? messages : [])
+            .filter((message) => ['user', 'assistant'].includes(safeString(message && message.role)))
+            .map((message) => ({
+              role: safeString(message && message.role) === 'assistant' ? 'assistant' : 'user',
+              content: safeString(message && message.content),
+              timestamp: Date.now(),
+            }));
+          const wantJson = safeString((responseFormat as any)?.type || '') === 'json_object';
+          const jsonInstruction = 'Return exactly one valid JSON object. Do not wrap it in markdown fences. Do not add explanations before or after the JSON.';
+          const collectText = (response: any) => (Array.isArray(response?.content) ? response.content : [])
+            .filter((block: any) => block && block.type === 'text')
+            .map((block: any) => safeString(block.text))
+            .join('\n')
+            .trim();
+          const invoke = async (repair = false, priorText = '') => {
+            const messages = repair
+              ? [
+                  ...baseChatMessages,
+                  ...(priorText ? [{ role: 'assistant', content: priorText, timestamp: Date.now() }] : []),
+                  {
+                    role: 'user',
+                    content: 'Your previous reply was invalid for the required format. Return only a valid JSON object now. No markdown fences, no commentary, no surrounding text.',
+                    timestamp: Date.now(),
+                  },
+                ]
+              : baseChatMessages;
+            const systemPrompt = wantJson
+              ? [baseSystemPrompt, jsonInstruction].filter(Boolean).join('\n\n')
+              : baseSystemPrompt;
+            return await runtime.completeSimple(runtime.model, {
+              ...(systemPrompt ? { systemPrompt } : {}),
+              messages,
+            }, {
+              apiKey: runtime.apiKey,
+              reasoning: runtime.selected.thinking,
+              maxTokens: 4096,
+            });
+          };
+          const first = await invoke(false, '');
+          let text = collectText(first);
+          if (wantJson) {
+            try {
+              JSON.parse(text);
+            } catch {
+              const repaired = await invoke(true, text);
+              text = collectText(repaired);
+            }
+          }
+          return text;
+        },
+      };
       await this.bootstrapMem0FromHistory(this.mem0);
     }
     return this.mem0;
@@ -783,16 +878,6 @@ class MemoryRuntime {
     };
   }
 
-  private candidateFinalizeProfile(role: string, text: string): { importance: number; ttlDays: number } | null {
-    const raw = String(text || '');
-    const stable = /(记住|以后|默认|偏好|习惯|喜欢|通常|总是|称呼|身份|角色|目标|规则|原则|长期)/.test(raw);
-    const active = /(还没|尚未|待|之后|下次|需要|未定|open loop|todo|TODO|排优先级|先这样做)/i.test(raw);
-    if (stable) return { importance: 82, ttlDays: 365 };
-    if (active) return { importance: 72, ttlDays: 21 };
-    if (role === 'user' && /(记一下|别忘|提醒|到时候|回头|继续|这个要留着)/.test(raw)) return { importance: 64, ttlDays: 30 };
-    return null;
-  }
-
   private async addCandidate(scope: ScopeContext, text: string, options: CandidateWriteOptions): Promise<{ merged: boolean; candidate: CandidateRow }> {
     const importance = clampInt(options.importance, 1, 100);
     const ttlDays = clampInt(options.ttlDays, 1, 3650);
@@ -885,32 +970,6 @@ class MemoryRuntime {
     return { merged, candidate: this.candidateRow(row) };
   }
 
-  private async addMem0ScopedMemory(scope: ScopeContext, text: string, options: {
-    source: string;
-    sourceEventId?: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<{ merged: boolean }> {
-    const memory = await this.getMem0();
-    const filters: Record<string, unknown> = { ...scope.mem0Filters };
-    const existing = await memory.search(text, { ...filters, limit: 8 } as any);
-    const existsAlready = Array.isArray(existing?.results) && existing.results.some((item: any) =>
-      normalizeMemoryText(safeString(item.memory || '')) === normalizeMemoryText(text)
-    );
-    if (existsAlready) return { merged: true };
-    await memory.add(text, {
-      ...filters,
-      infer: false,
-      metadata: {
-        source: safeString(options.source || 'memory.finalize'),
-        ...(options.sourceEventId ? { source_event_id: options.sourceEventId } : {}),
-        chat_key: scope.chatKey,
-        ...scope.metadata,
-        ...(options.metadata && typeof options.metadata === 'object' ? options.metadata : {}),
-      },
-    } as any);
-    return { merged: false };
-  }
-
   private eventMatchesScope(row: EventRow, scope: ScopeContext): boolean {
     const meta = row.meta || {};
     if (scope.scope === 'chat') return row.chat_key === scope.chatKey;
@@ -967,6 +1026,31 @@ class MemoryRuntime {
     return rows.map((row) => this.candidateRow(row));
   }
 
+  private rankMem0Row(query: string, scope: ScopeContext, row: Record<string, unknown>): number {
+    const text = safeString(row.memory || '');
+    const metadata = (row.metadata && typeof row.metadata === 'object') ? row.metadata as Record<string, unknown> : {};
+    const source = safeString(metadata.source || '');
+    const memoryScope = safeString(metadata.memory_scope || '');
+    const runId = safeString(row.runId || metadata.run_id || '');
+    let score = Number(row.score || 0);
+    score += recallLexicalScore(query, text);
+    score += recencyScore(safeString(row.updatedAt || row.createdAt || ''));
+    if (source === 'remember' || source === 'inbox') score += 0.7;
+    if (source.startsWith('session.finalize')) score -= 0.45;
+    if (source === 'candidate.tidy') score -= 0.2;
+    if (scope.scope === 'user' && (memoryScope === 'chat' || memoryScope === 'run' || runId)) score -= 0.7;
+    if (scope.scope === 'chat' && runId && runId === scope.runId) score += 0.35;
+    if (scope.scope === 'chat' && safeString(metadata.chat_key || '') === scope.chatKey) score += 0.1;
+    return score;
+  }
+
+  private rankCandidateRow(query: string, row: Record<string, unknown>): number {
+    return recallLexicalScore(query, safeString(row.text || ''))
+      + (Number(row.importance || 0) / 100)
+      + Math.min(0.5, Number(row.hits || 0) * 0.05)
+      + recencyScore(safeString(row.updatedAt || ''));
+  }
+
   async cmdShow(args: ParsedArgs): Promise<number> {
     const limit = optInt(args, 'limit', 20);
     const scope = this.resolveScopeArgs(args);
@@ -1012,18 +1096,32 @@ class MemoryRuntime {
     const scope = this.resolveScopeArgs(args);
     const includeCandidates = Boolean(args.options.includeCandidates);
     const memory = await this.getMem0();
-    const mem0Result = await memory.search(query, { ...scope.mem0Filters, limit: perSource });
-    const mem0Rows = (Array.isArray(mem0Result?.results) ? mem0Result.results : []) as unknown as Array<Record<string, unknown>>;
-    const candidateRows = includeCandidates ? this.searchCandidates(query, perSource, scope).map((row) => ({
-      id: row.id,
-      text: row.text,
-      importance: row.importance,
-      hits: row.hits,
-      updatedAt: row.updatedAt,
-      status: row.status,
-      scopeKey: row.scopeKey,
-    })) : [];
-    const eventRows = (await this.searchEvents(query, perSource * 2, scope.chatKey)).filter((row) => this.eventMatchesScope(row, scope)).slice(0, perSource);
+    const mem0FetchLimit = Math.max(limit * 4, 24);
+    const mem0Result = await memory.search(query, { ...scope.mem0Filters, limit: mem0FetchLimit });
+    const mem0Rows = ((Array.isArray(mem0Result?.results) ? mem0Result.results : []) as unknown as Array<Record<string, unknown>>)
+      .map((row) => ({ ...row, _rinRank: this.rankMem0Row(query, scope, row) }))
+      .sort((a, b) => Number(b._rinRank || 0) - Number(a._rinRank || 0))
+      .slice(0, perSource)
+      .map(({ _rinRank, ...row }) => row);
+    const candidateRows = includeCandidates
+      ? this.searchCandidates(query, Math.max(perSource * 2, 12), scope)
+        .map((row) => ({
+          id: row.id,
+          text: row.text,
+          importance: row.importance,
+          hits: row.hits,
+          updatedAt: row.updatedAt,
+          status: row.status,
+          scopeKey: row.scopeKey,
+          _rinRank: this.rankCandidateRow(query, row),
+        }))
+        .sort((a, b) => Number(b._rinRank || 0) - Number(a._rinRank || 0))
+        .slice(0, perSource)
+        .map(({ _rinRank, ...row }) => row)
+      : [];
+    const eventRows = (await this.searchEvents(query, Math.max(perSource * 2, 12)))
+      .filter((row) => this.eventMatchesScope(row, scope))
+      .slice(0, perSource);
     const kbRuntime = new KBRuntime(this.paths);
     const kbRows = await kbRuntime.recall(query, perSource);
 
@@ -1037,8 +1135,14 @@ class MemoryRuntime {
           score: 0,
           text: safeString(row.memory || row.content || row.text || ''),
         };
-        const weight = source === 'mem0' ? 1 : source === 'candidate' ? 0.95 : source === 'kb' ? 0.9 : 0.75;
-        existing.score = Number(existing.score || 0) + (weight / (20 + index + 1));
+        const baseWeight = source === 'mem0'
+          ? this.rankMem0Row(query, scope, row)
+          : source === 'candidate'
+            ? this.rankCandidateRow(query, row) * 0.85
+            : source === 'event'
+              ? (recallLexicalScore(query, safeString(row.content || '')) * 0.35) + (recencyScore(safeString(row.ts || '')) * 0.1)
+              : recallLexicalScore(query, safeString(row.text || '')) * 0.25;
+        existing.score = Number(existing.score || 0) + baseWeight + (1 / (40 + index + 1));
         if (source === 'mem0') Object.assign(existing, { createdAt: safeString(row.createdAt || ''), memory: safeString(row.memory || '') });
         if (source === 'candidate') Object.assign(existing, { updatedAt: safeString(row.updatedAt || ''), importance: Number(row.importance || 0), hits: Number(row.hits || 0), status: safeString(row.status || '') });
         if (source === 'event') Object.assign(existing, { ts: safeString(row.ts || ''), type: safeString(row.type || ''), chatKey: safeString(row.chat_key || '') });
@@ -1077,7 +1181,7 @@ class MemoryRuntime {
     if (!role || !text || !['user', 'assistant'].includes(role)) throw new Error('Usage: brain turn <user|assistant> <text> [--chatKey <key>]');
     const scope = this.resolveScopeArgs(args);
     const event = await this.appendEvent(`turn.${role}`, text, { role, ...scope.metadata }, scope.chatKey);
-    printJson({ event_id: event.id, ts: event.ts, backend: 'events-sharded', chat_key: event.chat_key, file: event.shard });
+    printJson({ event_id: event.id, ts: event.ts, backend: 'events-daily', chat_key: event.chat_key, file: event.shard });
     return 0;
   }
 
@@ -1085,11 +1189,12 @@ class MemoryRuntime {
     const [text] = args.positionals;
     if (!text) throw new Error(`Usage: brain ${source} <text> [--chatKey <key>]`);
     const scope = this.resolveScopeArgs(args);
-    const event = await this.appendEvent(source, text, { ...scope.metadata, infer: this.defaultInfer() }, scope.chatKey);
+    const infer = await this.memoryInferReady();
+    const event = await this.appendEvent(source, text, { ...scope.metadata, infer }, scope.chatKey);
     const memory = await this.getMem0();
     const result = await memory.add(text, {
       ...scope.mem0Filters,
-      infer: this.defaultInfer(),
+      infer,
       metadata: { source, event_id: event.id, chat_key: event.chat_key, ...scope.metadata },
     } as any);
     printJson(result);
@@ -1170,31 +1275,75 @@ class MemoryRuntime {
       )
       .slice(-limit);
 
-    let processedTurns = 0;
+    let processedTurns = turnRows.length;
     let extractedMemories = 0;
     let addedMemories = 0;
-    let duplicateMemories = 0;
-    for (const row of turnRows) {
-      const role = row.type === 'turn.user' ? 'user' : 'assistant';
-      const snippets = extractCandidateSnippets(row.content, 6);
-      processedTurns += 1;
-      for (const snippet of snippets) {
-        const profile = this.candidateFinalizeProfile(role, snippet);
-        if (!profile) continue;
-        extractedMemories += 1;
-        const result = await this.addMem0ScopedMemory(scope, snippet, {
-          source: `session.finalize.${reason}`,
-          sourceEventId: row.id,
+    let updatedMemories = 0;
+    let deletedMemories = 0;
+
+    if (!(await this.memoryInferReady())) {
+      const endEvent = await this.appendEvent(
+        'session.end',
+        `finalize:${reason}`,
+        {
+          ...scope.metadata,
+          reason,
+          processed_turns: processedTurns,
+          extracted_memories: 0,
+          added_memories: 0,
+          updated_memories: 0,
+          deleted_memories: 0,
+          finalize_backend: 'mem0-infer',
+          skipped_reason: 'memory_infer_unconfigured',
+          ...(sinceTs ? { since_ts: sinceTs } : {}),
+        },
+        scope.chatKey,
+      );
+      printJson({
+        status: 'skip',
+        reason,
+        skip_reason: 'memory_infer_unconfigured',
+        chat_key: scope.chatKey,
+        scope: scope.scope,
+        processed_turns: processedTurns,
+        extracted_memories: 0,
+        added_memories: 0,
+        updated_memories: 0,
+        deleted_memories: 0,
+        finalize_backend: 'mem0-infer',
+        since_ts: sinceTs || null,
+        end_event_id: endEvent.id,
+        end_event_ts: endEvent.ts,
+      });
+      return 0;
+    }
+
+    const memory = await this.getMem0();
+    if (turnRows.length) {
+      const result = await memory.add(
+        turnRows.map((row) => ({
+          role: row.type === 'turn.user' ? 'user' : 'assistant',
+          content: row.content,
+        })),
+        {
+          ...scope.mem0Filters,
+          infer: true,
           metadata: {
+            source: `session.finalize.${reason}`,
             finalize_reason: reason,
-            source_turn_role: role,
-            source_turn_ts: row.ts,
-            finalize_importance_hint: profile.importance,
-            finalize_ttl_hint_days: profile.ttlDays,
+            chat_key: scope.chatKey,
+            ...scope.metadata,
+            ...(sinceTs ? { since_ts: sinceTs } : {}),
           },
-        });
-        if (result.merged) duplicateMemories += 1;
-        else addedMemories += 1;
+        } as any,
+      );
+      const actions = Array.isArray(result?.results) ? result.results : [];
+      extractedMemories = actions.length;
+      for (const item of actions as Array<Record<string, unknown>>) {
+        const event = safeString(item?.metadata?.event || '');
+        if (event === 'ADD') addedMemories += 1;
+        else if (event === 'UPDATE') updatedMemories += 1;
+        else if (event === 'DELETE') deletedMemories += 1;
       }
     }
 
@@ -1207,7 +1356,9 @@ class MemoryRuntime {
         processed_turns: processedTurns,
         extracted_memories: extractedMemories,
         added_memories: addedMemories,
-        duplicate_memories: duplicateMemories,
+        updated_memories: updatedMemories,
+        deleted_memories: deletedMemories,
+        finalize_backend: 'mem0-infer',
         ...(sinceTs ? { since_ts: sinceTs } : {}),
       },
       scope.chatKey,
@@ -1221,7 +1372,9 @@ class MemoryRuntime {
       processed_turns: processedTurns,
       extracted_memories: extractedMemories,
       added_memories: addedMemories,
-      duplicate_memories: duplicateMemories,
+      updated_memories: updatedMemories,
+      deleted_memories: deletedMemories,
+      finalize_backend: 'mem0-infer',
       since_ts: sinceTs || null,
       end_event_id: endEvent.id,
       end_event_ts: endEvent.ts,
@@ -1276,17 +1429,9 @@ class MemoryRuntime {
       if (row.userId) filters.userId = row.userId;
       if (row.agentId) filters.agentId = row.agentId;
       if (row.runId) filters.runId = row.runId;
-      const existing = await memory.search(row.text, { ...filters, limit: 8 } as any);
-      const existsAlready = Array.isArray(existing?.results) && existing.results.some((item: any) => normalizeMemoryText(safeString(item.memory || '')) === row.normalizedText);
-      if (existsAlready) {
-        db.prepare(`UPDATE candidates SET status = 'dropped', reason = 'duplicate_in_mem0', updated_at = ? WHERE id = ?`).run(nowIso(), row.id);
-        await this.appendEvent('candidate.drop', row.text, { candidate_id: row.id, reason: 'duplicate_in_mem0', scope_key: row.scopeKey }, row.chatKey);
-        duplicate += 1;
-        continue;
-      }
-      await memory.add(row.text, {
+      const result = await memory.add(row.text, {
         ...filters,
-        infer: false,
+        infer: await this.memoryInferReady(),
         metadata: {
           source: 'candidate.tidy',
           candidate_id: row.id,
@@ -1297,9 +1442,13 @@ class MemoryRuntime {
           scope_key: row.scopeKey,
         },
       } as any);
-      db.prepare(`UPDATE candidates SET status = 'promoted', reason = 'promoted_by_tidy', updated_at = ? WHERE id = ?`).run(nowIso(), row.id);
-      await this.appendEvent('candidate.promote', row.text, { candidate_id: row.id, scope_key: row.scopeKey, importance: row.importance, hits: row.hits }, row.chatKey);
-      promoted += 1;
+      const actions = Array.isArray(result?.results) ? result.results : [];
+      const nextStatus = actions.length ? 'promoted' : 'dropped';
+      const nextReason = actions.length ? 'promoted_by_tidy' : 'no_change_in_mem0';
+      db.prepare(`UPDATE candidates SET status = ?, reason = ?, updated_at = ? WHERE id = ?`).run(nextStatus, nextReason, nowIso(), row.id);
+      await this.appendEvent(actions.length ? 'candidate.promote' : 'candidate.drop', row.text, { candidate_id: row.id, scope_key: row.scopeKey, importance: row.importance, hits: row.hits, reason: nextReason }, row.chatKey);
+      if (actions.length) promoted += 1;
+      else duplicate += 1;
     }
     db.close();
     printJson({ backend: 'mem0ai-node', status: 'ok', promoted, expired, duplicate, kept, promote_threshold: promoteThreshold, hits_threshold: hitsThreshold });
@@ -1328,7 +1477,8 @@ class MemoryRuntime {
       candidate_db_exists: candidateDbExists,
       candidate_counts: candidateCounts,
       embed_model: this.embeddings.model,
-      llm_ready: this.llmReady(),
+      llm_ready: await this.memoryInferReady(),
+      memory_model: this.readMemoryModelSettings(),
       legacy_memory_db_exists: await pathExists(this.paths.legacyMemoryDb),
     });
     return 0;
@@ -1769,7 +1919,9 @@ async function main(): Promise<void> {
   process.exitCode = await runBrainCli();
 }
 
-main().catch((error) => {
-  console.error(safeString((error as Error)?.message || error));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(safeString((error as Error)?.message || error));
+    process.exit(1);
+  });
+}
