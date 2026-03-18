@@ -9,6 +9,11 @@ import nodeUtil from 'node:util'
 import { Type } from '@sinclair/typebox'
 
 import { runBrainCli } from './brain'
+import {
+  createContinueEventFilter,
+  discardTrailingContinueAssistant,
+  extractAssistantTextFromMessage,
+} from './continue-control'
 import { promptSessionWithRetry } from './session-prompt'
 import { searchWeb } from './web-search'
 
@@ -2406,21 +2411,14 @@ function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: st
 const RIN_CONTINUE_TOKEN = '#RIN_CONTINUE'
 const RIN_CONTINUE_FOLLOWUP = 'Continue the unfinished work. If still incomplete, reply exactly `#RIN_CONTINUE`; otherwise reply normally.'
 
-function extractAssistantTextFromSessionEventMessage(message: any): string {
-  if (!message || typeof message !== 'object') return ''
-  const content = Array.isArray(message.content) ? message.content : []
-  return content
-    .filter((block: any) => block && typeof block === 'object' && safeString(block.type) === 'text')
-    .map((block: any) => safeString(block.text))
-    .join('\n')
-    .trim()
-}
-
 function patchSessionPromptAutoContinue(session: any) {
   if (!session || typeof session !== 'object' || session.__rinPromptAutoContinuePatched) return
   if (typeof session.prompt !== 'function' || typeof session.subscribe !== 'function') return
   const originalPrompt = session.prompt.bind(session)
+  const originalSubscribe = session.subscribe.bind(session)
   session.__rinPromptAutoContinuePatched = true
+  session.__rinPromptAutoContinueOriginalSubscribe = originalSubscribe
+  session.subscribe = (listener: any) => originalSubscribe(createContinueEventFilter(session, listener, RIN_CONTINUE_TOKEN))
   session.prompt = async (text: string, options: any = {}) => {
     if (session.__rinPromptAutoContinueInternal) {
       return await originalPrompt(text, options)
@@ -2431,12 +2429,12 @@ function patchSessionPromptAutoContinue(session: any) {
       let nextOptions = options
       for (let pass = 0; pass < 24; pass += 1) {
         let lastAssistantText = ''
-        const unsubscribe = session.subscribe((event: any) => {
+        const unsubscribe = originalSubscribe((event: any) => {
           const eventType = safeString(event && event.type)
           if (eventType === 'message_end' || eventType === 'turn_end') {
             const message = event && event.message
             if (safeString(message && message.role) !== 'assistant') return
-            const extracted = extractAssistantTextFromSessionEventMessage(message)
+            const extracted = extractAssistantTextFromMessage(message)
             if (extracted) lastAssistantText = extracted
             return
           }
@@ -2445,7 +2443,7 @@ function patchSessionPromptAutoContinue(session: any) {
             for (let i = messages.length - 1; i >= 0; i -= 1) {
               const message = messages[i]
               if (safeString(message && message.role) !== 'assistant') continue
-              const extracted = extractAssistantTextFromSessionEventMessage(message)
+              const extracted = extractAssistantTextFromMessage(message)
               if (!extracted) continue
               lastAssistantText = extracted
               break
@@ -2458,6 +2456,7 @@ function patchSessionPromptAutoContinue(session: any) {
           try { unsubscribe() } catch {}
         }
         if (safeString(lastAssistantText).trim() !== RIN_CONTINUE_TOKEN) return
+        try { discardTrailingContinueAssistant(session, RIN_CONTINUE_TOKEN) } catch {}
         nextText = RIN_CONTINUE_FOLLOWUP
         nextOptions = {}
       }
