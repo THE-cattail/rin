@@ -71,6 +71,7 @@ const forbiddenPatterns = [
   { label: 'hard-coded /home path', pattern: /(^|[\s"'`(])\/home\/[A-Za-z0-9_.-]+\//gm },
   { label: 'hard-coded /Users path', pattern: /(^|[\s"'`(])\/Users\/[A-Za-z0-9_.-]+\//gm },
   { label: 'hard-coded Windows user profile path', pattern: /(^|[\s"'`(])[A-Za-z]:\\Users\\[A-Za-z0-9_.-]+\\/gm },
+  { label: 'accidental test.only', pattern: /\b(test|describe|it)\.only\s*\(/gm },
 ]
 
 for (const relPath of trackedFiles) {

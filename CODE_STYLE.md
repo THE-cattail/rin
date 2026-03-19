@@ -31,6 +31,7 @@ This document defines the repository-level engineering rules for `rin`.
 
 - Every user-visible behavior change should update the relevant README or contributor docs in the same change.
 - Add or expand automated tests when extracting shared logic, changing prompt/session control flow, or touching portability-sensitive code.
+- Do not commit `.only` modifiers in tests; `npm run check` enforces this.
 - `npm run check` must stay green from a fresh clone.
 
 ## 6. Review checklist
