@@ -12,7 +12,7 @@ import {
   lockFilePathForKey,
   acquireExclusiveFileLock,
   resolveRinLayout,
-} from './runtime'
+} from './runtime-paths'
 
 const fs = require('node:fs')
 const os = require('node:os')
@@ -40,8 +40,9 @@ function repoDir() {
   return layout().repoRoot
 }
 
-function installHomeAssetDir() {
-  return path.join(repoDir(), 'install', 'home')
+function installHomeAssetDir(bundleRoot = '') {
+  const root = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
+  return path.join(root, 'install', 'home')
 }
 
 function isPathInside(parent, child) {
@@ -153,9 +154,9 @@ const DEFAULT_RUNTIME_AGENTS_MD = [
   '',
 ].join('\n')
 
-function ensureWorkspaceBaseline(home, { overwriteManaged = false } = {}) {
-  const repo = repoDir()
-  const assetRoot = installHomeAssetDir()
+function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = '' } = {}) {
+  const repo = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
+  const assetRoot = installHomeAssetDir(repo)
   const createdDirs = []
   const copied = []
   const written = []
@@ -381,11 +382,12 @@ function chownRecursiveIfPossible(targetPath, uid, gid) {
   }
 }
 
-function ensureInstallableBundle() {
-  ensureRinDistFile('index.js')
-  ensureRinDistFile('brain.js')
-  ensureRinDistFile('daemon.js')
-  ensureRinTuiHost()
+function ensureInstallableBundle(bundleRoot = '') {
+  const root = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
+  for (const rel of ['dist/index.js', 'dist/brain.js', 'dist/daemon.js', 'dist/tui.js']) {
+    const filePath = path.join(root, rel)
+    if (!fs.existsSync(filePath)) throw new Error(`rin_dist_missing:${rel.replace(/^dist\//, '')}`)
+  }
 }
 
 function copyInstallBundleTree(src, dst) {
@@ -414,12 +416,12 @@ function pruneOldRuntimeReleases(stateRoot, keepReleaseIds = []) {
   return removed
 }
 
-function installRuntimeBundle(stateRoot) {
-  ensureInstallableBundle()
-  const repo = repoDir()
-  const releaseId = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z')
+function installRuntimeBundle(stateRoot, { bundleRoot = '', releaseId = '' } = {}) {
+  const repo = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
+  ensureInstallableBundle(repo)
+  const nextReleaseId = safeString(releaseId).trim() || new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z')
   const releasesRoot = path.join(stateRoot, 'app', 'releases')
-  const releaseRoot = path.join(releasesRoot, releaseId)
+  const releaseRoot = path.join(releasesRoot, nextReleaseId)
   ensureDir(releaseRoot)
 
   for (const rel of ['package.json', 'package-lock.json']) {
@@ -441,8 +443,8 @@ function installRuntimeBundle(stateRoot) {
     copyInstallBundleTree(releaseRoot, currentLink)
   }
 
-  const prunedReleaseIds = pruneOldRuntimeReleases(stateRoot, [releaseId])
-  return { releaseId, releaseRoot, currentRoot: currentLink, prunedReleaseIds }
+  const prunedReleaseIds = pruneOldRuntimeReleases(stateRoot, [nextReleaseId])
+  return { releaseId: nextReleaseId, releaseRoot, currentRoot: currentLink, prunedReleaseIds }
 }
 
 function createInstalledLauncher({ stateRoot, userHome }) {
@@ -467,13 +469,23 @@ function writeInstallMetadata(stateRoot, data) {
   return file
 }
 
-function performInstall({ targetUser, homeDir, overwriteManaged = true, sourceRepo = '', sourceRef = '' } = {}) {
+function performInstall({
+  targetUser,
+  homeDir,
+  overwriteManaged = true,
+  sourceRepo = '',
+  sourceRef = '',
+  bundleRoot = '',
+  releaseId = '',
+  seedHomeDir = '',
+} = {}) {
   const userHome = path.resolve(homeDir)
   const stateRoot = installStateRootForHome(userHome)
+  const resolvedBundleRoot = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
   ensureDir(stateRoot)
-  const baseline = ensureWorkspaceBaseline(stateRoot, { overwriteManaged })
-  const bundle = installRuntimeBundle(stateRoot)
-  const bootstrap = ensurePiBootstrapAt({ agentDir: stateRoot, stateRoot, homeDir: userHome })
+  const baseline = ensureWorkspaceBaseline(stateRoot, { overwriteManaged, bundleRoot: resolvedBundleRoot })
+  const bundle = installRuntimeBundle(stateRoot, { bundleRoot: resolvedBundleRoot, releaseId })
+  const bootstrap = ensurePiBootstrapAt({ agentDir: stateRoot, stateRoot, homeDir: path.resolve(seedHomeDir || userHome) })
   const launcherPath = createInstalledLauncher({ stateRoot, userHome })
   const metadataPath = writeInstallMetadata(stateRoot, {
     installedAt: new Date().toISOString(),
@@ -482,8 +494,8 @@ function performInstall({ targetUser, homeDir, overwriteManaged = true, sourceRe
     launcherPath,
     targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
     installSource: {
-      repo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
-      ref: safeString(sourceRef).trim() || detectInstallSourceRef(),
+      repo: safeString(sourceRepo).trim(),
+      ref: safeString(sourceRef).trim(),
     },
   })
   if (targetUser) {
@@ -498,6 +510,38 @@ function performInstall({ targetUser, homeDir, overwriteManaged = true, sourceRe
     bundle,
     bootstrap,
     metadataPath,
+  }
+}
+
+function performUninstall({ homeDir = os.homedir(), mode = 'keep' } = {}) {
+  const userHome = path.resolve(homeDir)
+  const stateRoot = installStateRootForHome(userHome)
+  const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
+
+  try { fs.rmSync(launcherPath, { force: true }) } catch {}
+
+  const removed = []
+  if (mode === 'purge') {
+    if (fs.existsSync(stateRoot)) {
+      try { fs.rmSync(stateRoot, { recursive: true, force: true }) } catch {}
+      removed.push(stateRoot)
+    }
+  } else {
+    for (const rel of ['app', 'install.json']) {
+      const target = path.join(stateRoot, rel)
+      if (!fs.existsSync(target)) continue
+      try { fs.rmSync(target, { recursive: true, force: true }) } catch {}
+      removed.push(target)
+    }
+  }
+
+  return {
+    ok: true,
+    mode,
+    stateRoot,
+    launcherPath,
+    launcherRemoved: !fs.existsSync(launcherPath),
+    removed,
   }
 }
 
@@ -814,8 +858,8 @@ async function cmdInstall(argv) {
     targetUser,
     homeDir: targetUser.homeDir,
     overwriteManaged: true,
-    sourceRepo,
-    sourceRef,
+    sourceRepo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
+    sourceRef: safeString(sourceRef).trim() || detectInstallSourceRef(),
   })
   if (targetUser && targetUser.username === currentUser.username) {
     try { ensureDaemonSystemdServiceFile() } catch {}
@@ -917,8 +961,6 @@ async function cmdUninstall(argv) {
     usage(2)
   }
 
-  const stateRoot = rootDir()
-  const launcherPath = path.join(os.homedir(), '.local', 'bin', 'rin')
   const choices = [
     { value: 'keep', label: 'Remove the installed app and launcher, but keep ~/.rin state' },
     { value: 'purge', label: 'Remove Rin completely, including ~/.rin state' },
@@ -946,29 +988,8 @@ async function cmdUninstall(argv) {
   if (!yes) throw new Error('uninstall_requires_confirmation_or_yes')
 
   try { await removeDaemonSystemdService() } catch {}
-  try { fs.rmSync(launcherPath, { force: true }) } catch {}
 
-  const removed = []
-  if (mode === 'purge') {
-    if (fs.existsSync(stateRoot)) {
-      try { fs.rmSync(stateRoot, { recursive: true, force: true }) } catch {}
-      removed.push(stateRoot)
-    }
-  } else {
-    for (const rel of ['app', 'install.json']) {
-      const target = path.join(stateRoot, rel)
-      if (!fs.existsSync(target)) continue
-      try { fs.rmSync(target, { recursive: true, force: true }) } catch {}
-      removed.push(target)
-    }
-  }
-
-  printJson({
-    ok: true,
-    mode,
-    launcherRemoved: !fs.existsSync(launcherPath),
-    removed,
-  })
+  printJson(performUninstall({ homeDir: os.homedir(), mode }))
 }
 
 function daemonPackageDir() {
@@ -1259,9 +1280,16 @@ async function main() {
   return await cmdPi(argv)
 }
 
-main().catch((e) => {
-  const message = String(e && e.message ? e.message : e)
-  if (message === 'uninstall_requires_confirmation_or_yes') console.error('Uninstall needs confirmation. Re-run interactively or pass --yes.')
-  else console.error(message)
-  process.exitCode = 1
-})
+export {
+  performInstall,
+  performUninstall,
+}
+
+if (require.main === module) {
+  main().catch((e) => {
+    const message = String(e && e.message ? e.message : e)
+    if (message === 'uninstall_requires_confirmation_or_yes') console.error('Uninstall needs confirmation. Re-run interactively or pass --yes.')
+    else console.error(message)
+    process.exitCode = 1
+  })
+}

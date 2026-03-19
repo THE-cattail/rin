@@ -3,9 +3,13 @@ const assert = require('node:assert/strict')
 
 const {
   DEFAULT_CONFIG,
+  managedBaseUrl,
   normalizeBaseUrl,
   normalizeConfigShape,
   normalizeProviderList,
+  shouldManageLocalSearxng,
+} = require('../dist/web-search-config.js')
+const {
   reserveSerperFallbackSlot,
 } = require('../dist/web-search.js')
 
@@ -38,6 +42,25 @@ test('normalizeConfigShape upgrades legacy provider order and managed base URL d
   assert.equal(config.http.userAgent, DEFAULT_CONFIG.http.userAgent)
   assert.equal(config.searxng.baseUrl, 'http://127.0.0.1:19090')
   assert.equal(config.searxng.healthTimeoutMs, DEFAULT_CONFIG.searxng.healthTimeoutMs)
+})
+
+test('managedBaseUrl and shouldManageLocalSearxng keep local sidecar behavior explicit', () => {
+  const managedConfig = normalizeConfigShape({
+    searxng: {
+      hostPort: 19191,
+      baseUrl: '',
+    },
+  })
+  assert.equal(managedBaseUrl(managedConfig), 'http://127.0.0.1:19191')
+  assert.equal(shouldManageLocalSearxng(managedConfig), true)
+
+  const remoteConfig = normalizeConfigShape({
+    searxng: {
+      hostPort: 19191,
+      baseUrl: 'https://search.example.com',
+    },
+  })
+  assert.equal(shouldManageLocalSearxng(remoteConfig), false)
 })
 
 test('reserveSerperFallbackSlot enforces the hourly fallback budget', () => {

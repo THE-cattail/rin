@@ -9,6 +9,12 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 22
+          - 24
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install dependencies
@@ -24,3 +30,23 @@ jobs:
 
       - name: Build and test
         run: npm run check
+
+      - name: Measure baselines
+        if: matrix.node-version == 22
+        run: npm run metrics > metrics.json
+
+      - name: Upload metrics artifact
+        if: matrix.node-version == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: rin-metrics-node-${{ matrix.node-version }}
+          path: metrics.json
+
+      - name: Append metrics summary
+        if: matrix.node-version == 22
+        run: |
+          echo '## Rin baseline metrics' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat metrics.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

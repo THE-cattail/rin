@@ -57,7 +57,20 @@ test('createContinueEventFilter suppresses continue-only assistant output during
   await filter({ type: 'message_end', message: assistantMessage(TOKEN) })
   await filter({ type: 'agent_end', messages: [assistantMessage(TOKEN)] })
 
-  assert.deepEqual(delivered.map((event) => event.type), ['message_start', 'agent_end'])
+  assert.deepEqual(delivered.map((event) => event.type), ['agent_end'])
+})
+
+test('createContinueEventFilter replays buffered message_start for normal assistant replies without deltas', async () => {
+  const delivered = []
+  const session = { __rinPromptAutoContinueInternal: true }
+  const filter = createContinueEventFilter(session, async (event) => {
+    delivered.push(event)
+  }, TOKEN)
+
+  await filter({ type: 'message_start', message: assistantMessage('') })
+  await filter({ type: 'message_end', message: assistantMessage('done') })
+
+  assert.deepEqual(delivered.map((event) => event.type), ['message_start', 'message_end'])
 })
 
 test('createContinueEventFilter flushes buffered deltas once the assistant is not sending continue', async () => {

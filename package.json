@@ -1,6 +1,6 @@
 {
   "name": "rin",
-  "private": true,
+  "version": "0.1.0",
   "description": "Local-first runtime for chat-connected agent workflows.",
   "license": "MIT",
   "homepage": "https://github.com/THE-cattail/rin#readme",
@@ -24,13 +24,23 @@
   "bin": {
     "rin": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "install.sh",
+    "README.md",
+    "README.zh-CN.md",
+    "README.ja.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --pretty false && chmod +x dist/index.js",
     "test:unit": "node --test test/**/*.test.js",
-    "test": "npm run build && npm run test:unit",
+    "test:repo": "node scripts/check-repo.mjs",
+    "metrics": "node scripts/measure-baselines.mjs",
+    "test": "npm run build && npm run test:unit && npm run test:repo",
     "check": "npm run test"
   },
   "dependencies": {

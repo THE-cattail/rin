@@ -73,9 +73,9 @@ function createContinueEventFilter(session: SessionLike, listener: (event: any) 
 
     if (eventType === 'message_start' && isAssistant) {
       state.mode = 'buffering'
-      state.pending = []
+      state.pending = [event]
       state.text = ''
-      return await listener(event)
+      return
     }
 
     if (eventType === 'message_update' && isAssistant && safeString(event && event.assistantMessageEvent && event.assistantMessageEvent.type) === 'text_delta') {
