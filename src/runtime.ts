@@ -1777,8 +1777,12 @@ function createRinBuiltinTools({
   const modelTool = {
     name: 'rin_models',
     label: 'Rin Models',
-    description: 'List configured models or switch the current session to another available model.',
-    promptSnippet: 'List configured models or switch the current session model.',
+    description: 'Inspect available models or switch the active session to a specific model/provider the user wants to use.',
+    promptSnippet: 'Use this when the user wants a specific model or provider, or wants another model to handle the current wording/polish/work.',
+    promptGuidelines: [
+      'If the user specifies a model or provider, switch the session model instead of informally simulating that route yourself.',
+      'If the user asks for another model to do the writing or polish, use this tool first.',
+    ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('list'),
