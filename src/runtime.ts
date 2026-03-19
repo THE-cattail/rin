@@ -974,7 +974,8 @@ async function manageSchedule({
   signal?: AbortSignal
 }) {
   const nextKind = safeString(kind).trim()
-  const nextAction = safeString(action).trim()
+  const rawAction = safeString(action).trim()
+  const nextAction = rawAction === 'create' ? 'add' : rawAction === 'delete' ? 'del' : rawAction
   const nextName = safeString(name).trim()
   const schedules = loadSchedulesConfigForState(stateRoot)
   const state = loadSchedulesStateForState(stateRoot)
@@ -1419,9 +1420,11 @@ function createRinBuiltinTools({
       action: Type.Union([
         Type.Literal('list'),
         Type.Literal('add'),
+        Type.Literal('create'),
         Type.Literal('enable'),
         Type.Literal('disable'),
         Type.Literal('del'),
+        Type.Literal('delete'),
         Type.Literal('run'),
       ]),
       name: Type.Optional(Type.String()),
@@ -1650,11 +1653,8 @@ function createRinBuiltinTools({
 
           if (currentSession && typeof currentSession.setModel === 'function') {
             await currentSession.setModel(targetModel)
-          } else if (typeof pi.setModel === 'function') {
-            const success = await pi.setModel(targetModel)
-            if (!success) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
           } else {
-            throw new Error('model_switch_unavailable')
+            throw new Error('model_switch_requires_session_scope')
           }
 
           const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
