@@ -1674,6 +1674,14 @@ function createRinBuiltinTools({
     return next
   }
 
+  function readTextIfExistsLocal(filePath: string): string {
+    try {
+      return fs.readFileSync(filePath, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
   function resolveSwitchModel(ctx: any, params: any) {
     const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
     const requestedProvider = safeString(params && params.provider).trim()
@@ -1734,7 +1742,7 @@ function createRinBuiltinTools({
       const agentsPath = path.join(cursor, 'AGENTS.md')
       if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
         seen.add(agentsPath)
-        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
+        agentsFiles.push({ path: agentsPath, content: readTextIfExistsLocal(agentsPath) })
       }
       const parent = path.dirname(cursor)
       if (!parent || parent === cursor) break
