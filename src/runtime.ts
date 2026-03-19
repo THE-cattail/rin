@@ -1104,6 +1104,7 @@ function createRinBuiltinTools({
   authStorage,
   modelRegistry,
   resourceLoader,
+  sessionRef,
 }: {
   repoRoot: string
   stateRoot: string
@@ -1115,6 +1116,7 @@ function createRinBuiltinTools({
   authStorage: any
   modelRegistry: any
   resourceLoader: any
+  sessionRef?: { current: any }
 }) {
   function summarizeModel(model: any, currentModel?: any) {
     const provider = safeString(model && model.provider).trim()
@@ -1637,23 +1639,44 @@ function createRinBuiltinTools({
         }
         if (action === 'switch') {
           const targetModel = resolveSwitchModel(ctx, params)
-          const previousProvider = safeString(ctx && ctx.model && ctx.model.provider).trim()
-          const previousModel = safeString(ctx && ctx.model && ctx.model.id).trim()
-          const previousThinking = typeof pi.getThinkingLevel === 'function' ? safeString(pi.getThinkingLevel()).trim() : ''
-          const success = await pi.setModel(targetModel)
-          if (!success) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
+          const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
+          const previousProvider = safeString((currentSession && currentSession.model && currentSession.model.provider) || (ctx && ctx.model && ctx.model.provider)).trim()
+          const previousModel = safeString((currentSession && currentSession.model && currentSession.model.id) || (ctx && ctx.model && ctx.model.id)).trim()
+          const previousThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
+            ? safeString(currentSession.getThinkingLevel()).trim()
+            : typeof pi.getThinkingLevel === 'function'
+              ? safeString(pi.getThinkingLevel()).trim()
+              : ''
+
+          if (currentSession && typeof currentSession.setModel === 'function') {
+            await currentSession.setModel(targetModel)
+          } else if (typeof pi.setModel === 'function') {
+            const success = await pi.setModel(targetModel)
+            if (!success) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
+          } else {
+            throw new Error('model_switch_unavailable')
+          }
 
           const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
-          if (requestedThinking) pi.setThinkingLevel(requestedThinking as any)
-          const nextThinking = typeof pi.getThinkingLevel === 'function' ? safeString(pi.getThinkingLevel()).trim() : requestedThinking || previousThinking
+          if (requestedThinking) {
+            if (currentSession && typeof currentSession.setThinkingLevel === 'function') currentSession.setThinkingLevel(requestedThinking as any)
+            else if (typeof pi.setThinkingLevel === 'function') pi.setThinkingLevel(requestedThinking as any)
+          }
+
+          const currentModel = currentSession && currentSession.model ? currentSession.model : targetModel
+          const nextThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
+            ? safeString(currentSession.getThinkingLevel()).trim()
+            : typeof pi.getThinkingLevel === 'function'
+              ? safeString(pi.getThinkingLevel()).trim()
+              : requestedThinking || previousThinking
 
           return toolResultFromText(
-            `Model switched to ${safeString(targetModel.provider)}/${safeString(targetModel.id)}.`,
+            `Model switched to ${safeString(currentModel && currentModel.provider).trim()}/${safeString(currentModel && currentModel.id).trim()}.`,
             {
               previous: previousProvider || previousModel ? { provider: previousProvider, model: previousModel, thinking: previousThinking || undefined } : undefined,
               current: {
-                provider: safeString(targetModel.provider),
-                model: safeString(targetModel.id),
+                provider: safeString(currentModel && currentModel.provider).trim(),
+                model: safeString(currentModel && currentModel.id).trim(),
                 thinking: nextThinking || undefined,
               },
             },
@@ -2321,10 +2344,12 @@ function syncRinPiSettings(agentDir: string) {
   if (next.memory.provider == null) next.memory.provider = 'openai-codex'
   if (next.memory.model == null) next.memory.model = 'gpt-5.4'
   if (next.memory.thinking == null) next.memory.thinking = 'minimal'
+  if ('translation' in next) delete next.translation
   fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), 'utf8')
 }
 
 async function createRinPiSession({
+
   repoRoot,
   workspaceRoot,
   sessionCwd,
@@ -2428,6 +2453,8 @@ async function createRinPiSession({
       ? pi.SessionManager.create(path.resolve(sessionCwd), resolvedSessionDir)
       : pi.SessionManager.continueRecent(path.resolve(sessionCwd), resolvedSessionDir)
 
+  const sessionRef = { current: null as any }
+
   const created = await pi.createAgentSession({
     cwd: path.resolve(sessionCwd),
     agentDir,
@@ -2439,12 +2466,13 @@ async function createRinPiSession({
     model: resolvedModel,
     thinkingLevel: normalizeThinkingLevel(thinking),
     tools: pi.createCodingTools(path.resolve(sessionCwd)),
-    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader }),
+    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader, sessionRef }),
   })
 
   if (!created || !created.session) {
     throw new Error('pi_sdk_session_missing')
   }
+  sessionRef.current = created.session
 
   const brainQueueRuntime = ensureBrainQueueRuntime({ repoRoot, stateRoot })
 
