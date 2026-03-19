@@ -1,66 +1,50 @@
 # rin
 
+[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
+![Node.js](https://img.shields.io/badge/node-%3E%3D22-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
-[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-2ea44f)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**Rin** は、チャット連携型エージェントのワークフロー向けに設計されたローカルファーストなランタイムです。エージェントがスケジュール、自動化、および長期間のブリッジ配信を管理できる、安定したデーモン駆動の環境を提供します。単一のターミナルセッションやエディタウィンドウに縛られることはありません。
 
-チャット接続されたエージェントワークフローのためのローカルファーストなランタイムです。
+## なぜ Rin なのか？
 
-## これは何か
+Rin は、エージェントのエコシステムにおいて独自の地位を占めています。多くのツールが即時のコード生成やエディタ統合に焦点を当てている一方で、Rin は**ランタイムのルート**、つまりエージェントが継続的なアシスタントとして機能することを可能にする永続的なバックグラウンドレイヤーに焦点を当てています。
 
-`rin` は公開 CLI を小さく保ち、実際の重心をローカルのランタイムルートに置きます。
+### 位置づけ
 
-- `rin` はローカルの対話 TUI を起動します
-- バックグラウンドデーモンがブリッジ、スケジュール、オートメーションを扱います
-- ランタイム状態は `~/.rin` に集約されます
-- ブリッジ配信、メモリ、検査、スケジュール、Web 検索などの内部機能は、公開 CLI を増やすのではなくランタイム / ツール面で提供します
+| 機能 | Rin | ターミナル型コーディングエージェント | IDE 中心型エージェント |
+| :--- | :--- | :--- | :--- |
+| **主なインターフェース** | ローカルランタイム & TUI | CLI コマンド | エディタ / 拡張機能 |
+| **実行モデル** | 永続デーモン | タスク固有のプロセス | エディタに紐づくプラグイン |
+| **状態管理** | 中央集約型 (`~/.rin`) | セッションベース | エディタのワークスペース |
+| **ツールサーフェス** | 内部ランタイム API | CLI サブコマンド | エディタコマンド |
+| **主な焦点** | 連携ワークフロー | 直接的なファイル編集 | エディタ内での支援 |
 
-## どこが違うのか
+*関連するカテゴリの例には、Codex CLI、Claude Code、Gemini CLI などのターミナルエージェントや、Cursor、Windsurf、Cline などの IDE 中心型ツールが含まれます。*
 
-Rin は、単なるターミナル上のモデルラッパーでも、IDE シェル中心の製品でもありません。
+## 主な特徴
 
-- **ローカルファースト** — 状態、ドキュメント、スキル、ランタイムデータは `~/.rin` に集約
-- **デーモン前提の設計** — 自動化やチャット接続フローをランタイムの標準形として扱う
-- **公開面を小さく維持** — サポートする CLI は起動、再起動、更新、アンインストールに絞る
-- **ランタイム優先** — agent 向けの機能はランタイム側に置き、公開 CLI を肥大化させない
-
-## 他の agent 製品との位置づけ
-
-Rin は、機能数の比較よりも「どこを中心に据えるか」の違いで捉えるのが分かりやすいです。
-
-| 製品の形 | 典型的な中心 | Rin の位置づけ |
-| --- | --- | --- |
-| Codex CLI、Claude Code、Gemini CLI のようなターミナル型 agent | 現在のリポジトリに紐づくアクティブなターミナルセッション | Rin は持続するローカルランタイムルートと、デーモンに支えられたチャット接続ワークフローを中心に置きます |
-| Cursor、Windsurf、Cline のような IDE 型 agent | エディタ画面とその拡張のライフサイクル | Rin はワークフローをローカルランタイムに置き、公開 CLI を意図的に小さく保ちます |
-
-持続するローカル状態とバックグラウンドワークフローを中心にした agent runtime が欲しいなら、Rin はそのための形です。
-
-## 必要条件
-
-- Linux 互換環境
-- 管理されたデーモンの再起動 / 更新フローにはユーザー単位の `systemd` が必要
-- Node.js >= 22
-- `npm`、`git`、`mktemp`
-- Docker は任意。ローカル管理の SearxNG サイドカーを使う場合のみ必要
+- **ローカルファースト・ルート:** すべてのランタイム状態、メモリ、設定は `~/.rin` に保存されます。
+- **デーモン駆動:** バックグラウンドサービスがブリッジ、スケジュール、自動化フローを処理し、UI が閉じられてもタスクが継続されることを保証します。
+- **最小限の CLI サーフェス:** 公開される CLI は意図的に小さく保たれています。複雑なエージェント機能（ウェブ検索、メモリ、インスペクション）は、CLI の複雑さを増すのではなく、ランタイムのツールサーフェスを通じて公開されます。
+- **ユーザーレベルの管理:** `systemd` と深く統合されており、管理されたサービスのライフサイクル（再起動、アップデート、ログ）を提供します。
 
 ## インストール
 
-`install.sh` でインストールします。`rin install` は意図的に公開していないコマンドです。
+### クイックインストール
+`systemd`、Node.js >= 22、`npm`、`git`、および `mktemp` を備えた Linux 互換環境が必要です。
 
 ```bash
-# main ブランチをインストール
+# 最新の main をインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 
-# 特定の ref を指定してインストール
+# 特定のリファレンスをインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
 ```
 
-ランチャーは `~/.local/bin/rin` に配置されます。
-
-### ソースからインストール
-
+### ソースからのインストール
 ```bash
 git clone https://github.com/THE-cattail/rin.git
 cd rin
@@ -69,57 +53,43 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-## クイックスタート
+## コマンドサーフェス
 
-1. `rin` を実行してローカルの対話モードを開きます。
-2. ランタイム関連のファイルは `~/.rin` にまとめます。
-3. デーモン管理のランタイム設定やブリッジ設定を変更したら `rin restart` を実行します。
-4. 更新時は `rin update` で設定済みのソースから再インストールし、ランタイムを更新します。
+Rin は、作業の邪魔にならないよう、無駄のない CLI を維持しています。
 
-## 公開コマンド面
+- `rin`: インタラクティブなローカル TUI を起動します。
+- `rin restart`: バックグラウンドの Rin デーモンサービスを再起動します。
+- `rin update`: 設定されたソースリポジトリとリファレンスから Rin を再インストール/アップデートします。
+- `rin uninstall --keep-state --yes`: アプリケーションとランチャーを削除しますが、`~/.rin` 内のデータは保持します。
+- `rin uninstall --purge --yes`: アプリケーションと `~/.rin` ディレクトリを完全に削除します。
 
-| コマンド | 目的 |
-| --- | --- |
-| `rin` | ローカルの対話 TUI を起動 |
-| `rin restart` | ユーザー単位の Rin デーモンサービスを再起動 |
-| `rin update` | 設定済みのソースリポジトリ / ref から再インストール |
-| `rin uninstall --keep-state --yes` | アプリとランチャーを削除し、`~/.rin` は保持 |
-| `rin uninstall --purge --yes` | アプリと `~/.rin` を両方削除 |
+## ランタイムのレイアウト
 
-## ランタイム構成
+ランタイムの状態は、ホームディレクトリ内に厳密に収められています。
 
-- `~/.rin` — ランタイムルート
-- `~/.rin/data` — ランタイムデータとデーモン状態
-- `~/.rin/docs/rin` — インストール時に同梱されるローカルのランタイムリファレンス
+- `~/.rin/`: 主要な状態のルート。
+- `~/.rin/data/web-search/config.json`: ウェブ検索の設定。
+- `~/.rin/bin/`: ランチャーとバイナリ。
 
-## Web 検索
+## ウェブ検索
 
-Web 検索のランタイム設定は `~/.rin/data/web-search/config.json` にあります。
-
-デフォルトでは、Rin はローカルの SearxNG サイドカーを管理できます。自分の SearxNG インスタンスを指定したり、Serper の資格情報を設定したりすることもできます。
+Rin は柔軟なウェブ検索ランタイム機能を備えています。Docker を介したローカルの **SearxNG** インスタンスの管理（オプションのサイドカー）、既存の SearxNG インスタンスへの接続、または **Serper** クレデンシャルの使用が可能です。設定は `~/.rin/data/web-search/config.json` で管理されます。
 
 ## 開発
 
+### 必要条件
+- Node.js >= 22
+- ユーザーレベルの `systemd` を備えた Linux
+- Docker（管理された SearxNG サイドカーを使用する場合のオプション）
+
+### 検証
+ローカルの変更を検証するには、以下を実行してください。
 ```bash
-npm ci
 npm run check
 ```
 
-`npm run check` はビルド、単体テスト、インストール / 更新 / アンインストールの smoke tests、そしてリポジトリの可搬性 / ドキュメント整合性チェックをまとめて実行します。
-
-関連ドキュメント:
-
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [CODE_STYLE.md](CODE_STYLE.md)
-- [ランタイムリファレンス](install/home/docs/rin/README.md)
-
-## アンインストール
-
-```bash
-rin uninstall --keep-state --yes
-rin uninstall --purge --yes
-```
+貢献の詳細については、[CONTRIBUTING.md](CONTRIBUTING.md) および [CODE_STYLE.md](CODE_STYLE.md) を参照してください。内部ドキュメントは `install/home/docs/rin/README.md` にあります。
 
 ## ライセンス
 
-MIT
+このプロジェクトは MIT ライセンスの下でライセンスされています。詳細は [LICENSE](LICENSE) ファイルを参照してください。

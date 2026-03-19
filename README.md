@@ -1,66 +1,50 @@
 # rin
 
+[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
+![Node.js](https://img.shields.io/badge/node-%3E%3D22-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
-[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-2ea44f)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**Rin** is a local-first runtime designed for chat-connected agent workflows. It provides a stable, daemon-backed environment where agents can manage schedules, automation, and long-running bridge deliveries without being tied to a single terminal session or editor window.
 
-Local-first runtime for chat-connected agent workflows.
+## Why Rin?
 
-## What it is
+Rin occupies a unique position in the agent ecosystem. While many tools focus on immediate code generation or editor integration, Rin focuses on the **runtime root**—the persistent background layer that enables agents to function as continuous assistants.
 
-`rin` keeps the public CLI small and puts the real center of gravity in a local runtime root.
+### Compared with other agent products
 
-- `rin` starts the local interactive TUI
-- a background daemon handles bridge, schedule, and automation flows
-- runtime state lives under `~/.rin`
-- internal capabilities such as bridge delivery, memory, inspection, schedules, and web search stay behind the runtime/tool surface instead of becoming a long list of public subcommands
+| Feature | Rin | Terminal Coding Agents | IDE-Centric Agents |
+| :--- | :--- | :--- | :--- |
+| **Primary Interface** | Local Runtime & TUI | CLI Commands | Editor / Extension |
+| **Execution Model** | Persistent Daemon | Task-specific Process | Editor-bound Plugin |
+| **State Management** | Centralized (`~/.rin`) | Session-based | Editor Workspace |
+| **Tool Surface** | Internal Runtime API | CLI Subcommands | Editor Commands |
+| **Core Focus** | Connected Workflows | Direct File Editing | In-editor Assistance |
 
-## Why it feels different
+*Examples of related categories include terminal agents like Codex CLI, Claude Code, or Gemini CLI, and IDE-centric tools like Cursor, Windsurf, or Cline.*
 
-Rin is not trying to be just another terminal wrapper around a model, and it is not trying to be an IDE shell either.
+## Key Characteristics
 
-- **Local-first by default** — state, docs, skills, and runtime data stay under `~/.rin`
-- **Daemon-backed workflows** — automation and chat-connected flows are built into the runtime model
-- **Small public surface** — the supported CLI stays intentionally narrow: start, restart, update, uninstall
-- **Runtime-first design** — agent-facing power is exposed through the runtime itself, not by growing the public CLI every time a new capability appears
-
-## Compared with other agent products
-
-Rin is best understood as a different center of gravity rather than a feature checklist fight.
-
-| Product shape | Typical center | Rin's position |
-| --- | --- | --- |
-| Terminal coding agents such as Codex CLI, Claude Code, or Gemini CLI | the active terminal session in the current repo | Rin centers a persistent local runtime root plus daemon-backed chat-connected workflows |
-| IDE-centric agents such as Cursor, Windsurf, or Cline | the editor window and its extension lifecycle | Rin keeps the workflow in a local runtime with a deliberately small public CLI |
-
-If you want an agent runtime that stays organized around persistent local state and background workflows, Rin is built for that shape.
-
-## Requirements
-
-- Linux-compatible environment
-- user-level `systemd` for managed daemon restart/update flows
-- Node.js >= 22
-- `npm`, `git`, `mktemp`
-- Docker optional for the managed local SearxNG sidecar used by web search
+- **Local-First Root:** All runtime state, memory, and configuration live in `~/.rin`.
+- **Daemon-Backed:** A background service handles bridges, schedules, and automation flows, ensuring tasks continue even when the UI is closed.
+- **Minimal CLI Surface:** The public CLI is kept intentionally small. Complex agent capabilities (web search, memory, inspection) are exposed through the runtime tool surface rather than expanding the CLI complexity.
+- **User-Level Management:** Deeply integrates with `systemd` for managed service lifecycles (restart, update, logs).
 
 ## Installation
 
-Install with `install.sh`. `rin install` is intentionally not a public command.
+### Quick Install
+Requires a Linux-compatible environment with `systemd`, Node.js >= 22, `npm`, `git`, and `mktemp`.
 
 ```bash
-# Install the main branch
+# Install latest main
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 
-# Install a specific ref
+# Install specific ref
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
 ```
 
-The launcher is installed to `~/.local/bin/rin`.
-
-### Install from source
-
+### Source Install
 ```bash
 git clone https://github.com/THE-cattail/rin.git
 cd rin
@@ -69,57 +53,43 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-## Quick start
+## Command Surface
 
-1. Run `rin` to open the local interactive mode.
-2. Keep runtime files under `~/.rin`.
-3. Use `rin restart` after changing daemon-managed runtime or bridge settings.
-4. Use `rin update` to reinstall from the configured source and refresh the runtime.
+Rin maintains a lean CLI to stay out of your way:
 
-## Public command surface
+- `rin`: Launches the interactive local TUI.
+- `rin restart`: Restarts the background Rin daemon service.
+- `rin update`: Reinstalls/updates Rin from the configured source repository and ref.
+- `rin uninstall --keep-state --yes`: Removes the application and launcher but preserves your data in `~/.rin`.
+- `rin uninstall --purge --yes`: Completely removes the application and the `~/.rin` directory.
 
-| Command | Purpose |
-| --- | --- |
-| `rin` | Start the local interactive TUI |
-| `rin restart` | Restart the user-level Rin daemon service |
-| `rin update` | Reinstall from the configured source repository/ref |
-| `rin uninstall --keep-state --yes` | Remove the app and launcher but keep `~/.rin` |
-| `rin uninstall --purge --yes` | Remove both the app and `~/.rin` |
+## Runtime Layout
 
-## Runtime layout
+The runtime state is strictly contained within your home directory:
 
-- `~/.rin` — runtime root
-- `~/.rin/data` — runtime data and daemon state
-- `~/.rin/docs/rin` — local runtime reference copied into the installation
+- `~/.rin/`: Primary state root.
+- `~/.rin/data/web-search/config.json`: Web search configuration.
+- `~/.rin/bin/`: Launcher and binaries.
 
-## Web search
+## Web Search
 
-Web search reads its runtime config from `~/.rin/data/web-search/config.json`.
-
-By default, Rin can manage a local SearxNG sidecar. You can also point that config at your own SearxNG instance or provide Serper credentials.
+Rin features a flexible web search runtime capability. It can manage a local **SearxNG** instance via Docker (optional sidecar), connect to an existing SearxNG instance, or use **Serper** credentials. Configuration is managed at `~/.rin/data/web-search/config.json`.
 
 ## Development
 
+### Requirements
+- Node.js >= 22
+- Linux with user-level `systemd`
+- Docker (optional, for managed SearxNG sidecar)
+
+### Verification
+To verify your local changes:
 ```bash
-npm ci
 npm run check
 ```
 
-`npm run check` builds the project, runs unit tests, runs smoke tests for install/update/uninstall flows, and checks repository portability/doc consistency.
-
-See also:
-
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [CODE_STYLE.md](CODE_STYLE.md)
-- [Runtime reference](install/home/docs/rin/README.md)
-
-## Uninstall
-
-```bash
-rin uninstall --keep-state --yes
-rin uninstall --purge --yes
-```
+For more details on contributing, please see [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_STYLE.md](CODE_STYLE.md). Internal documentation can be found in `install/home/docs/rin/README.md`.
 
 ## License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
