@@ -324,9 +324,86 @@ function findChoiceIndex(options, value) {
   return index >= 0 ? index : 0
 }
 
+function installPromptCanUseArrowMenu(rl) {
+  const input = rl && rl.input
+  const output = rl && rl.output
+  return Boolean(input && output && input.isTTY && output.isTTY && typeof input.setRawMode === 'function')
+}
+
+async function promptInstallArrowChoice(rl, question, options, fallbackIndex = 0) {
+  if (!installPromptCanUseArrowMenu(rl)) return null
+  const input = rl.input
+  const output = rl.output
+  const selectedDefault = Number.isFinite(fallbackIndex) && fallbackIndex >= 0 && fallbackIndex < options.length ? fallbackIndex : 0
+  readlineCore.emitKeypressEvents(input)
+  const hadRawMode = Boolean(input.isRaw)
+  let renderedLines = 0
+  let selected = selectedDefault
+
+  const render = () => {
+    const lines = [`${question}  (↑/↓ to move, Enter to confirm)`]
+    options.forEach((opt, index) => {
+      const cursor = index === selected ? '›' : ' '
+      const marker = index === selectedDefault ? ' (default)' : ''
+      lines.push(`  ${cursor} ${opt.label}${marker}`)
+    })
+    if (renderedLines > 0) output.write(`\u001b[${renderedLines}F\u001b[J`)
+    output.write(`${lines.join('\n')}\n`)
+    renderedLines = lines.length
+  }
+
+  return await new Promise((resolve) => {
+    const cleanup = () => {
+      input.removeListener('keypress', onKeypress)
+      if (!hadRawMode) {
+        try { input.setRawMode(false) } catch {}
+      }
+      if (renderedLines > 0) output.write(`\u001b[${renderedLines}F\u001b[J`)
+      output.write(`Selected: ${options[selected].label}\n`)
+    }
+
+    const finish = (value) => {
+      cleanup()
+      resolve(value)
+    }
+
+    const onKeypress = (_str, key = {}) => {
+      if (key.ctrl && key.name === 'c') {
+        cleanup()
+        process.exit(130)
+      }
+      if (key.name === 'up' || key.name === 'k') {
+        selected = (selected - 1 + options.length) % options.length
+        render()
+        return
+      }
+      if (key.name === 'down' || key.name === 'j') {
+        selected = (selected + 1) % options.length
+        render()
+        return
+      }
+      if (key.name === 'return' || key.name === 'enter') {
+        finish(options[selected].value)
+        return
+      }
+      const digit = Number.parseInt(safeString(_str), 10)
+      if (Number.isFinite(digit) && digit >= 1 && digit <= options.length) {
+        selected = digit - 1
+        render()
+      }
+    }
+
+    try { input.setRawMode(true) } catch { return resolve(null) }
+    input.on('keypress', onKeypress)
+    render()
+  })
+}
+
 async function promptInstallChoiceWithDefault(rl, question, options, fallbackValue = '') {
-  console.error(question)
   const fallbackIndex = findChoiceIndex(options, fallbackValue)
+  const arrowChoice = await promptInstallArrowChoice(rl, question, options, fallbackIndex)
+  if (arrowChoice != null) return arrowChoice
+  console.error(question)
   options.forEach((opt, index) => {
     const marker = index === fallbackIndex ? ' (default)' : ''
     console.error(`  ${index + 1}) ${opt.label}${marker}`)
