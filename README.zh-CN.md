@@ -105,7 +105,7 @@ RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 rin
 ```
 
-## 可以拿它做什么
+## 使用场景
 
 | | |
 | :--- | :--- |
@@ -167,3 +167,4 @@ npm run check
 ## 开源协议
 
 本项目基于 MIT 协议发布。详情见 [LICENSE](LICENSE)。
+E)。

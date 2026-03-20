@@ -107,7 +107,7 @@ RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 rin
 ```
 
-## こんなふうに使える
+## Use Cases
 
 | | |
 | :--- | :--- |
@@ -169,3 +169,4 @@ npm run check
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+r details.

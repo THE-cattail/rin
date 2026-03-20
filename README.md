@@ -105,7 +105,7 @@ RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 rin
 ```
 
-## What people might use it for
+## Use Cases
 
 | | |
 | :--- | :--- |
@@ -167,3 +167,4 @@ For contribution details, see [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_STYLE
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+NSE) for details.
