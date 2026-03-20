@@ -1605,13 +1605,25 @@ function createRinBuiltinTools({
     }
   }
 
+  function assertModelSwitchIsChatScoped() {
+    const chatScope = safeString(currentChatKey).trim()
+    const resolvedSessionDir = safeString(sessionDir).trim() ? path.resolve(sessionDir) : ''
+    const resolvedSessionFile = safeString(sessionFile).trim() ? path.resolve(sessionFile) : ''
+    const defaultSessionRoot = path.resolve(path.join(agentDir, 'sessions', 'default'))
+    const inDefaultSessionDir = resolvedSessionDir === defaultSessionRoot
+      || (resolvedSessionFile && resolvedSessionFile.startsWith(defaultSessionRoot + path.sep))
+    if (!chatScope) throw new Error('model_switch_not_allowed_without_chat_scope')
+    if (inDefaultSessionDir) throw new Error('model_switch_not_allowed_on_shared_default_session')
+  }
+
   const modelTool = {
     name: 'rin_models',
     label: 'Rin Models',
-    description: 'Inspect available models or switch the active session to a specific model/provider the user wants to use.',
+    description: 'Inspect available models or switch the active chat-scoped session to a specific model/provider the user wants to use.',
     promptSnippet: 'Use this when the user wants a specific model or provider, or wants another model to handle the current wording/polish/work.',
     promptGuidelines: [
-      'If the user specifies a model or provider, switch the session model instead of informally simulating that route yourself.',
+      'If the user specifies a model or provider, switch only the active chat-scoped session model instead of informally simulating that route yourself.',
+      'Do not use this tool on shared/default session surfaces.',
       'If the user asks for another model to do the writing or polish, use this tool first.',
     ],
     parameters: Type.Object({
@@ -1638,6 +1650,7 @@ function createRinBuiltinTools({
           return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
         }
         if (action === 'switch') {
+          assertModelSwitchIsChatScoped()
           const targetModel = resolveSwitchModel(ctx, params)
           const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
           const previousProvider = safeString((currentSession && currentSession.model && currentSession.model.provider) || (ctx && ctx.model && ctx.model.provider)).trim()
