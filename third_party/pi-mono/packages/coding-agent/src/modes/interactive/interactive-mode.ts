@@ -61,7 +61,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
 import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
-import { type SessionContext, SessionManager } from "../../core/session-manager.js";
+import { type SessionContext, type SessionInfo, type SessionListProgress, SessionManager } from "../../core/session-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
@@ -119,6 +119,275 @@ function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
 }
 
+export function buildInteractiveModeStartupInstructions({
+	keybindings,
+	keyHintFn = keyHint,
+	keyTextFn = keyText,
+	rawKeyHintFn = rawKeyHint,
+	includeSuspend = true,
+	includeDeleteToLineEnd = true,
+	includeToolsExpand = true,
+	includeThinkingToggle = true,
+	includeExternalEditor = true,
+	includePasteImage = true,
+	includeDropFiles = true,
+}: {
+	keybindings?: Pick<KeybindingsManager, "getKeys">;
+	keyHintFn?: typeof keyHint;
+	keyTextFn?: typeof keyText;
+	rawKeyHintFn?: typeof rawKeyHint;
+	includeSuspend?: boolean;
+	includeDeleteToLineEnd?: boolean;
+	includeToolsExpand?: boolean;
+	includeThinkingToggle?: boolean;
+	includeExternalEditor?: boolean;
+	includePasteImage?: boolean;
+	includeDropFiles?: boolean;
+}): string {
+	const key = (name: AppKeybinding | KeyId) => {
+		const values = keybindings && typeof keybindings.getKeys === "function" ? keybindings.getKeys(name) : [];
+		return Array.isArray(values) && values.length > 0 ? values.join("/") : String(name);
+	};
+
+	const lines = [
+		keyHintFn("app.interrupt", "to interrupt"),
+		keyHintFn("app.clear", "to clear"),
+		rawKeyHintFn(`${keyTextFn("app.clear")} twice`, "to exit"),
+		keyHintFn("app.exit", "to exit (empty)"),
+		includeSuspend ? keyHintFn("app.suspend", "to suspend") : undefined,
+		includeDeleteToLineEnd ? keyHintFn("tui.editor.deleteToLineEnd", "to delete to end") : undefined,
+		keyHintFn("app.thinking.cycle", "to cycle thinking level"),
+		rawKeyHintFn(`${key("app.model.cycleForward")}/${key("app.model.cycleBackward")}`, "to cycle models"),
+		keyHintFn("app.model.select", "to select model"),
+		includeToolsExpand ? keyHintFn("app.tools.expand", "to expand tools") : undefined,
+		includeThinkingToggle ? keyHintFn("app.thinking.toggle", "to expand thinking") : undefined,
+		includeExternalEditor ? keyHintFn("app.editor.external", "for external editor") : undefined,
+		rawKeyHintFn("/", "for commands"),
+		rawKeyHintFn("!", "to run bash"),
+		rawKeyHintFn("!!", "to run bash (no context)"),
+		keyHintFn("app.message.followUp", "to queue follow-up"),
+		keyHintFn("app.message.dequeue", "to edit all queued messages"),
+		includePasteImage ? keyHintFn("app.clipboard.pasteImage", "to paste image") : undefined,
+		includeDropFiles ? rawKeyHintFn("drop files", "to attach") : undefined,
+	].filter(Boolean);
+
+	return lines.join("\n");
+}
+
+export function buildInteractiveModeAutocompleteCommands({
+	builtinSlashCommands,
+	promptTemplates = [],
+	extensionCommands = [],
+	skills = [],
+	enableSkillCommands = true,
+}: {
+	builtinSlashCommands: SlashCommand[];
+	promptTemplates?: Array<{ name: string; description?: string }>;
+	extensionCommands?: SlashCommand[];
+	skills?: Array<{ name: string; description?: string; filePath?: string }>;
+	enableSkillCommands?: boolean;
+}): { commands: SlashCommand[]; skillCommands: Map<string, string> } {
+	const slashCommands: SlashCommand[] = builtinSlashCommands.map((command) => ({
+		name: command.name,
+		description: command.description,
+		getArgumentCompletions: command.getArgumentCompletions,
+	}));
+	const templateCommands: SlashCommand[] = promptTemplates.map((cmd) => ({
+		name: cmd.name,
+		description: cmd.description,
+	}));
+	const normalizedExtensionCommands: SlashCommand[] = extensionCommands.map((cmd) => ({
+		name: cmd.name,
+		description: cmd.description,
+		getArgumentCompletions: cmd.getArgumentCompletions,
+	}));
+	const skillCommands = new Map<string, string>();
+	const skillCommandList: SlashCommand[] = [];
+	if (enableSkillCommands) {
+		for (const skill of skills) {
+			const commandName = `skill:${skill.name}`;
+			skillCommands.set(commandName, skill.filePath ?? "");
+			skillCommandList.push({ name: commandName, description: skill.description });
+		}
+	}
+	return {
+		commands: [...slashCommands, ...templateCommands, ...normalizedExtensionCommands, ...skillCommandList],
+		skillCommands,
+	};
+}
+
+export async function createInteractiveModeAutocompleteProvider({
+	CombinedAutocompleteProviderClass = CombinedAutocompleteProvider,
+	commands,
+	currentCwd = process.cwd(),
+	ensureToolFn = ensureTool,
+}: {
+	CombinedAutocompleteProviderClass?: typeof CombinedAutocompleteProvider;
+	commands: SlashCommand[];
+	currentCwd?: string;
+	ensureToolFn?: typeof ensureTool;
+}) {
+	let fdPath: string | undefined = undefined;
+	try {
+		fdPath = await ensureToolFn("fd");
+	} catch {}
+	return new CombinedAutocompleteProviderClass(commands, currentCwd, fdPath);
+}
+
+export function extractInteractiveUserMessageText(message: Pick<Message, "role" | "content">): string {
+	if (message.role !== "user") return "";
+	const textBlocks =
+		typeof message.content === "string"
+			? [{ type: "text", text: message.content }]
+			: message.content.filter((c: { type: string }) => c.type === "text");
+	return textBlocks.map((c) => (c as { text: string }).text).join("");
+}
+
+function getInteractiveToolCallParts(content: any): { id: string; name: string; args: any } | undefined {
+	if (!content) return undefined;
+	const type = String(content.type ?? "");
+	if (type !== "toolCall" && type !== "tool-call") return undefined;
+	const id = String(content.id ?? content.toolCallId ?? "");
+	const name = String(content.name ?? content.toolName ?? "");
+	const args = content.arguments ?? content.args ?? {};
+	if (!id || !name) return undefined;
+	return { id, name, args };
+}
+
+export function renderInteractiveMessageHistory({
+	messages,
+	chatContainer,
+	markdownTheme,
+	hideThinkingBlock = false,
+	toolOutputExpanded = false,
+	showImages = true,
+	ui,
+	cwd = process.cwd(),
+	pendingTools = new Map<string, ToolExecutionComponent>(),
+	getRegisteredToolDefinition,
+	getMessageRenderer,
+	parseSkillBlockFn = parseSkillBlock,
+	populateHistory = false,
+	addHistoryText,
+	retryAttempt = 0,
+}: {
+	messages: AgentMessage[];
+	chatContainer: Container;
+	markdownTheme: MarkdownTheme;
+	hideThinkingBlock?: boolean;
+	toolOutputExpanded?: boolean;
+	showImages?: boolean;
+	ui: TUI;
+	cwd?: string;
+	pendingTools?: Map<string, ToolExecutionComponent>;
+	getRegisteredToolDefinition?: (toolName: string) => any;
+	getMessageRenderer?: (customType: string) => any;
+	parseSkillBlockFn?: typeof parseSkillBlock;
+	populateHistory?: boolean;
+	addHistoryText?: (text: string) => void;
+	retryAttempt?: number;
+}): Map<string, ToolExecutionComponent> {
+	for (const message of messages) {
+		switch (message.role) {
+			case "bashExecution": {
+				const component = new BashExecutionComponent(message.command, ui, message.excludeFromContext);
+				if (message.output) component.appendOutput(message.output);
+				component.setComplete(
+					message.exitCode,
+					message.cancelled,
+					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
+					message.fullOutputPath,
+				);
+				chatContainer.addChild(component);
+				break;
+			}
+			case "custom": {
+				if (!message.display) break;
+				const renderer = getMessageRenderer?.(message.customType);
+				const component = new CustomMessageComponent(message, renderer, markdownTheme);
+				component.setExpanded(toolOutputExpanded);
+				chatContainer.addChild(component);
+				break;
+			}
+			case "compactionSummary": {
+				chatContainer.addChild(new Spacer(1));
+				const component = new CompactionSummaryMessageComponent(message, markdownTheme);
+				component.setExpanded(toolOutputExpanded);
+				chatContainer.addChild(component);
+				break;
+			}
+			case "branchSummary": {
+				chatContainer.addChild(new Spacer(1));
+				const component = new BranchSummaryMessageComponent(message, markdownTheme);
+				component.setExpanded(toolOutputExpanded);
+				chatContainer.addChild(component);
+				break;
+			}
+			case "user": {
+				const textContent = extractInteractiveUserMessageText(message);
+				if (!textContent) break;
+				const skillBlock = parseSkillBlockFn(textContent);
+				if (skillBlock) {
+					chatContainer.addChild(new Spacer(1));
+					const component = new SkillInvocationMessageComponent(skillBlock, markdownTheme);
+					component.setExpanded(toolOutputExpanded);
+					chatContainer.addChild(component);
+					if (skillBlock.userMessage) {
+						chatContainer.addChild(new UserMessageComponent(skillBlock.userMessage, markdownTheme));
+					}
+				} else {
+					chatContainer.addChild(new UserMessageComponent(textContent, markdownTheme));
+				}
+				if (populateHistory) addHistoryText?.(textContent);
+				break;
+			}
+			case "assistant": {
+				const assistantComponent = new AssistantMessageComponent(message, hideThinkingBlock, markdownTheme);
+				chatContainer.addChild(assistantComponent);
+				for (const content of message.content) {
+					const toolCall = getInteractiveToolCallParts(content);
+					if (!toolCall) continue;
+					const component = new ToolExecutionComponent(
+						toolCall.name,
+						toolCall.args,
+						{ showImages },
+						getRegisteredToolDefinition?.(toolCall.name),
+						ui,
+						cwd,
+					);
+					component.setExpanded(toolOutputExpanded);
+					chatContainer.addChild(component);
+					if (message.stopReason === "aborted" || message.stopReason === "error") {
+						const errorMessage =
+							message.stopReason === "aborted"
+								? retryAttempt > 0
+									? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+									: "Operation aborted"
+								: message.errorMessage || "Error";
+						component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+					} else {
+						pendingTools.set(toolCall.id, component);
+					}
+				}
+				break;
+			}
+			case "toolResult": {
+				const component = pendingTools.get(message.toolCallId);
+				if (component) {
+					component.updateResult(message);
+					pendingTools.delete(message.toolCallId);
+				}
+				break;
+			}
+			default: {
+				const _exhaustive: never = message;
+				break;
+			}
+		}
+	}
+	return pendingTools;
+}
+
 type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
@@ -127,6 +396,24 @@ type CompactionQueuedMessage = {
 /**
  * Options for InteractiveMode initialization.
  */
+export interface InteractiveModeSessionCatalogProvider {
+	listCurrent: (onProgress: (progress: SessionListProgress) => void) => Promise<SessionInfo[]>;
+	listAll: () => Promise<SessionInfo[]>;
+	openSession: (sessionPath: string) => Promise<void>;
+	renameSession?: (sessionFilePath: string, nextName: string | undefined) => Promise<void>;
+	getActiveSessionPath?: () => string | undefined;
+}
+
+export interface InteractiveModeCustomSlashCommand extends SlashCommand {
+	run: (context: {
+		text: string;
+		showStatus: (message: string) => void;
+		showWarning: (message: string) => void;
+		showError: (message: string) => void;
+		appendText: (message: string) => void;
+	}) => Promise<void> | void;
+}
+
 export interface InteractiveModeOptions {
 	/** Providers that were migrated to auth.json (shows warning) */
 	migratedProviders?: string[];
@@ -140,6 +427,10 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
+	/** Override how /resume lists, opens, and renames sessions. */
+	sessionCatalogProvider?: InteractiveModeSessionCatalogProvider;
+	/** Additional slash commands handled by the host mode. */
+	customSlashCommands?: InteractiveModeCustomSlashCommand[];
 }
 
 export class InteractiveMode {
@@ -287,11 +578,25 @@ export class InteractiveMode {
 	}
 
 	private setupAutocomplete(fdPath: string | undefined): void {
-		// Define commands for autocomplete
-		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
+		const customSlashCommands = (this.options.customSlashCommands ?? []).map((command) => ({
 			name: command.name,
 			description: command.description,
+			getArgumentCompletions: command.getArgumentCompletions,
 		}));
+		const { commands, skillCommands } = buildInteractiveModeAutocompleteCommands({
+			builtinSlashCommands: BUILTIN_SLASH_COMMANDS,
+			promptTemplates: this.session.promptTemplates,
+			extensionCommands: [
+				...customSlashCommands,
+				...((this.session.extensionRunner?.getRegisteredCommands(
+					new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name)),
+				) as SlashCommand[]) ?? []),
+			],
+			skills: this.session.resourceLoader.getSkills().skills,
+			enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
+		});
+		const slashCommands = commands;
+		this.skillCommands = skillCommands;
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
@@ -324,36 +629,9 @@ export class InteractiveMode {
 			};
 		}
 
-		// Convert prompt templates to SlashCommand format for autocomplete
-		const templateCommands: SlashCommand[] = this.session.promptTemplates.map((cmd) => ({
-			name: cmd.name,
-			description: cmd.description,
-		}));
-
-		// Convert extension commands to SlashCommand format
-		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-		const extensionCommands: SlashCommand[] = (
-			this.session.extensionRunner?.getRegisteredCommands(builtinCommandNames) ?? []
-		).map((cmd) => ({
-			name: cmd.name,
-			description: cmd.description ?? "(extension command)",
-			getArgumentCompletions: cmd.getArgumentCompletions,
-		}));
-
-		// Build skill commands from session.skills (if enabled)
-		this.skillCommands.clear();
-		const skillCommandList: SlashCommand[] = [];
-		if (this.settingsManager.getEnableSkillCommands()) {
-			for (const skill of this.session.resourceLoader.getSkills().skills) {
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
-				skillCommandList.push({ name: commandName, description: skill.description });
-			}
-		}
-
 		// Setup autocomplete
 		this.autocompleteProvider = new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			slashCommands,
 			process.cwd(),
 			fdPath,
 		);
@@ -381,30 +659,9 @@ export class InteractiveMode {
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
 
-			// Build startup instructions using keybinding hint helpers
-			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-
-			const instructions = [
-				hint("app.interrupt", "to interrupt"),
-				hint("app.clear", "to clear"),
-				rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-				hint("app.exit", "to exit (empty)"),
-				hint("app.suspend", "to suspend"),
-				keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-				hint("app.thinking.cycle", "to cycle thinking level"),
-				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-				hint("app.model.select", "to select model"),
-				hint("app.tools.expand", "to expand tools"),
-				hint("app.thinking.toggle", "to expand thinking"),
-				hint("app.editor.external", "for external editor"),
-				rawKeyHint("/", "for commands"),
-				rawKeyHint("!", "to run bash"),
-				rawKeyHint("!!", "to run bash (no context)"),
-				hint("app.message.followUp", "to queue follow-up"),
-				hint("app.message.dequeue", "to edit all queued messages"),
-				hint("app.clipboard.pasteImage", "to paste image"),
-				rawKeyHint("drop files", "to attach"),
-			].join("\n");
+			const instructions = buildInteractiveModeStartupInstructions({
+				keybindings: this.keybindings,
+			});
 			this.builtInHeader = new Text(`${logo}\n${instructions}`, 1, 0);
 
 			// Setup UI layout
@@ -1950,10 +2207,40 @@ export class InteractiveMode {
 		}
 	}
 
+	private findCustomSlashCommand(text: string): InteractiveModeCustomSlashCommand | undefined {
+		if (!text.startsWith("/")) return undefined;
+		const spaceIndex = text.indexOf(" ");
+		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		return this.options.customSlashCommands?.find((command) => command.name === commandName);
+	}
+
+	private appendPlainText(message: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(message, 1, 0));
+		this.ui.requestRender();
+	}
+
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) return;
+
+			const customSlashCommand = this.findCustomSlashCommand(text);
+			if (customSlashCommand) {
+				this.editor.setText("");
+				try {
+					await customSlashCommand.run({
+						text,
+						showStatus: (message) => this.showStatus(message),
+						showWarning: (message) => this.showWarning(message),
+						showError: (message) => this.showError(message),
+						appendText: (message) => this.appendPlainText(message),
+					});
+				} catch (error: unknown) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 
 			// Handle commands
 			if (text === "/settings") {
@@ -2419,12 +2706,7 @@ export class InteractiveMode {
 
 	/** Extract text content from a user message */
 	private getUserMessageText(message: Message): string {
-		if (message.role !== "user") return "";
-		const textBlocks =
-			typeof message.content === "string"
-				? [{ type: "text", text: message.content }]
-				: message.content.filter((c: { type: string }) => c.type === "text");
-		return textBlocks.map((c) => (c as { text: string }).text).join("");
+		return extractInteractiveUserMessageText(message);
 	}
 
 	/**
@@ -2454,92 +2736,23 @@ export class InteractiveMode {
 	}
 
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
-		switch (message.role) {
-			case "bashExecution": {
-				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
-				component.setComplete(
-					message.exitCode,
-					message.cancelled,
-					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
-					message.fullOutputPath,
-				);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "custom": {
-				if (message.display) {
-					const renderer = this.session.extensionRunner?.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-				}
-				break;
-			}
-			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
-				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
-				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
-				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
-				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "user": {
-				const textContent = this.getUserMessageText(message);
-				if (textContent) {
-					const skillBlock = parseSkillBlock(textContent);
-					if (skillBlock) {
-						// Render skill block (collapsible)
-						this.chatContainer.addChild(new Spacer(1));
-						const component = new SkillInvocationMessageComponent(
-							skillBlock,
-							this.getMarkdownThemeWithSettings(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-						// Render user message separately if present
-						if (skillBlock.userMessage) {
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-							);
-							this.chatContainer.addChild(userComponent);
-						}
-					} else {
-						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
-						this.chatContainer.addChild(userComponent);
-					}
-					if (options?.populateHistory) {
-						this.editor.addToHistory?.(textContent);
-					}
-				}
-				break;
-			}
-			case "assistant": {
-				const assistantComponent = new AssistantMessageComponent(
-					message,
-					this.hideThinkingBlock,
-					this.getMarkdownThemeWithSettings(),
-				);
-				this.chatContainer.addChild(assistantComponent);
-				break;
-			}
-			case "toolResult": {
-				// Tool results are rendered inline with tool calls, handled separately
-				break;
-			}
-			default: {
-				const _exhaustive: never = message;
-			}
-		}
+		renderInteractiveMessageHistory({
+			messages: [message],
+			chatContainer: this.chatContainer,
+			markdownTheme: this.getMarkdownThemeWithSettings(),
+			hideThinkingBlock: this.hideThinkingBlock,
+			toolOutputExpanded: this.toolOutputExpanded,
+			showImages: this.settingsManager.getShowImages(),
+			ui: this.ui,
+			cwd: process.cwd(),
+			pendingTools: this.pendingTools,
+			getRegisteredToolDefinition: (toolName) => this.getRegisteredToolDefinition(toolName),
+			getMessageRenderer: (customType) => this.session.extensionRunner?.getMessageRenderer(customType),
+			parseSkillBlockFn: parseSkillBlock,
+			populateHistory: options?.populateHistory,
+			addHistoryText: (text) => this.editor.addToHistory?.(text),
+			retryAttempt: this.session.retryAttempt,
+		});
 	}
 
 	/**
@@ -2559,52 +2772,23 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
-		for (const message of sessionContext.messages) {
-			// Assistant messages need special handling for tool calls
-			if (message.role === "assistant") {
-				this.addMessageToChat(message);
-				// Render tool call components
-				for (const content of message.content) {
-					if (content.type === "toolCall") {
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.arguments,
-							{ showImages: this.settingsManager.getShowImages() },
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							let errorMessage: string;
-							if (message.stopReason === "aborted") {
-								const retryAttempt = this.session.retryAttempt;
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: "Operation aborted";
-							} else {
-								errorMessage = message.errorMessage || "Error";
-							}
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-						} else {
-							this.pendingTools.set(content.id, component);
-						}
-					}
-				}
-			} else if (message.role === "toolResult") {
-				// Match tool results to pending tool components
-				const component = this.pendingTools.get(message.toolCallId);
-				if (component) {
-					component.updateResult(message);
-					this.pendingTools.delete(message.toolCallId);
-				}
-			} else {
-				// All other messages use standard rendering
-				this.addMessageToChat(message, options);
-			}
-		}
+		renderInteractiveMessageHistory({
+			messages: sessionContext.messages,
+			chatContainer: this.chatContainer,
+			markdownTheme: this.getMarkdownThemeWithSettings(),
+			hideThinkingBlock: this.hideThinkingBlock,
+			toolOutputExpanded: this.toolOutputExpanded,
+			showImages: this.settingsManager.getShowImages(),
+			ui: this.ui,
+			cwd: process.cwd(),
+			pendingTools: this.pendingTools,
+			getRegisteredToolDefinition: (toolName) => this.getRegisteredToolDefinition(toolName),
+			getMessageRenderer: (customType) => this.session.extensionRunner?.getMessageRenderer(customType),
+			parseSkillBlockFn: parseSkillBlock,
+			populateHistory: options.populateHistory,
+			addHistoryText: (text) => this.editor.addToHistory?.(text),
+			retryAttempt: this.session.retryAttempt,
+		});
 
 		this.pendingTools.clear();
 		this.ui.requestRender();
@@ -3637,10 +3821,14 @@ export class InteractiveMode {
 
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
+			const sessionCatalogProvider = this.options.sessionCatalogProvider;
 			const selector = new SessionSelectorComponent(
-				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
-				SessionManager.listAll,
+				sessionCatalogProvider
+					? (onProgress) => sessionCatalogProvider.listCurrent(onProgress)
+					: (onProgress) => SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
+				sessionCatalogProvider
+					? () => sessionCatalogProvider.listAll()
+					: SessionManager.listAll,
 				async (sessionPath) => {
 					done();
 					await this.handleResumeSession(sessionPath);
@@ -3654,17 +3842,21 @@ export class InteractiveMode {
 				},
 				() => this.ui.requestRender(),
 				{
-					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
-						const next = (nextName ?? "").trim();
-						if (!next) return;
-						const mgr = SessionManager.open(sessionFilePath);
-						mgr.appendSessionInfo(next);
-					},
+					renameSession: sessionCatalogProvider?.renameSession
+						? async (sessionFilePath: string, nextName: string | undefined) => {
+							await sessionCatalogProvider.renameSession?.(sessionFilePath, nextName);
+						}
+						: async (sessionFilePath: string, nextName: string | undefined) => {
+							const next = (nextName ?? "").trim();
+							if (!next) return;
+							const mgr = SessionManager.open(sessionFilePath);
+							mgr.appendSessionInfo(next);
+						},
 					showRenameHint: true,
 					keybindings: this.keybindings,
 				},
 
-				this.sessionManager.getSessionFile(),
+				sessionCatalogProvider?.getActiveSessionPath?.() ?? this.sessionManager.getSessionFile(),
 			);
 			return { component: selector, focus: selector };
 		});
@@ -3686,7 +3878,11 @@ export class InteractiveMode {
 		this.pendingTools.clear();
 
 		// Switch session via AgentSession (emits extension session events)
-		await this.session.switchSession(sessionPath);
+		if (this.options.sessionCatalogProvider) {
+			await this.options.sessionCatalogProvider.openSession(sessionPath);
+		} else {
+			await this.session.switchSession(sessionPath);
+		}
 
 		// Clear and re-render the chat
 		this.chatContainer.clear();

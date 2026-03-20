@@ -177,7 +177,46 @@ function normalizeError(id: any, command: string, error: any) {
   return { id, type: 'response', command, success: false, error: safeString(error && error.message ? error.message : error) || 'rpc_error' }
 }
 
-export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoRoot: string, stateRoot: string, logger?: any }) {
+function formatContextUsageLine(contextUsage: any) {
+  const usage = contextUsage && typeof contextUsage === 'object' ? contextUsage : null
+  if (!usage) return 'Context: n/a'
+  const tokens = Number(usage.tokens)
+  const window = Number(usage.contextWindow)
+  const percent = Number(usage.percent)
+  const tokenText = Number.isFinite(tokens) && tokens >= 0 ? String(tokens) : '?'
+  const windowText = Number.isFinite(window) && window > 0 ? String(window) : '?'
+  const percentText = Number.isFinite(percent) ? `${percent.toFixed(1)}%` : '?'
+  return `Context: ${tokenText}/${windowText} (${percentText})`
+}
+
+function formatCurrentSessionStatus(state: any) {
+  const current = state && typeof state === 'object' ? state : {}
+  const lines: string[] = []
+  const sessionName = safeString(current.sessionName || '').trim() || 'default'
+  lines.push(`Session: ${sessionName}`)
+  const provider = safeString(current.model && current.model.provider || '').trim()
+  const modelId = safeString(current.model && current.model.id || '').trim()
+  lines.push(`Model: ${provider || '(unknown provider)'}/${modelId || '(unknown model)'}`)
+  lines.push(`Thinking: ${safeString(current.thinkingLevel || '').trim() || 'minimal'}`)
+  let activity = 'idle'
+  if (current.isStreaming) activity = 'running'
+  else if (current.isCompacting) activity = 'compacting'
+  else if (current.isRetrying) activity = 'retrying'
+  else if (current.isBashRunning) activity = 'bash running'
+  lines.push(`Agent: ${activity}`)
+  lines.push(formatContextUsageLine(current.contextUsage))
+  const sessionFile = safeString(current.sessionFile || '').trim()
+  if (sessionFile) lines.push(`Session file: ${sessionFile}`)
+  const sessionCwd = safeString(current.sessionCwd || '').trim()
+  if (sessionCwd) lines.push(`Cwd: ${sessionCwd}`)
+  const chatKey = safeString(current.bridgeChatKey || '').trim()
+  if (chatKey) lines.push(`Chat: ${chatKey}`)
+  const pending = Number(current.pendingMessageCount || 0)
+  if (Number.isFinite(pending) && pending > 0) lines.push(`Queued messages: ${pending}`)
+  return lines.join('\n')
+}
+
+export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger, bridge }: { repoRoot: string, stateRoot: string, logger?: any, bridge?: any }) {
   const sockPath = tuiRpcSockPathForState(stateRoot)
   try { fs.rmSync(sockPath, { force: true }) } catch {}
 
@@ -190,6 +229,9 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
     let session: any = null
     let created: any = null
     let theme: any = createPlainTheme()
+    let unsubscribeSession: (() => void) | null = null
+    let activeBridgeChatKey = ''
+    let activeSessionDir = ''
     const pendingExtensionRequests = new Map<string, { resolve: (value: any) => void }>()
 
     const send = (obj: any) => {
@@ -197,75 +239,133 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
       try { socket.write(`${JSON.stringify(obj)}\n`) } catch {}
     }
 
-    const cleanup = async () => {
-      if (closed) return
-      closed = true
+    const cancelPendingExtensionRequests = () => {
       for (const [, pending] of pendingExtensionRequests) {
         try { pending.resolve({ cancelled: true }) } catch {}
       }
       pendingExtensionRequests.clear()
+    }
+
+    const disposeSession = async () => {
+      cancelPendingExtensionRequests()
+      if (unsubscribeSession) {
+        try { unsubscribeSession() } catch {}
+        unsubscribeSession = null
+      }
       if (session && typeof session.dispose === 'function') {
         try { session.dispose() } catch {}
       }
+      session = null
+      created = null
+      initialized = false
+      activeBridgeChatKey = ''
+      activeSessionDir = ''
+    }
+
+    const cleanup = async () => {
+      if (closed) return
+      closed = true
+      await disposeSession()
       try { socket.destroy() } catch {}
+    }
+
+    const sessionState = () => ({
+      model: session.model,
+      thinkingLevel: session.thinkingLevel,
+      isStreaming: session.isStreaming,
+      isCompacting: session.isCompacting,
+      isRetrying: Boolean(session.isRetrying),
+      isBashRunning: Boolean(session.isBashRunning),
+      steeringMode: session.steeringMode,
+      followUpMode: session.followUpMode,
+      sessionFile: session.sessionFile,
+      sessionDir: activeSessionDir,
+      sessionId: session.sessionId,
+      sessionName: session.sessionName,
+      sessionCwd: session.sessionManager && typeof session.sessionManager.getCwd === 'function' ? session.sessionManager.getCwd() : '',
+      bridgeChatKey: activeBridgeChatKey,
+      autoCompactionEnabled: session.autoCompactionEnabled,
+      autoRetryEnabled: Boolean(session.autoRetryEnabled),
+      contextUsage: typeof session.getContextUsage === 'function' ? session.getContextUsage() : undefined,
+      messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+      pendingMessageCount: Number(session.pendingMessageCount || 0),
+    })
+
+    const createSession = async (payload: any, override: any = {}) => {
+      theme = await loadThemeSingleton()
+      const provider = safeString(override.provider != null ? override.provider : payload && payload.provider).trim()
+      const model = safeString(override.model != null ? override.model : payload && payload.model).trim()
+      const thinking = safeString(override.thinking != null ? override.thinking : payload && payload.thinking).trim()
+      const sessionFile = safeString(override.sessionFile != null ? override.sessionFile : payload && payload.sessionFile).trim()
+      const sessionDir = safeString(override.sessionDir != null ? override.sessionDir : '').trim()
+      const bridgeChatKey = safeString(override.currentChatKey != null ? override.currentChatKey : payload && payload.chatKey).trim()
+      created = await createRinPiSession({
+        repoRoot,
+        workspaceRoot: stateRoot,
+        sessionCwd: process.env.HOME || os.homedir(),
+        resourceCwd: stateRoot,
+        settingsCwd: stateRoot,
+        sessionDir,
+        sessionFile,
+        sessionPolicy: sessionFile ? 'continueRecent' : 'new',
+        brainChatKey: safeString(override.brainChatKey || bridgeChatKey || 'local:default').trim() || 'local:default',
+        currentChatKey: bridgeChatKey,
+        provider,
+        model,
+        thinking,
+      })
+      session = created.session
+      if (!session) throw new Error('pi_sdk_session_missing')
+      activeBridgeChatKey = bridgeChatKey
+      activeSessionDir = safeString(created && created.sessionDir || sessionDir).trim()
+
+      const uiContext = createExtensionUiBridge({ send, pendingRequests: pendingExtensionRequests, theme })
+      await session.bindExtensions({
+        uiContext,
+        commandContextActions: {
+          waitForIdle: () => session.agent.waitForIdle(),
+          newSession: async (options: any) => ({ cancelled: !(await session.newSession(options)) }),
+          fork: async (entryId: string) => {
+            const result = await session.fork(entryId)
+            return { cancelled: result.cancelled }
+          },
+          navigateTree: async (targetId: string, options: any) => {
+            const result = await session.navigateTree(targetId, {
+              summarize: options && options.summarize,
+              customInstructions: options && options.customInstructions,
+              replaceInstructions: options && options.replaceInstructions,
+              label: options && options.label,
+            })
+            return { cancelled: result.cancelled }
+          },
+          switchSession: async (sessionPath: string) => ({ cancelled: !(await session.switchSession(sessionPath)) }),
+          reload: async () => { await session.reload() },
+        },
+        shutdownHandler: () => {},
+        onError: (err: any) => send({ type: 'extension_error', extensionPath: err.extensionPath, event: err.event, error: err.error }),
+      })
+
+      unsubscribeSession = session.subscribe((event: any) => send(event))
+      initialized = true
     }
 
     const ensureSession = async (payload: any) => {
       if (initialized) return
       if (initInFlight) return await initInFlight
       initInFlight = (async () => {
-        theme = await loadThemeSingleton()
-        created = await createRinPiSession({
-          repoRoot,
-          workspaceRoot: stateRoot,
-          sessionCwd: process.env.HOME || os.homedir(),
-          resourceCwd: stateRoot,
-          settingsCwd: stateRoot,
-          sessionFile: safeString(payload && payload.sessionFile).trim(),
-          sessionPolicy: safeString(payload && payload.sessionFile).trim() ? 'continueRecent' : 'new',
-          brainChatKey: 'local:default',
-          currentChatKey: '',
-          provider: safeString(payload && payload.provider).trim(),
-          model: safeString(payload && payload.model).trim(),
-          thinking: safeString(payload && payload.thinking).trim(),
-        })
-        session = created.session
-        if (!session) throw new Error('pi_sdk_session_missing')
-
-        const uiContext = createExtensionUiBridge({ send, pendingRequests: pendingExtensionRequests, theme })
-        await session.bindExtensions({
-          uiContext,
-          commandContextActions: {
-            waitForIdle: () => session.agent.waitForIdle(),
-            newSession: async (options: any) => ({ cancelled: !(await session.newSession(options)) }),
-            fork: async (entryId: string) => {
-              const result = await session.fork(entryId)
-              return { cancelled: result.cancelled }
-            },
-            navigateTree: async (targetId: string, options: any) => {
-              const result = await session.navigateTree(targetId, {
-                summarize: options && options.summarize,
-                customInstructions: options && options.customInstructions,
-                replaceInstructions: options && options.replaceInstructions,
-                label: options && options.label,
-              })
-              return { cancelled: result.cancelled }
-            },
-            switchSession: async (sessionPath: string) => ({ cancelled: !(await session.switchSession(sessionPath)) }),
-            reload: async () => { await session.reload() },
-          },
-          shutdownHandler: () => {},
-          onError: (err: any) => send({ type: 'extension_error', extensionPath: err.extensionPath, event: err.event, error: err.error }),
-        })
-
-        session.subscribe((event: any) => send(event))
-        initialized = true
+        await createSession(payload)
       })()
       try {
         await initInFlight
       } finally {
         initInFlight = null
       }
+    }
+
+    const reopenSession = async (payload: any, override: any = {}) => {
+      if (initInFlight) await initInFlight
+      await disposeSession()
+      await createSession(payload, override)
     }
 
     const handleCommand = async (command: any) => {
@@ -283,25 +383,7 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
 
       if (type === 'init') {
         await ensureSession(command)
-        const state = {
-          model: session.model,
-          thinkingLevel: session.thinkingLevel,
-          isStreaming: session.isStreaming,
-          isCompacting: session.isCompacting,
-          isRetrying: Boolean(session.isRetrying),
-          isBashRunning: Boolean(session.isBashRunning),
-          steeringMode: session.steeringMode,
-          followUpMode: session.followUpMode,
-          sessionFile: session.sessionFile,
-          sessionId: session.sessionId,
-          sessionName: session.sessionName,
-          sessionCwd: session.sessionManager && typeof session.sessionManager.getCwd === 'function' ? session.sessionManager.getCwd() : '',
-          autoCompactionEnabled: session.autoCompactionEnabled,
-          autoRetryEnabled: Boolean(session.autoRetryEnabled),
-          messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
-          pendingMessageCount: Number(session.pendingMessageCount || 0),
-        }
-        return normalizeResponse(id, 'init', state)
+        return normalizeResponse(id, 'init', sessionState())
       }
 
       if (!initialized) throw new Error('tui_rpc_requires_init')
@@ -328,24 +410,7 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
           await session.abort()
           return normalizeResponse(id, 'abort')
         case 'get_state':
-          return normalizeResponse(id, 'get_state', {
-            model: session.model,
-            thinkingLevel: session.thinkingLevel,
-            isStreaming: session.isStreaming,
-            isCompacting: session.isCompacting,
-            isRetrying: Boolean(session.isRetrying),
-            isBashRunning: Boolean(session.isBashRunning),
-            steeringMode: session.steeringMode,
-            followUpMode: session.followUpMode,
-            sessionFile: session.sessionFile,
-            sessionId: session.sessionId,
-            sessionName: session.sessionName,
-            sessionCwd: session.sessionManager && typeof session.sessionManager.getCwd === 'function' ? session.sessionManager.getCwd() : '',
-            autoCompactionEnabled: session.autoCompactionEnabled,
-            autoRetryEnabled: Boolean(session.autoRetryEnabled),
-            messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
-            pendingMessageCount: Number(session.pendingMessageCount || 0),
-          })
+          return normalizeResponse(id, 'get_state', sessionState())
         case 'get_messages':
           return normalizeResponse(id, 'get_messages', { messages: session.messages })
         case 'set_model': {
@@ -413,6 +478,27 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
           const cancelled = !(await session.newSession(command.parentSession ? { parentSession: command.parentSession } : undefined))
           return normalizeResponse(id, 'new_session', { cancelled })
         }
+        case 'open_session': {
+          const sessionPath = safeString(command.sessionPath || '').trim()
+          if (!sessionPath) return normalizeError(id, 'open_session', 'session_path_required')
+          await reopenSession(command, { sessionFile: sessionPath })
+          return normalizeResponse(id, 'open_session', sessionState())
+        }
+        case 'get_bridge_sessions': {
+          const sessions = bridge && typeof bridge.listSessions === 'function'
+            ? await bridge.listSessions()
+            : []
+          return normalizeResponse(id, 'get_bridge_sessions', { sessions: Array.isArray(sessions) ? sessions : [] })
+        }
+        case 'open_bridge_session': {
+          const chatKey = safeString(command.chatKey || '').trim()
+          if (!chatKey) return normalizeError(id, 'open_bridge_session', 'chat_key_required')
+          if (!bridge || typeof bridge.getSessionConfig !== 'function') return normalizeError(id, 'open_bridge_session', 'bridge_sessions_unavailable')
+          const next = await bridge.getSessionConfig(chatKey)
+          if (!next || typeof next !== 'object') return normalizeError(id, 'open_bridge_session', `bridge_session_not_found:${chatKey}`)
+          await reopenSession(command, next)
+          return normalizeResponse(id, 'open_bridge_session', sessionState())
+        }
         case 'switch_session': {
           const cancelled = !(await session.switchSession(safeString(command.sessionPath || '')))
           return normalizeResponse(id, 'switch_session', { cancelled })
@@ -473,6 +559,21 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
             })
           }
           return normalizeResponse(id, 'get_commands', { commands })
+        }
+        case 'control_command': {
+          const name = safeString(command.name || '').trim()
+          const chatKey = safeString(command.chatKey || activeBridgeChatKey).trim()
+          if (name === '/status') {
+            if (!chatKey) return normalizeResponse(id, 'control_command', { notices: [formatCurrentSessionStatus(sessionState())] })
+          }
+          if (name === '/restart') {
+            if (!bridge || typeof bridge.runControlCommand !== 'function') return normalizeError(id, 'control_command', 'control_commands_unavailable')
+            const result = await bridge.runControlCommand({ name, chatKey })
+            return normalizeResponse(id, 'control_command', result || {})
+          }
+          if (!bridge || typeof bridge.runControlCommand !== 'function') return normalizeError(id, 'control_command', 'control_commands_unavailable')
+          const result = await bridge.runControlCommand({ name, chatKey })
+          return normalizeResponse(id, 'control_command', result || {})
         }
         case 'ping':
           return normalizeResponse(id, 'ping')
@@ -541,7 +642,7 @@ export class DaemonTuiRpcClient {
     }
   }
 
-  async start(init: { sessionFile?: string, provider?: string, model?: string, thinking?: string } = {}) {
+  async start(init: { sessionFile?: string, provider?: string, model?: string, thinking?: string, chatKey?: string } = {}) {
     if (this.connected) return
     const sockPath = tuiRpcSockPathForState(this.stateRoot)
     const socket = new net.Socket()
@@ -639,10 +740,16 @@ export class DaemonTuiRpcClient {
   setAutoRetry(enabled: boolean) { return this.send('set_auto_retry', { enabled }) }
   abortCompaction() { return this.send('abort_compaction') }
   abortBranchSummary() { return this.send('abort_branch_summary') }
+  abortRetry() { return this.send('abort_retry') }
   compact(customInstructions = '') { return this.send('compact', { customInstructions }) }
   getCommands() { return this.send('get_commands').then((data: any) => data && data.commands ? data.commands : []) }
+  getSessionStats() { return this.send('get_session_stats') }
   getLastAssistantText() { return this.send('get_last_assistant_text').then((data: any) => data ? data.text : null) }
   newSession(parentSession = '') { return this.send('new_session', parentSession ? { parentSession } : {}) }
+  openSession(sessionPath: string) { return this.send('open_session', { sessionPath }) }
+  getBridgeSessions() { return this.send('get_bridge_sessions').then((data: any) => data && data.sessions ? data.sessions : []) }
+  openBridgeSession(chatKey: string) { return this.send('open_bridge_session', { chatKey }) }
+  runControlCommand(name: string, chatKey = '') { return this.send('control_command', { name, chatKey }) }
   switchSession(sessionPath: string) { return this.send('switch_session', { sessionPath }) }
   navigateTree(entryId: string, options: { summarize?: boolean, customInstructions?: string, replaceInstructions?: boolean, label?: string } = {}) {
     return this.send('navigate_tree', { entryId, ...options })
