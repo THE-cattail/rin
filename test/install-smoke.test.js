@@ -7,6 +7,8 @@ const path = require('node:path')
 const {
   performInstall,
   performUninstall,
+  installTargetChoices,
+  formatCliErrorMessage,
 } = require('../dist/index.js')
 
 function makeBundleFixture(rootDir) {
@@ -20,6 +22,27 @@ function makeBundleFixture(rootDir) {
   fs.writeFileSync(path.join(rootDir, 'install', 'home', 'docs', 'rin', 'README.md'), '# fixture runtime docs\n')
   fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({ name: 'rin-fixture', version: '0.0.0' }, null, 2))
 }
+
+test('installTargetChoices hides unsupported user-management options', () => {
+  const currentUser = { username: 'demo' }
+  assert.deepEqual(
+    installTargetChoices(currentUser, { platform: 'darwin', isRoot: false, hasGetent: false, hasUseradd: false }).map((item) => item.value),
+    ['current'],
+  )
+  assert.deepEqual(
+    installTargetChoices(currentUser, { platform: 'linux', isRoot: true, hasGetent: true, hasUseradd: false }).map((item) => item.value),
+    ['current', 'existing'],
+  )
+  assert.deepEqual(
+    installTargetChoices(currentUser, { platform: 'linux', isRoot: true, hasGetent: true, hasUseradd: true }).map((item) => item.value),
+    ['current', 'existing', 'create'],
+  )
+})
+
+test('formatCliErrorMessage turns installer capability errors into guidance', () => {
+  assert.match(formatCliErrorMessage(new Error('install_requires_root_to_create_user')), /needs root on Linux/i)
+  assert.match(formatCliErrorMessage(new Error('install_existing_user_unsupported')), /only available on Linux root installs/i)
+})
 
 test('performInstall creates a portable runtime layout and launcher', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-smoke-'))

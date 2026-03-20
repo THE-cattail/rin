@@ -212,8 +212,11 @@ function openInstallPromptInterface() {
     }
   }
   try {
-    const input = fs.createReadStream('/dev/tty')
-    const output = fs.createWriteStream('/dev/tty')
+    fs.accessSync('/dev/tty', fs.constants.R_OK | fs.constants.W_OK)
+    const inputFd = fs.openSync('/dev/tty', 'r')
+    const outputFd = fs.openSync('/dev/tty', 'w')
+    const input = fs.createReadStream('/dev/tty', { fd: inputFd, autoClose: true })
+    const output = fs.createWriteStream('/dev/tty', { fd: outputFd, autoClose: true })
     const rl = readline.createInterface({ input, output })
     return {
       rl,
@@ -784,6 +787,47 @@ function currentUserRecord() {
     homeDir: os.homedir(),
     shell: process.env.SHELL || '/bin/bash',
   }
+}
+
+function installCanManageExistingUsers(capabilities: any = {}) {
+  const platform = safeString(capabilities.platform || process.platform).trim() || process.platform
+  const isRoot = typeof capabilities.isRoot === 'boolean'
+    ? capabilities.isRoot
+    : typeof process.getuid === 'function' && process.getuid() === 0
+  const hasGetent = typeof capabilities.hasGetent === 'boolean'
+    ? capabilities.hasGetent
+    : Boolean(findExecutableOnPath('getent'))
+  return platform === 'linux' && isRoot && hasGetent
+}
+
+function installCanCreateUsers(capabilities: any = {}) {
+  const hasUseradd = typeof capabilities.hasUseradd === 'boolean'
+    ? capabilities.hasUseradd
+    : Boolean(findExecutableOnPath('useradd'))
+  return installCanManageExistingUsers(capabilities) && hasUseradd
+}
+
+function installTargetChoices(currentUser = currentUserRecord(), capabilities: any = {}) {
+  const choices = [
+    { value: 'current', label: `Install for current user (${currentUser.username})` },
+  ]
+  if (installCanManageExistingUsers(capabilities)) {
+    choices.push({ value: 'existing', label: 'Install for an existing user' })
+  }
+  if (installCanCreateUsers(capabilities)) {
+    choices.push({ value: 'create', label: 'Create a new user and install there' })
+  }
+  return choices
+}
+
+function formatCliErrorMessage(error) {
+  const message = String(error && error.message ? error.message : error)
+  if (message === 'uninstall_requires_confirmation_or_yes') return 'Uninstall needs confirmation. Re-run interactively or pass --yes.'
+  if (message === 'install_requires_root_for_other_user') return 'Installing for another user needs root on Linux. Re-run with sudo, or choose the current user.'
+  if (message === 'install_requires_root_to_create_user') return 'Creating a new user during install needs root on Linux. Re-run with sudo, or choose the current user.'
+  if (message === 'install_existing_user_unsupported') return 'Installing for another user is only available on Linux root installs right now. Please choose the current user instead.'
+  if (message === 'install_create_user_unsupported') return 'Creating a new user from the installer is only available on Linux root installs right now. Please create the user first, or install for the current user.'
+  return message
 }
 
 function chownRecursiveIfPossible(targetPath, uid, gid) {
@@ -1367,11 +1411,13 @@ async function cmdInstall(argv) {
 
   try {
     if (!mode && rl) {
-      mode = await promptInstallChoice(rl, 'Rin install target', [
-        { value: 'current', label: `Install for current user (${currentUser.username})` },
-        { value: 'existing', label: 'Install for an existing user' },
-        { value: 'create', label: 'Create a new user and install there' },
-      ])
+      const targetChoices = installTargetChoices(currentUser)
+      if (targetChoices.length === 1) {
+        mode = 'current'
+        console.error(`Install target: current user (${currentUser.username})`)
+      } else {
+        mode = await promptInstallChoice(rl, 'Rin install target', targetChoices)
+      }
       if (mode === 'existing') targetUserName = await promptInstallText(rl, 'Existing username')
       if (mode === 'create') createUserName = await promptInstallText(rl, 'New username')
     }
@@ -1380,16 +1426,18 @@ async function cmdInstall(argv) {
     if (!mode || mode === 'current') {
       targetUser = currentUser
     } else if (mode === 'existing') {
+      if (!installCanManageExistingUsers()) {
+        if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_for_other_user')
+        throw new Error('install_existing_user_unsupported')
+      }
       targetUser = lookupUserRecord(targetUserName)
       if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
-      if (typeof process.getuid === 'function' && process.getuid() !== 0 && targetUser.username !== currentUser.username) {
-        throw new Error('install_requires_root_for_other_user')
-      }
     } else if (mode === 'create') {
       const nextName = safeString(createUserName).trim()
       if (!nextName) throw new Error('missing_create_user_name')
-      if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
-        throw new Error('install_requires_root_to_create_user')
+      if (!installCanCreateUsers()) {
+        if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_to_create_user')
+        throw new Error('install_create_user_unsupported')
       }
       if (!lookupUserRecord(nextName)) {
         const created = spawnSync('useradd', ['-m', '-s', '/bin/bash', nextName], { stdio: 'inherit' })
@@ -2116,13 +2164,13 @@ async function main() {
 export {
   performInstall,
   performUninstall,
+  installTargetChoices,
+  formatCliErrorMessage,
 }
 
 if (require.main === module) {
   main().catch((e) => {
-    const message = String(e && e.message ? e.message : e)
-    if (message === 'uninstall_requires_confirmation_or_yes') console.error('Uninstall needs confirmation. Re-run interactively or pass --yes.')
-    else console.error(message)
+    console.error(formatCliErrorMessage(e))
     process.exitCode = 1
   })
 }
