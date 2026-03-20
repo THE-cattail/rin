@@ -974,8 +974,7 @@ async function manageSchedule({
   signal?: AbortSignal
 }) {
   const nextKind = safeString(kind).trim()
-  const rawAction = safeString(action).trim()
-  const nextAction = rawAction === 'create' ? 'add' : rawAction === 'delete' ? 'del' : rawAction
+  const nextAction = safeString(action).trim()
   const nextName = safeString(name).trim()
   const schedules = loadSchedulesConfigForState(stateRoot)
   const state = loadSchedulesStateForState(stateRoot)
@@ -994,7 +993,7 @@ async function manageSchedule({
 
   if (!nextName) throw new Error('schedule_action_requires_name')
 
-  if (nextAction === 'del') {
+  if (nextAction === 'delete') {
     if (nextKind === 'timer') schedules.timers = schedules.timers.filter((item: any) => !(item && typeof item === 'object' && String(item.name || '') === nextName))
     else schedules.inspections = schedules.inspections.filter((item: any) => !(item && typeof item === 'object' && String(item.name || '') === nextName))
     saveSchedulesConfigForState(stateRoot, schedules)
@@ -1024,7 +1023,7 @@ async function manageSchedule({
     return { text: 'OK', details: { kind: nextKind, action: nextAction, name: nextName, response: resp } }
   }
 
-  if (nextAction !== 'add') throw new Error(`invalid_schedule_action:${nextAction}`)
+  if (nextAction !== 'create') throw new Error(`invalid_schedule_action:${nextAction}`)
 
   const startAtMs = parseTimeMs(start)
   const intervalMs = parseDurationMs(every)
@@ -1419,11 +1418,9 @@ function createRinBuiltinTools({
       kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
       action: Type.Union([
         Type.Literal('list'),
-        Type.Literal('add'),
         Type.Literal('create'),
         Type.Literal('enable'),
         Type.Literal('disable'),
-        Type.Literal('del'),
         Type.Literal('delete'),
         Type.Literal('run'),
       ]),
@@ -1647,28 +1644,23 @@ function createRinBuiltinTools({
           const previousModel = safeString((currentSession && currentSession.model && currentSession.model.id) || (ctx && ctx.model && ctx.model.id)).trim()
           const previousThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
             ? safeString(currentSession.getThinkingLevel()).trim()
-            : typeof pi.getThinkingLevel === 'function'
-              ? safeString(pi.getThinkingLevel()).trim()
-              : ''
+            : ''
 
           if (currentSession && typeof currentSession.setModel === 'function') {
             await currentSession.setModel(targetModel)
           } else {
-            throw new Error('model_switch_requires_session_scope')
+            throw new Error('model_switch_only_supported_in_active_session')
           }
 
           const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
-          if (requestedThinking) {
-            if (currentSession && typeof currentSession.setThinkingLevel === 'function') currentSession.setThinkingLevel(requestedThinking as any)
-            else if (typeof pi.setThinkingLevel === 'function') pi.setThinkingLevel(requestedThinking as any)
+          if (requestedThinking && currentSession && typeof currentSession.setThinkingLevel === 'function') {
+            currentSession.setThinkingLevel(requestedThinking as any)
           }
 
           const currentModel = currentSession && currentSession.model ? currentSession.model : targetModel
           const nextThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
             ? safeString(currentSession.getThinkingLevel()).trim()
-            : typeof pi.getThinkingLevel === 'function'
-              ? safeString(pi.getThinkingLevel()).trim()
-              : requestedThinking || previousThinking
+            : requestedThinking || previousThinking
 
           return toolResultFromText(
             `Model switched to ${safeString(currentModel && currentModel.provider).trim()}/${safeString(currentModel && currentModel.id).trim()}.`,
