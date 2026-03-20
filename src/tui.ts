@@ -56,6 +56,7 @@ async function runRinInteractiveMode({
     sessionFile,
     sessionPolicy: 'new',
     brainChatKey,
+    currentChatKey: '',
     provider,
     model,
     thinking,

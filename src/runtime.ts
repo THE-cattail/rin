@@ -1104,6 +1104,7 @@ function createRinBuiltinTools({
   authStorage,
   modelRegistry,
   resourceLoader,
+  sessionManager,
   sessionRef,
 }: {
   repoRoot: string
@@ -1116,6 +1117,7 @@ function createRinBuiltinTools({
   authStorage: any
   modelRegistry: any
   resourceLoader: any
+  sessionManager?: any
   sessionRef?: { current: any }
 }) {
   function summarizeModel(model: any, currentModel?: any) {
@@ -1605,24 +1607,89 @@ function createRinBuiltinTools({
     }
   }
 
-  function assertModelSwitchIsChatScoped() {
-    const chatScope = safeString(currentChatKey).trim()
-    const resolvedSessionDir = safeString(sessionDir).trim() ? path.resolve(sessionDir) : ''
-    const resolvedSessionFile = safeString(sessionFile).trim() ? path.resolve(sessionFile) : ''
+  function resolveActiveSessionScope() {
+    const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
+    const activeSessionManager = (currentSession && currentSession.sessionManager) || sessionManager || null
+    const resolvedSessionDir = safeString(
+      activeSessionManager && typeof activeSessionManager.getSessionDir === 'function'
+        ? activeSessionManager.getSessionDir()
+        : sessionDir,
+    ).trim()
+    const resolvedSessionFile = safeString(
+      activeSessionManager && typeof activeSessionManager.getSessionFile === 'function'
+        ? activeSessionManager.getSessionFile()
+        : sessionFile,
+    ).trim()
+    const sessionId = safeString(
+      activeSessionManager && typeof activeSessionManager.getSessionId === 'function'
+        ? activeSessionManager.getSessionId()
+        : activeSessionManager && activeSessionManager.sessionId,
+    ).trim()
+    return {
+      sessionId,
+      sessionDir: resolvedSessionDir ? path.resolve(resolvedSessionDir) : '',
+      sessionFile: resolvedSessionFile ? path.resolve(resolvedSessionFile) : '',
+    }
+  }
+
+  function assertModelSwitchIsSessionScoped() {
+    const scope = resolveActiveSessionScope()
     const defaultSessionRoot = path.resolve(path.join(agentDir, 'sessions', 'default'))
-    const inDefaultSessionDir = resolvedSessionDir === defaultSessionRoot
-      || (resolvedSessionFile && resolvedSessionFile.startsWith(defaultSessionRoot + path.sep))
-    if (!chatScope) throw new Error('model_switch_not_allowed_without_chat_scope')
+    const inDefaultSessionDir = scope.sessionDir === defaultSessionRoot
+      || (scope.sessionFile && scope.sessionFile.startsWith(defaultSessionRoot + path.sep))
+    if (!scope.sessionId && !scope.sessionFile) throw new Error('model_switch_not_allowed_without_session_scope')
     if (inDefaultSessionDir) throw new Error('model_switch_not_allowed_on_shared_default_session')
+  }
+
+  async function switchSessionModelWithoutPersist(currentSession: any, targetModel: any, requestedThinking?: string) {
+    if (!currentSession || typeof currentSession !== 'object' || !currentSession.agent) {
+      throw new Error('model_switch_only_supported_in_active_session')
+    }
+    const registry = currentSession.modelRegistry || modelRegistry
+    if (!registry || typeof registry.getApiKey !== 'function') throw new Error('missing_model_registry')
+    const apiKey = await registry.getApiKey(targetModel)
+    if (!apiKey) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
+
+    const previousThinking = safeString(currentSession.thinkingLevel).trim()
+    const switchThinking = typeof currentSession._getThinkingLevelForModelSwitch === 'function'
+      ? safeString(currentSession._getThinkingLevelForModelSwitch(requestedThinking as any)).trim()
+      : (requestedThinking || previousThinking || 'minimal')
+
+    currentSession.agent.setModel(targetModel)
+    if (currentSession.sessionManager && typeof currentSession.sessionManager.appendModelChange === 'function') {
+      currentSession.sessionManager.appendModelChange(safeString(targetModel && targetModel.provider).trim(), safeString(targetModel && targetModel.id).trim())
+    }
+
+    let nextThinking = switchThinking || 'off'
+    if (typeof currentSession.getAvailableThinkingLevels === 'function') {
+      const levels = currentSession.getAvailableThinkingLevels()
+      if (Array.isArray(levels) && levels.length > 0) {
+        if (!levels.includes(nextThinking)) {
+          if (typeof currentSession._clampThinkingLevel === 'function') nextThinking = currentSession._clampThinkingLevel(nextThinking, levels)
+          else nextThinking = safeString(levels[0]).trim() || 'off'
+        }
+      }
+    }
+
+    currentSession.agent.setThinkingLevel(nextThinking as any)
+    if (nextThinking !== previousThinking && currentSession.sessionManager && typeof currentSession.sessionManager.appendThinkingLevelChange === 'function') {
+      currentSession.sessionManager.appendThinkingLevelChange(nextThinking)
+    }
+
+    return {
+      provider: safeString(currentSession.model && currentSession.model.provider).trim(),
+      model: safeString(currentSession.model && currentSession.model.id).trim(),
+      thinking: safeString(currentSession.thinkingLevel).trim(),
+    }
   }
 
   const modelTool = {
     name: 'rin_models',
     label: 'Rin Models',
-    description: 'Inspect available models or switch the active chat-scoped session to a specific model/provider the user wants to use.',
+    description: 'Inspect available models or switch the active session-scoped model/provider the user wants to use.',
     promptSnippet: 'Use this when the user wants a specific model or provider, or wants another model to handle the current wording/polish/work.',
     promptGuidelines: [
-      'If the user specifies a model or provider, switch only the active chat-scoped session model instead of informally simulating that route yourself.',
+      'If the user specifies a model or provider, switch only the active session-scoped model instead of informally simulating that route yourself.',
       'Do not use this tool on shared/default session surfaces.',
       'If the user asks for another model to do the writing or polish, use this tool first.',
     ],
@@ -1650,7 +1717,7 @@ function createRinBuiltinTools({
           return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
         }
         if (action === 'switch') {
-          assertModelSwitchIsChatScoped()
+          assertModelSwitchIsSessionScoped()
           const targetModel = resolveSwitchModel(ctx, params)
           const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
           const previousProvider = safeString((currentSession && currentSession.model && currentSession.model.provider) || (ctx && ctx.model && ctx.model.provider)).trim()
@@ -1659,21 +1726,15 @@ function createRinBuiltinTools({
             ? safeString(currentSession.getThinkingLevel()).trim()
             : ''
 
-          if (currentSession && typeof currentSession.setModel === 'function') {
-            await currentSession.setModel(targetModel)
-          } else {
+          if (!currentSession || typeof currentSession !== 'object' || !currentSession.agent) {
             throw new Error('model_switch_only_supported_in_active_session')
           }
 
           const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
-          if (requestedThinking && currentSession && typeof currentSession.setThinkingLevel === 'function') {
-            currentSession.setThinkingLevel(requestedThinking as any)
-          }
+          const currentState = await switchSessionModelWithoutPersist(currentSession, targetModel, requestedThinking)
 
           const currentModel = currentSession && currentSession.model ? currentSession.model : targetModel
-          const nextThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
-            ? safeString(currentSession.getThinkingLevel()).trim()
-            : requestedThinking || previousThinking
+          const nextThinking = safeString(currentState && currentState.thinking).trim() || requestedThinking || previousThinking
 
           return toolResultFromText(
             `Model switched to ${safeString(currentModel && currentModel.provider).trim()}/${safeString(currentModel && currentModel.id).trim()}.`,
@@ -1766,7 +1827,7 @@ function createRinBuiltinTools({
     },
   }
 
-  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, modelTool, skillTool, contextTool]
+  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, skillTool, contextTool]
 }
 
 function createRinBuiltinExtensionFactory({
@@ -2471,7 +2532,7 @@ async function createRinPiSession({
     model: resolvedModel,
     thinkingLevel: normalizeThinkingLevel(thinking),
     tools: pi.createCodingTools(path.resolve(sessionCwd)),
-    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader, sessionRef }),
+    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader, sessionManager, sessionRef }),
   })
 
   if (!created || !created.session) {
