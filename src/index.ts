@@ -993,6 +993,7 @@ function installRuntimeBundle(stateRoot, { bundleRoot = '', releaseId = '' } = {
   if (fs.existsSync(path.join(repo, 'node_modules'))) {
     copyInstallBundleTree(path.join(repo, 'node_modules'), path.join(releaseRoot, 'node_modules'))
   }
+  copyInstallBundleTree(path.join(repo, 'third_party'), path.join(releaseRoot, 'third_party'))
   copyInstallBundleTree(path.join(repo, 'install'), path.join(releaseRoot, 'install'))
   try { fs.chmodSync(path.join(releaseRoot, 'dist', 'index.js'), 0o755) } catch {}
 
@@ -1433,14 +1434,14 @@ function usage(exitCode = 2) {
   console.error([
     'Usage:',
     '  rin',
-    '  rin debug',
+    '  rin pi',
     '  rin restart',
     '  rin update [--repo <git-url>] [--ref <branch|tag|commit>]',
     '  rin uninstall [--yes] [--keep-state | --purge]',
     '',
     'Notes:',
     '  - `rin` starts the daemon-backed Rin TUI frontend.',
-    '  - `rin debug` starts the old in-process Pi InteractiveMode for recovery/debugging.',
+    '  - `rin pi` starts the old in-process Pi InteractiveMode for recovery/debugging.',
     '  - `rin restart` restarts the Rin daemon service.',
     '  - install is handled by install.sh, not by a public CLI subcommand.',
     '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
@@ -1896,7 +1897,6 @@ async function cmdPi(argv) {
   const hostArgs = argv.slice(index)
   const hostPath = ensureRinTuiHost()
   if (!noBootstrap) ensurePiBootstrap()
-  await ensureDaemonStarted()
   await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
     cwd: sessionRoot,
     env: {
@@ -1906,7 +1906,7 @@ async function cmdPi(argv) {
   })
 }
 
-async function cmdDebug(argv) {
+async function cmdNativePi(argv) {
   const sessionRoot = os.homedir()
   let noBootstrap = false
   let index = 0
@@ -2261,7 +2261,7 @@ async function main() {
   if (cmd === 'restart') return await cmdRestart(rest)
   if (cmd === 'update') return await cmdUpdate(rest)
   if (cmd === 'uninstall') return await cmdUninstall(rest)
-  if (cmd === 'debug') return await cmdDebug(rest)
+  if (cmd === 'pi') return await cmdNativePi(rest)
 
   if (cmd === '__install') return await cmdInstall(rest)
 

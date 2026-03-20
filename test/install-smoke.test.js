@@ -14,11 +14,15 @@ const {
 function makeBundleFixture(rootDir) {
   fs.mkdirSync(path.join(rootDir, 'dist'), { recursive: true })
   fs.mkdirSync(path.join(rootDir, 'install', 'home', 'docs', 'rin'), { recursive: true })
+  fs.mkdirSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist'), { recursive: true })
+  fs.mkdirSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'tui', 'dist'), { recursive: true })
   fs.writeFileSync(path.join(rootDir, 'dist', 'index.js'), '#!/usr/bin/env node\nconsole.log("rin fixture")\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'brain.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'daemon.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'tui.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'tui-debug.js'), 'module.exports = {}\n')
+  fs.writeFileSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist', 'index.js'), 'export {}\n')
+  fs.writeFileSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'tui', 'dist', 'index.js'), 'export {}\n')
   fs.writeFileSync(path.join(rootDir, 'install', 'home', 'docs', 'rin', 'README.md'), '# fixture runtime docs\n')
   fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({ name: 'rin-fixture', version: '0.0.0' }, null, 2))
 }
@@ -68,6 +72,8 @@ test('performInstall creates a portable runtime layout and launcher', () => {
   assert.equal(result.stateRoot, path.join(homeDir, '.rin'))
   assert.equal(fs.existsSync(path.join(result.stateRoot, 'docs', 'rin', 'README.md')), true)
   assert.equal(fs.existsSync(path.join(result.stateRoot, 'app', 'current', 'dist', 'index.js')), true)
+  assert.equal(fs.existsSync(path.join(result.stateRoot, 'app', 'current', 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist', 'index.js')), true)
+  assert.equal(fs.existsSync(path.join(result.stateRoot, 'app', 'current', 'third_party', 'pi-mono', 'packages', 'tui', 'dist', 'index.js')), true)
   assert.equal(fs.existsSync(result.launcherPath), true)
 
   const installMeta = JSON.parse(fs.readFileSync(path.join(result.stateRoot, 'install.json'), 'utf8'))

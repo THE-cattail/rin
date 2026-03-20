@@ -2,6 +2,7 @@
 import os from 'node:os'
 import path from 'node:path'
 
+import { importPiTuiModule } from './pi-upstream'
 import { createRinPiSession, queueBrainFinalizeAsync, flushBrainQueue } from './runtime'
 import { resolveRinLayout } from './runtime-paths'
 
@@ -18,9 +19,9 @@ function expandHome(value: string): string {
   return raw
 }
 
-function installBuiltinTuiKeybindings() {
+async function installBuiltinTuiKeybindings() {
   try {
-    const piTui = require('@mariozechner/pi-tui')
+    const piTui = await importPiTuiModule()
     const defaults = piTui && piTui.DEFAULT_EDITOR_KEYBINDINGS
     if (!defaults || typeof defaults !== 'object') return
     const current = Array.isArray(defaults.newLine)
@@ -45,7 +46,7 @@ async function runRinInteractiveMode({
   model?: string
   thinking?: string
 }): Promise<void> {
-  installBuiltinTuiKeybindings()
+  await installBuiltinTuiKeybindings()
   const sessionHome = process.env.HOME || os.homedir()
   const brainChatKey = 'local:default'
   const { pi, session, modelFallbackMessage } = await createRinPiSession({
@@ -100,7 +101,7 @@ async function runRinInteractiveMode({
 function usage(exitCode = 0) {
   const text = [
     'Usage:',
-    '  rin-tui-debug [--session <path>] [--provider <id>] [--model <id>] [--thinking <level>]',
+    '  rin pi [--session <path>] [--provider <id>] [--model <id>] [--thinking <level>]',
     '',
     'Runs Rin using Pi\'s native InteractiveMode via the SDK.',
   ].join('\n')

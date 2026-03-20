@@ -2,11 +2,9 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
-
-import { Container, ProcessTerminal, Spacer, Text, TUI, TruncatedText, matchesKey } from '@mariozechner/pi-tui'
 
 import { DaemonTuiRpcClient } from './daemon-tui-rpc'
+import { importPiCodingAgentModule, importPiTuiModule } from './pi-upstream'
 import { resolveRinLayout } from './runtime-paths'
 
 function safeString(value: any): string {
@@ -22,10 +20,34 @@ function expandHome(value: string): string {
   return raw
 }
 
-function installBuiltinTuiKeybindings() {
+let Container: any
+let ProcessTerminal: any
+let Spacer: any
+let Text: any
+let TUI: any
+let TruncatedText: any
+let matchesKey: any
+let Loader: any
+let DEFAULT_EDITOR_KEYBINDINGS: any
+
+async function loadPiTuiBindings() {
+  if (Container && TUI && Loader && DEFAULT_EDITOR_KEYBINDINGS) return
+  const piTui = await importPiTuiModule()
+  Container = piTui.Container
+  ProcessTerminal = piTui.ProcessTerminal
+  Spacer = piTui.Spacer
+  Text = piTui.Text
+  TUI = piTui.TUI
+  TruncatedText = piTui.TruncatedText
+  matchesKey = piTui.matchesKey
+  Loader = piTui.Loader
+  DEFAULT_EDITOR_KEYBINDINGS = piTui.DEFAULT_EDITOR_KEYBINDINGS
+}
+
+async function installBuiltinTuiKeybindings() {
   try {
-    const piTui = require('@mariozechner/pi-tui')
-    const defaults = piTui && piTui.DEFAULT_EDITOR_KEYBINDINGS
+    await loadPiTuiBindings()
+    const defaults = DEFAULT_EDITOR_KEYBINDINGS
     if (!defaults || typeof defaults !== 'object') return
     const current = Array.isArray(defaults.newLine)
       ? defaults.newLine.map((value: any) => safeString(value).trim()).filter(Boolean)
@@ -72,10 +94,6 @@ class HeaderBar {
 
 function textBlock(lines: string[]) {
   return new Text((Array.isArray(lines) ? lines : []).join('\n'), 0, 0)
-}
-
-function importModule(specifier: string) {
-  return Function('specifier', 'return import(specifier)')(specifier)
 }
 
 function extractMessageText(message: any) {
@@ -154,16 +172,15 @@ async function loadRinSessions(stateRoot: string, cwd?: string) {
 }
 
 async function main() {
-  installBuiltinTuiKeybindings()
+  await installBuiltinTuiKeybindings()
   const args = parseArgs(process.argv.slice(2))
   const stateRoot = resolveRinLayout().homeRoot
 
-  const piRoot = path.resolve(__dirname, '..', 'node_modules', '@mariozechner', 'pi-coding-agent')
-  const pi = await importModule(pathToFileURL(path.join(piRoot, 'dist', 'index.js')).href)
-  const { KeybindingsManager } = await importModule(pathToFileURL(path.join(piRoot, 'dist', 'core', 'keybindings.js')).href)
-  const { FooterDataProvider } = await importModule(pathToFileURL(path.join(piRoot, 'dist', 'core', 'footer-data-provider.js')).href)
-  const agentSessionMod = await importModule(pathToFileURL(path.join(piRoot, 'dist', 'core', 'agent-session.js')).href)
-  const themeMod = await importModule(pathToFileURL(path.join(piRoot, 'dist', 'modes', 'interactive', 'theme', 'theme.js')).href)
+  const pi = await importPiCodingAgentModule()
+  const { KeybindingsManager } = await importPiCodingAgentModule(path.join('dist', 'core', 'keybindings.js'))
+  const { FooterDataProvider } = await importPiCodingAgentModule(path.join('dist', 'core', 'footer-data-provider.js'))
+  const agentSessionMod = await importPiCodingAgentModule(path.join('dist', 'core', 'agent-session.js'))
+  const themeMod = await importPiCodingAgentModule(path.join('dist', 'modes', 'interactive', 'theme', 'theme.js'))
 
   const {
     AuthStorage,
@@ -180,9 +197,6 @@ async function main() {
     BranchSummaryMessageComponent,
     SkillInvocationMessageComponent,
     appKey,
-    appKeyHint,
-    keyHint,
-    rawKeyHint,
     UserMessageSelectorComponent,
     SessionSelectorComponent,
     SettingsSelectorComponent,
@@ -254,7 +268,7 @@ async function main() {
     const thinking = safeString(currentState && currentState.thinkingLevel).trim() || 'minimal'
     const pending = Number(currentState && currentState.pendingMessageCount || 0)
     const pendingText = pending > 0 ? `  pending:${pending}` : ''
-    const subtitle = safeString(lastStatus || '').trim() || (currentState && currentState.isStreaming ? '处理中…' : '待命')
+    const subtitle = safeString(lastStatus || '').trim() || (currentState && currentState.isStreaming ? '处理中…' : '')
     return `Rin  [${sessionName}]  ${model}  thinking:${thinking}${pendingText}  ${subtitle}`
   })
 
@@ -316,7 +330,7 @@ async function main() {
 
   function setStatusLoader(message: string) {
     clearStatusLoader()
-    statusLoader = new (require('@mariozechner/pi-tui').Loader)(
+    statusLoader = new Loader(
       tui,
       (s: string) => theme.fg('accent', s),
       (s: string) => theme.fg('muted', s),
@@ -330,18 +344,18 @@ async function main() {
     headerContainer.clear()
     if (!settingsManager.getQuietStartup()) {
       const instructions = [
-        appKeyHint(keybindings, 'interrupt', 'to interrupt'),
-        appKeyHint(keybindings, 'clear', 'to clear'),
-        rawKeyHint(`${appKey(keybindings, 'clear')} twice`, 'to exit'),
-        appKeyHint(keybindings, 'exit', 'to exit (empty)'),
-        appKeyHint(keybindings, 'cycleThinkingLevel', 'to cycle thinking level'),
-        appKeyHint(keybindings, 'selectModel', 'to select model'),
-        rawKeyHint('/', 'for commands'),
-        rawKeyHint('!', 'to run bash'),
-        rawKeyHint('!!', 'to run bash (no context)'),
-        appKeyHint(keybindings, 'followUp', 'to queue follow-up'),
-        appKeyHint(keybindings, 'dequeue', 'to edit all queued messages'),
-        keyHint('toggleSessionPath', 'to toggle session path in resume'),
+        `${appKey(keybindings, 'interrupt')} to interrupt`,
+        `${appKey(keybindings, 'clear')} to clear`,
+        `${appKey(keybindings, 'clear')} twice to exit`,
+        `${appKey(keybindings, 'exit')} to exit (empty)`,
+        `${appKey(keybindings, 'cycleThinkingLevel')} to cycle thinking level`,
+        `${appKey(keybindings, 'selectModel')} to select model`,
+        `/ for commands`,
+        `! to run bash`,
+        `!! to run bash (no context)`,
+        `${appKey(keybindings, 'followUp')} to queue follow-up`,
+        `${appKey(keybindings, 'dequeue')} to edit all queued messages`,
+        `Ctrl+P to toggle session path in resume`,
       ].join('\n')
       headerContainer.addChild(new Spacer(1))
       headerContainer.addChild(textBlock(['Rin', instructions]))
@@ -946,7 +960,7 @@ async function main() {
       appendSystemNotice('Esc 双击可按设置打开会话树或分叉；Ctrl+C 清空输入，再按一次退出。')
       appendSystemNotice('还有原生风格的 follow-up 与 dequeue 快捷键，可排队或取回消息。')
       appendSystemNotice('会话选择器支持 Tab 切范围、Ctrl+R 重命名、Ctrl+D 删除。')
-      appendSystemNotice('其余 /xxx 会原样交给后端。需要兜底时可用 `rin debug`。')
+      appendSystemNotice('其余 /xxx 会原样交给后端。需要兜底时可用 `rin pi`。')
     },
     '/settings': openSettingsSelector,
     '/resume': openSessionSelector,
@@ -1096,7 +1110,7 @@ async function main() {
       activeAssistantStream = null
       activeAssistantStreamMessageId = ''
       clearStatusLoader()
-      return Promise.allSettled([refreshState(), reloadMessages()]).then(() => setStatus('待命')).catch(() => {})
+      return Promise.allSettled([refreshState(), reloadMessages()]).then(() => requestRender()).catch(() => {})
     }
     if (type === 'message_update') {
       const partialMessage = event && event.message
@@ -1184,7 +1198,31 @@ async function main() {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   }
 
+  let exiting = false
+  let stdinListener: ((chunk: any) => void) | null = null
+  const handleGlobalCtrlC = () => {
+    const now = Date.now()
+    if (currentBottom !== editor) {
+      closeBottomAndRestoreEditor()
+      lastSigintTime = now
+      setStatus('已回到输入框，再按一次 Ctrl+C 退出')
+      return
+    }
+    if (safeString(editor.getText?.() || '')) editor.setText('')
+    if (now - lastSigintTime < 500) {
+      void exit()
+      return
+    }
+    lastSigintTime = now
+    setStatus('已清空输入，再按一次 Ctrl+C 退出')
+  }
   const exit = async () => {
+    if (exiting) return
+    exiting = true
+    if (stdinListener) {
+      try { process.stdin.removeListener('data', stdinListener) } catch {}
+      stdinListener = null
+    }
     try { clearStatusLoader() } catch {}
     try { footerDataProvider.dispose?.() } catch {}
     try { await client.stop() } catch {}
@@ -1206,6 +1244,14 @@ async function main() {
   tui.addChild(root)
 
   tui.addInputListener((data: string) => {
+    if (data === '\u0004' || matchesKey(data, 'ctrl+d')) {
+      void exit()
+      return { consume: true }
+    }
+    if (data === '\u0003' || matchesKey(data, 'ctrl+c')) {
+      handleGlobalCtrlC()
+      return { consume: true }
+    }
     if (currentBottom !== editor && matchesKey(data, 'escape')) {
       closeBottomAndRestoreEditor()
       return { consume: true }
@@ -1213,20 +1259,30 @@ async function main() {
     return undefined
   })
 
+  stdinListener = (chunk: any) => {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : safeString(chunk)
+    if (text.includes('\u0004')) {
+      void exit()
+      return
+    }
+    if (text.includes('\u0003')) {
+      handleGlobalCtrlC()
+    }
+  }
+  try { process.stdin.on('data', stdinListener) } catch {}
+
+  process.on('SIGINT', () => { void exit() })
+  process.on('SIGTERM', () => { void exit() })
+
   await client.start(args)
   await refreshState()
   await reloadMessages()
-  setStatus('待命')
   requestRender()
   tui.start()
 }
 
 main().catch((error: any) => {
   const message = safeString(error && error.message ? error.message : error) || 'rin_tui_failed'
-  if (message.includes('ENOENT') || message.includes('connect')) {
-    console.error('rin daemon 未运行，先试试 `rin restart`，或临时用 `rin debug`。')
-  } else {
-    console.error(message)
-  }
+  console.error(message)
   process.exit(1)
 })

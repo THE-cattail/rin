@@ -22,6 +22,7 @@ import {
   safeString,
   writeJsonAtomic,
 } from './runtime-paths'
+import { importPiCodingAgentModule } from './pi-upstream'
 import { runBrainCli } from './brain'
 import {
   createContinueEventFilter,
@@ -2293,7 +2294,7 @@ async function loadPiSdkModule(): Promise<PiSdkModule> {
     process.env.PI_SKIP_VERSION_CHECK = '1'
   }
   if (!piSdkModulePromise) {
-    piSdkModulePromise = dynamicImport('@mariozechner/pi-coding-agent')
+    piSdkModulePromise = importPiCodingAgentModule()
   }
   return await piSdkModulePromise
 }
@@ -2569,7 +2570,7 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
   next = next.replace(/\nCurrent date:.*$/gm, '')
   next = next.replace(/\nCurrent working directory:.*$/gm, '')
 
-  const continueGuideline = '- If the current task is not yet complete, reply with exactly `#RIN_CONTINUE` and nothing else.'
+  const continueGuideline = '- `#RIN_CONTINUE` is the control token for autonomous multi-turn continuation. Use it when work should continue immediately in the next inference turn, but only after pushing the task as far as possible in the current turn; never emit it as a no-op progress reply or before doing the work you can already do now.'
   if (!next.includes(continueGuideline)) {
     next = next.replace('Show file paths clearly when working with files', `Show file paths clearly when working with files\n${continueGuideline}`)
   }

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import nodeCrypto from 'node:crypto'
 
+import { importPiCodingAgentModule } from './pi-upstream'
 import { createRinPiSession } from './runtime'
 
 function safeString(value: any): string {
@@ -33,8 +34,17 @@ function createPlainTheme() {
 
 async function loadThemeSingleton() {
   try {
-    const mod = await import('@mariozechner/pi-coding-agent/dist/modes/interactive/theme/theme.js')
-    return mod && mod.theme ? mod.theme : createPlainTheme()
+    const mod = await importPiCodingAgentModule(path.join('dist', 'modes', 'interactive', 'theme', 'theme.js'))
+    const candidate = mod && mod.theme ? mod.theme : null
+    if (candidate) {
+      try {
+        if (typeof candidate.fg === 'function') {
+          candidate.fg('muted', '')
+          return candidate
+        }
+      } catch {}
+    }
+    return createPlainTheme()
   } catch {
     return createPlainTheme()
   }
@@ -212,7 +222,7 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger }: { repoR
           resourceCwd: stateRoot,
           settingsCwd: stateRoot,
           sessionFile: safeString(payload && payload.sessionFile).trim(),
-          sessionPolicy: safeString(payload && payload.sessionFile).trim() ? 'continueRecent' : 'continueRecent',
+          sessionPolicy: safeString(payload && payload.sessionFile).trim() ? 'continueRecent' : 'new',
           brainChatKey: 'local:default',
           currentChatKey: '',
           provider: safeString(payload && payload.provider).trim(),

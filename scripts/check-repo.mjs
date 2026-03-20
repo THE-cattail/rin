@@ -74,6 +74,7 @@ const forbiddenPatterns = [
 ]
 
 for (const relPath of trackedFiles) {
+  if (relPath.startsWith('third_party/')) continue
   if (!textFilePattern.test(relPath)) continue
   const absPath = path.join(repoRoot, relPath)
   let text = ''
