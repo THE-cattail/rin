@@ -1120,42 +1120,6 @@ function createRinBuiltinTools({
   sessionManager?: any
   sessionRef?: { current: any }
 }) {
-  function summarizeModel(model: any, currentModel?: any) {
-    const provider = safeString(model && model.provider).trim()
-    const id = safeString(model && model.id).trim()
-    const currentProvider = safeString(currentModel && currentModel.provider).trim()
-    const currentId = safeString(currentModel && currentModel.id).trim()
-    return {
-      provider,
-      model: id,
-      name: safeString(model && (model.name || model.id)).trim() || id,
-      reasoning: Boolean(model && model.reasoning),
-      input: Array.isArray(model && model.input)
-        ? model.input.map((value: any) => safeString(value).trim()).filter(Boolean)
-        : ['text'],
-      contextWindow: Number(model && model.contextWindow) || 0,
-      maxTokens: Number(model && model.maxTokens) || 0,
-      current: !!provider && !!id && provider === currentProvider && id === currentId,
-    }
-  }
-
-  function listAvailableModels(ctx?: any) {
-    const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
-    const currentModel = ctx && ctx.model ? ctx.model : null
-    const models = Array.isArray(registry && typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
-      ? (registry.getAvailable() as any[])
-      : []
-    return models
-      .slice()
-      .sort((a: any, b: any) => {
-        const ap = safeString(a && a.provider).trim()
-        const bp = safeString(b && b.provider).trim()
-        if (ap !== bp) return ap.localeCompare(bp)
-        return safeString(a && a.id).trim().localeCompare(safeString(b && b.id).trim())
-      })
-      .map((model: any) => summarizeModel(model, currentModel))
-  }
-
   function isHiddenSkillPathLocal(filePath: any): boolean {
     const raw = safeString(filePath).trim()
     if (!raw) return false
@@ -1515,46 +1479,373 @@ function createRinBuiltinTools({
     }
   }
 
-  function resolveSwitchModel(ctx: any, params: any) {
+  function cloneJsonLocal(value: any): any {
+    try {
+      return JSON.parse(JSON.stringify(value))
+    } catch {
+      return value
+    }
+  }
+
+  function truncateMiddleTextLocal(value: any, limit = 120_000): string {
+    const text = safeString(value)
+    if (!limit || text.length <= limit) return text
+    const head = Math.max(1, Math.floor(limit / 2))
+    const tail = Math.max(1, limit - head)
+    return `${text.slice(0, head)}\n\n[... truncated ...]\n\n${text.slice(-tail)}`
+  }
+
+  function extractAssistantTextLocal(message: any): string {
+    if (!message || typeof message !== 'object') return ''
+    const content = Array.isArray(message.content) ? message.content : []
+    return content
+      .filter((block: any) => block && typeof block === 'object' && safeString(block.type) === 'text')
+      .map((block: any) => safeString(block.text))
+      .join('\n')
+      .trim()
+  }
+
+  function emptyUsageLocal() {
+    return {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      contextTokens: 0,
+      turns: 0,
+    }
+  }
+
+  function mergeUsageLocal(base: any, extra: any) {
+    const next = { ...emptyUsageLocal(), ...(base || {}) }
+    const add = extra || {}
+    next.input += Number(add.input || 0)
+    next.output += Number(add.output || 0)
+    next.cacheRead += Number(add.cacheRead || 0)
+    next.cacheWrite += Number(add.cacheWrite || 0)
+    next.cost += Number(add.cost || 0)
+    next.contextTokens = Math.max(Number(next.contextTokens || 0), Number(add.contextTokens || 0))
+    next.turns += Number(add.turns || 0)
+    return next
+  }
+
+  function getActiveSessionForSubagent(ctx?: any) {
+    return sessionRef && sessionRef.current
+      ? sessionRef.current
+      : (ctx && ctx.sessionManager && ctx.modelRegistry ? ctx : null)
+  }
+
+  function getActiveSessionContextSnapshot(ctx?: any) {
+    const active = getActiveSessionForSubagent(ctx)
+    const manager = active && active.sessionManager
+      ? active.sessionManager
+      : (ctx && ctx.sessionManager ? ctx.sessionManager : sessionManager)
+    const built = manager && typeof manager.buildSessionContext === 'function'
+      ? manager.buildSessionContext()
+      : { messages: [] }
+    const messages = Array.isArray(built && built.messages) ? cloneJsonLocal(built.messages) : []
+    let trimmedToolCallTail = false
+    while (messages.length > 0) {
+      const last = messages[messages.length - 1]
+      const blocks = Array.isArray(last && last.content) ? last.content : []
+      const hasToolCall = safeString(last && last.role) === 'assistant'
+        && blocks.some((block: any) => safeString(block && block.type) === 'toolCall')
+      if (!hasToolCall) break
+      messages.pop()
+      trimmedToolCallTail = true
+    }
+    return {
+      messages,
+      trimmedToolCallTail,
+    }
+  }
+
+  function serializeMessagesForSubagent(messages: Array<any>) {
+    try {
+      if (typeof pi.convertToLlm === 'function' && typeof pi.serializeConversation === 'function') {
+        return safeString(pi.serializeConversation(pi.convertToLlm(messages))).trim()
+      }
+    } catch {}
+    return messages
+      .map((message: any) => {
+        const role = safeString(message && message.role).trim() || 'unknown'
+        const text = collectMessageText(message)
+        return `${role.toUpperCase()}:\n${text || '[no text]'}`
+      })
+      .join('\n\n')
+      .trim()
+  }
+
+  function resolveSubagentTargetModel(ctx: any, params: any) {
     const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
     const requestedProvider = safeString(params && params.provider).trim()
     const requestedModel = safeString(params && params.model).trim()
     if (!registry) throw new Error('missing_model_registry')
+    if (!requestedProvider) throw new Error('missing_provider')
     if (!requestedModel) throw new Error('missing_model')
+    const found = typeof registry.find === 'function' ? registry.find(requestedProvider, requestedModel) : undefined
+    if (!found) throw new Error(`model_not_found:${requestedProvider}/${requestedModel}`)
+    return found
+  }
 
-    const allModels = Array.isArray(typeof registry.getAll === 'function' ? registry.getAll() : [])
-      ? registry.getAll()
+  async function assertSubagentModelAvailable(ctx: any, model: any) {
+    const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
+    if (!registry || typeof registry.getApiKey !== 'function') throw new Error('missing_model_registry')
+    const apiKey = await registry.getApiKey(model)
+    if (!apiKey) throw new Error(`model_not_available:${safeString(model && model.provider).trim()}/${safeString(model && model.id).trim()}`)
+  }
+
+  function createSubagentResourceLoader(systemPrompt: string) {
+    const runtime = typeof pi.createExtensionRuntime === 'function' ? pi.createExtensionRuntime() : undefined
+    return {
+      getExtensions: () => ({ extensions: [], errors: [], runtime }),
+      getSkills: () => ({ skills: [], diagnostics: [] }),
+      getPrompts: () => ({ prompts: [], diagnostics: [] }),
+      getThemes: () => ({ themes: [], diagnostics: [] }),
+      getAgentsFiles: () => ({ agentsFiles: [] }),
+      getSystemPrompt: () => systemPrompt,
+      getAppendSystemPrompt: () => [],
+      getPathMetadata: () => new Map(),
+      extendResources: () => {},
+      reload: async () => {},
+    }
+  }
+
+  function setSessionSystemPromptLocal(session: any, systemPrompt: string) {
+    const next = safeString(systemPrompt).trim()
+    if (!next || !session) return
+    try { session._baseSystemPrompt = next } catch {}
+    try {
+      if (session.agent && session.agent.state && typeof session.agent.state === 'object') {
+        session.agent.state.systemPrompt = next
+      }
+    } catch {}
+    try {
+      if (session.agent && typeof session.agent.setSystemPrompt === 'function') session.agent.setSystemPrompt(next)
+    } catch {}
+  }
+
+  function buildSubagentSystemPromptLocal(baseSystemPrompt: string, contextMode: 'full' | 'summary' | 'empty') {
+    const base = safeString(baseSystemPrompt).trim()
+    const modeRule = contextMode === 'full'
+      ? '- You have the parent thread context injected. Use it when helpful, but stay scoped to the delegated task.'
+      : contextMode === 'summary'
+        ? '- You only have a compressed parent summary. Do not assume omitted details; inspect files or say what is missing.'
+        : '- You do not have parent thread context. Rely only on the delegated task and what you inspect yourself.'
+    const contract = [
+      'Delegated worker contract:',
+      '- You are a temporary subagent running one delegated task inside Rin.',
+      '- Treat the latest user message as the task contract and keep scope tight.',
+      modeRule,
+      '- Prefer direct results over chatty narration.',
+      '- If context seems incomplete, say so plainly instead of guessing.',
+      '- End with the answer, findings, or completion summary the parent agent can use immediately.',
+    ].join('\n')
+    return base ? `${base}\n\n${contract}` : contract
+  }
+
+  function getSubagentToolSnapshot(ctx?: any) {
+    const active = getActiveSessionForSubagent(ctx)
+    const tools = Array.isArray(active && active.agent && active.agent.state && active.agent.state.tools)
+      ? active.agent.state.tools
       : []
-    const availableModels = Array.isArray(typeof registry.getAvailable === 'function' ? registry.getAvailable() : [])
-      ? registry.getAvailable()
-      : []
+    if (tools.length > 0) return tools
+    const cwd = path.resolve((ctx && ctx.cwd) || process.cwd())
+    return pi.createCodingTools(cwd)
+  }
 
-    if (requestedProvider) {
-      const found = typeof registry.find === 'function' ? registry.find(requestedProvider, requestedModel) : undefined
-      if (!found) throw new Error(`model_not_found:${requestedProvider}/${requestedModel}`)
-      const available = availableModels.find((entry: any) => safeString(entry && entry.provider).trim() === requestedProvider && safeString(entry && entry.id).trim() === requestedModel)
-      if (!available) throw new Error(`model_not_available:${requestedProvider}/${requestedModel}`)
-      return available
+  async function createEphemeralSubagentSession({
+    cwd,
+    model,
+    thinking,
+    tools,
+    systemPrompt,
+  }: {
+    cwd: string
+    model: any
+    thinking?: string
+    tools: Array<any>
+    systemPrompt: string
+  }) {
+    const workerSessionManager = pi.SessionManager.inMemory(cwd)
+    const workerResourceLoader = createSubagentResourceLoader(systemPrompt || 'You are a helpful assistant.')
+    const created = await pi.createAgentSession({
+      cwd,
+      agentDir,
+      authStorage,
+      modelRegistry,
+      resourceLoader: workerResourceLoader,
+      sessionManager: workerSessionManager,
+      model,
+      thinkingLevel: thinking,
+      tools,
+    })
+    if (!created || !created.session) throw new Error('subagent_session_missing')
+    setSessionSystemPromptLocal(created.session, systemPrompt)
+    return {
+      session: created.session,
+      sessionManager: workerSessionManager,
+    }
+  }
+
+  async function runEphemeralSubagentTurn({
+    session,
+    prompt,
+    signal,
+    onUpdate,
+    updateDetails,
+  }: {
+    session: any
+    prompt: string
+    signal?: AbortSignal
+    onUpdate?: any
+    updateDetails?: any
+  }) {
+    let currentAssistantText = ''
+    let lastAssistantText = ''
+    let finalMessages: Array<any> = []
+    let aborted = false
+    const unsubscribe = typeof session.subscribe === 'function'
+      ? session.subscribe((event: any) => {
+          const eventType = safeString(event && event.type)
+          if (eventType === 'message_start') {
+            const message = event && event.message
+            if (safeString(message && message.role) === 'assistant') currentAssistantText = ''
+            return
+          }
+          if (eventType === 'message_update') {
+            const message = event && event.message
+            const deltaEvent = event && event.assistantMessageEvent
+            if (safeString(message && message.role) !== 'assistant') return
+            if (safeString(deltaEvent && deltaEvent.type) === 'text_delta') {
+              currentAssistantText += safeString(deltaEvent && deltaEvent.delta)
+              if (typeof onUpdate === 'function') {
+                try {
+                  onUpdate({
+                    content: [{ type: 'text', text: currentAssistantText || '(running...)' }],
+                    details: updateDetails || {},
+                  })
+                } catch {}
+              }
+            }
+            return
+          }
+          if (eventType === 'message_end') {
+            const message = event && event.message
+            if (safeString(message && message.role) !== 'assistant') return
+            const text = extractAssistantTextLocal(message) || currentAssistantText
+            if (text) lastAssistantText = text
+            currentAssistantText = text || currentAssistantText
+            return
+          }
+          if (eventType === 'agent_end') {
+            finalMessages = Array.isArray(event && event.messages) ? event.messages : []
+            for (let i = finalMessages.length - 1; i >= 0; i--) {
+              const message = finalMessages[i]
+              if (safeString(message && message.role) !== 'assistant') continue
+              const text = extractAssistantTextLocal(message)
+              if (text) {
+                lastAssistantText = text
+                break
+              }
+            }
+          }
+        })
+      : () => {}
+
+    const abortHandler = () => {
+      aborted = true
+      if (session && typeof session.abort === 'function') {
+        Promise.resolve(session.abort()).catch(() => {})
+      }
+    }
+    if (signal) {
+      if (signal.aborted) abortHandler()
+      else signal.addEventListener('abort', abortHandler, { once: true })
     }
 
-    const availableMatches = availableModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
-    if (availableMatches.length === 1) return availableMatches[0]
-    if (availableMatches.length > 1) {
-      const providers = availableMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
-      throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+    try {
+      if (typeof session.prompt !== 'function') throw new Error('subagent_prompt_unavailable')
+      await session.prompt(prompt)
+    } finally {
+      try { unsubscribe() } catch {}
+      if (signal) {
+        try { signal.removeEventListener('abort', abortHandler) } catch {}
+      }
     }
 
-    const allMatches = allModels.filter((entry: any) => safeString(entry && entry.id).trim() === requestedModel)
-    if (allMatches.length === 1) {
-      const only = allMatches[0]
-      throw new Error(`model_not_available:${safeString(only && only.provider).trim()}/${requestedModel}`)
+    const assistantMessages = finalMessages.filter((message: any) => safeString(message && message.role) === 'assistant')
+    let usage = emptyUsageLocal()
+    for (const message of assistantMessages) {
+      const nextUsage = message && message.usage ? message.usage : null
+      usage = mergeUsageLocal(usage, {
+        input: Number(nextUsage && nextUsage.input || 0),
+        output: Number(nextUsage && nextUsage.output || 0),
+        cacheRead: Number(nextUsage && nextUsage.cacheRead || 0),
+        cacheWrite: Number(nextUsage && nextUsage.cacheWrite || 0),
+        cost: Number(nextUsage && nextUsage.cost && nextUsage.cost.total || 0),
+        contextTokens: Number(nextUsage && nextUsage.totalTokens || 0),
+        turns: 1,
+      })
     }
-    if (allMatches.length > 1) {
-      const providers = allMatches.map((entry: any) => safeString(entry && entry.provider).trim()).filter(Boolean)
-      throw new Error(`model_provider_required:${requestedModel}:${providers.join(',')}`)
+    const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null
+    return {
+      text: safeString(lastAssistantText || currentAssistantText).trim(),
+      stopReason: safeString(lastAssistant && lastAssistant.stopReason).trim(),
+      errorMessage: safeString(lastAssistant && lastAssistant.errorMessage).trim(),
+      usage,
+      messages: finalMessages,
+      aborted,
     }
+  }
 
-    throw new Error(`model_not_found:${requestedModel}`)
+  async function summarizeContextForSubagent({
+    cwd,
+    model,
+    thinking,
+    messages,
+    signal,
+  }: {
+    cwd: string
+    model: any
+    thinking?: string
+    messages: Array<any>
+    signal?: AbortSignal
+  }) {
+    const serialized = truncateMiddleTextLocal(serializeMessagesForSubagent(messages), 120_000)
+    const summarySystemPrompt = [
+      'You are a context summarizer for delegated subagents.',
+      'Compress the parent session into a practical working brief.',
+      'Keep user goals, constraints, decisions, relevant files, commands, errors, and open questions.',
+      'Do not add advice beyond what is already implied by the conversation.',
+      'Return concise markdown only.',
+    ].join('\n')
+    const summaryTask = [
+      'Summarize this parent session so another worker can continue the task with less context.',
+      '',
+      '<conversation>',
+      serialized,
+      '</conversation>',
+    ].join('\n')
+    const created = await createEphemeralSubagentSession({
+      cwd,
+      model,
+      thinking,
+      tools: [],
+      systemPrompt: summarySystemPrompt,
+    })
+    try {
+      const result = await runEphemeralSubagentTurn({ session: created.session, prompt: summaryTask, signal })
+      const summary = safeString(result && result.text).trim()
+      if (!summary) throw new Error('subagent_summary_empty')
+      return {
+        summary,
+        usage: result && result.usage ? result.usage : emptyUsageLocal(),
+      }
+    } finally {
+      try { created.session.dispose() } catch {}
+    }
   }
 
   function collectContextFiles(targetPath: string) {
@@ -1607,99 +1898,26 @@ function createRinBuiltinTools({
     }
   }
 
-  function resolveActiveSessionScope() {
-    const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
-    const activeSessionManager = (currentSession && currentSession.sessionManager) || sessionManager || null
-    const resolvedSessionDir = safeString(
-      activeSessionManager && typeof activeSessionManager.getSessionDir === 'function'
-        ? activeSessionManager.getSessionDir()
-        : sessionDir,
-    ).trim()
-    const resolvedSessionFile = safeString(
-      activeSessionManager && typeof activeSessionManager.getSessionFile === 'function'
-        ? activeSessionManager.getSessionFile()
-        : sessionFile,
-    ).trim()
-    const sessionId = safeString(
-      activeSessionManager && typeof activeSessionManager.getSessionId === 'function'
-        ? activeSessionManager.getSessionId()
-        : activeSessionManager && activeSessionManager.sessionId,
-    ).trim()
-    return {
-      sessionId,
-      sessionDir: resolvedSessionDir ? path.resolve(resolvedSessionDir) : '',
-      sessionFile: resolvedSessionFile ? path.resolve(resolvedSessionFile) : '',
-    }
-  }
-
-  function assertModelSwitchIsSessionScoped() {
-    const scope = resolveActiveSessionScope()
-    const defaultSessionRoot = path.resolve(path.join(agentDir, 'sessions', 'default'))
-    const inDefaultSessionDir = scope.sessionDir === defaultSessionRoot
-      || (scope.sessionFile && scope.sessionFile.startsWith(defaultSessionRoot + path.sep))
-    if (!scope.sessionId && !scope.sessionFile) throw new Error('model_switch_not_allowed_without_session_scope')
-    if (inDefaultSessionDir) throw new Error('model_switch_not_allowed_on_shared_default_session')
-  }
-
-  async function switchSessionModelWithoutPersist(currentSession: any, targetModel: any, requestedThinking?: string) {
-    if (!currentSession || typeof currentSession !== 'object' || !currentSession.agent) {
-      throw new Error('model_switch_only_supported_in_active_session')
-    }
-    const registry = currentSession.modelRegistry || modelRegistry
-    if (!registry || typeof registry.getApiKey !== 'function') throw new Error('missing_model_registry')
-    const apiKey = await registry.getApiKey(targetModel)
-    if (!apiKey) throw new Error(`model_not_available:${safeString(targetModel && targetModel.provider).trim()}/${safeString(targetModel && targetModel.id).trim()}`)
-
-    const previousThinking = safeString(currentSession.thinkingLevel).trim()
-    const switchThinking = typeof currentSession._getThinkingLevelForModelSwitch === 'function'
-      ? safeString(currentSession._getThinkingLevelForModelSwitch(requestedThinking as any)).trim()
-      : (requestedThinking || previousThinking || 'minimal')
-
-    currentSession.agent.setModel(targetModel)
-    if (currentSession.sessionManager && typeof currentSession.sessionManager.appendModelChange === 'function') {
-      currentSession.sessionManager.appendModelChange(safeString(targetModel && targetModel.provider).trim(), safeString(targetModel && targetModel.id).trim())
-    }
-
-    let nextThinking = switchThinking || 'off'
-    if (typeof currentSession.getAvailableThinkingLevels === 'function') {
-      const levels = currentSession.getAvailableThinkingLevels()
-      if (Array.isArray(levels) && levels.length > 0) {
-        if (!levels.includes(nextThinking)) {
-          if (typeof currentSession._clampThinkingLevel === 'function') nextThinking = currentSession._clampThinkingLevel(nextThinking, levels)
-          else nextThinking = safeString(levels[0]).trim() || 'off'
-        }
-      }
-    }
-
-    currentSession.agent.setThinkingLevel(nextThinking as any)
-    if (nextThinking !== previousThinking && currentSession.sessionManager && typeof currentSession.sessionManager.appendThinkingLevelChange === 'function') {
-      currentSession.sessionManager.appendThinkingLevelChange(nextThinking)
-    }
-
-    return {
-      provider: safeString(currentSession.model && currentSession.model.provider).trim(),
-      model: safeString(currentSession.model && currentSession.model.id).trim(),
-      thinking: safeString(currentSession.thinkingLevel).trim(),
-    }
-  }
-
-  const modelTool = {
-    name: 'rin_models',
-    label: 'Rin Models',
-    description: 'Inspect available models or switch the active session-scoped model/provider the user wants to use.',
-    promptSnippet: 'Use this when the user wants a specific model or provider, or wants another model to handle the current wording/polish/work.',
+  const subagentTool = {
+    name: 'rin_subagent',
+    label: 'Rin Subagent',
+    description: 'Delegate a task to a temporary worker session on a specific provider/model with full, summary, or empty context injection.',
+    promptSnippet: 'Run a temporary worker session on a specific provider/model, with full, summary, or empty parent-context injection.',
     promptGuidelines: [
-      'If the user specifies a model or provider, switch only the active session-scoped model instead of informally simulating that route yourself.',
-      'Do not use this tool on shared/default session surfaces.',
-      'If the user asks for another model to do the writing or polish, use this tool first.',
+      'Use this when the user explicitly wants a different provider/model to handle a subtask without changing the main session model.',
+      'Choose contextMode deliberately: `full` for work that depends on the current thread, `summary` for compressed carry-over, and `empty` for clean isolated exploration.',
+      'Write the delegated task as a self-contained contract: desired outcome, important constraints, and expected output shape.',
+      'Prefer direct delegated work over temporary main-model switching; the result comes back as tool output for the parent session to use.',
     ],
     parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal('list'),
-        Type.Literal('switch'),
-      ]),
-      provider: Type.Optional(Type.String({ description: 'Provider ID for switch.' })),
-      model: Type.Optional(Type.String({ description: 'Model ID for switch.' })),
+      provider: Type.String({ description: 'Provider ID to use for the worker session.' }),
+      model: Type.String({ description: 'Model ID to use for the worker session.' }),
+      task: Type.String({ description: 'Task for the delegated worker.' }),
+      contextMode: Type.Optional(Type.Union([
+        Type.Literal('full'),
+        Type.Literal('summary'),
+        Type.Literal('empty'),
+      ])),
       thinking: Type.Optional(Type.Union([
         Type.Literal('off'),
         Type.Literal('minimal'),
@@ -1709,48 +1927,121 @@ function createRinBuiltinTools({
         Type.Literal('xhigh'),
       ])),
     }),
-    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
+    execute: async (_toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) => {
+      let workerSession: any = null
       try {
-        const action = safeString(params && params.action).trim()
-        if (action === 'list') {
-          const models = listAvailableModels(ctx)
-          return toolResultFromText(JSON.stringify(models, null, 2), { count: models.length, models }, false)
-        }
-        if (action === 'switch') {
-          assertModelSwitchIsSessionScoped()
-          const targetModel = resolveSwitchModel(ctx, params)
-          const currentSession = sessionRef && sessionRef.current ? sessionRef.current : null
-          const previousProvider = safeString((currentSession && currentSession.model && currentSession.model.provider) || (ctx && ctx.model && ctx.model.provider)).trim()
-          const previousModel = safeString((currentSession && currentSession.model && currentSession.model.id) || (ctx && ctx.model && ctx.model.id)).trim()
-          const previousThinking = currentSession && typeof currentSession.getThinkingLevel === 'function'
-            ? safeString(currentSession.getThinkingLevel()).trim()
-            : ''
+        const task = safeString(params && params.task).trim()
+        if (!task) throw new Error('missing_task')
 
-          if (!currentSession || typeof currentSession !== 'object' || !currentSession.agent) {
-            throw new Error('model_switch_only_supported_in_active_session')
+        const contextModeRaw = safeString(params && params.contextMode).trim().toLowerCase()
+        const contextMode = contextModeRaw === 'summary' || contextModeRaw === 'empty' ? contextModeRaw : 'full'
+        const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
+        const targetModel = resolveSubagentTargetModel(ctx, params)
+        await assertSubagentModelAvailable(ctx, targetModel)
+
+        const currentSession = getActiveSessionForSubagent(ctx)
+        const workerCwd = path.resolve((ctx && ctx.cwd) || process.cwd())
+        const inheritedTools = getSubagentToolSnapshot(ctx)
+        const inheritedBaseSystemPrompt = safeString(
+          (ctx && typeof ctx.getSystemPrompt === 'function' ? ctx.getSystemPrompt() : '')
+          || (currentSession && currentSession.agent && currentSession.agent.state && currentSession.agent.state.systemPrompt)
+          || '',
+        ).trim() || 'You are a helpful assistant.'
+        const inheritedSystemPrompt = buildSubagentSystemPromptLocal(inheritedBaseSystemPrompt, contextMode)
+
+        const contextSnapshot = contextMode === 'empty' ? { messages: [], trimmedToolCallTail: false } : getActiveSessionContextSnapshot(ctx)
+        let summaryText = ''
+        let preparationUsage = emptyUsageLocal()
+
+        if (contextMode === 'summary' && contextSnapshot.messages.length > 0) {
+          if (typeof onUpdate === 'function') {
+            try {
+              onUpdate({
+                content: [{ type: 'text', text: 'Summarizing parent context...' }],
+                details: { phase: 'prepare', contextMode },
+              })
+            } catch {}
           }
-
-          const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
-          const currentState = await switchSessionModelWithoutPersist(currentSession, targetModel, requestedThinking)
-
-          const currentModel = currentSession && currentSession.model ? currentSession.model : targetModel
-          const nextThinking = safeString(currentState && currentState.thinking).trim() || requestedThinking || previousThinking
-
-          return toolResultFromText(
-            `Model switched to ${safeString(currentModel && currentModel.provider).trim()}/${safeString(currentModel && currentModel.id).trim()}.`,
-            {
-              previous: previousProvider || previousModel ? { provider: previousProvider, model: previousModel, thinking: previousThinking || undefined } : undefined,
-              current: {
-                provider: safeString(currentModel && currentModel.provider).trim(),
-                model: safeString(currentModel && currentModel.id).trim(),
-                thinking: nextThinking || undefined,
-              },
-            },
-          )
+          const summaryResult = await summarizeContextForSubagent({
+            cwd: workerCwd,
+            model: targetModel,
+            thinking: requestedThinking,
+            messages: contextSnapshot.messages,
+            signal,
+          })
+          summaryText = safeString(summaryResult && summaryResult.summary).trim()
+          preparationUsage = summaryResult && summaryResult.usage ? summaryResult.usage : emptyUsageLocal()
         }
-        throw new Error(`unsupported_action:${action}`)
+
+        const created = await createEphemeralSubagentSession({
+          cwd: workerCwd,
+          model: targetModel,
+          thinking: requestedThinking,
+          tools: inheritedTools,
+          systemPrompt: inheritedSystemPrompt,
+        })
+        workerSession = created.session
+
+        if (contextMode === 'full' && contextSnapshot.messages.length > 0 && workerSession && workerSession.agent && typeof workerSession.agent.replaceMessages === 'function') {
+          workerSession.agent.replaceMessages(cloneJsonLocal(contextSnapshot.messages))
+        }
+
+        const workerPrompt = contextMode === 'summary' && summaryText
+          ? [
+              'Parent session summary:',
+              summaryText,
+              '',
+              'Task:',
+              task,
+            ].join('\n')
+          : task
+
+        const runResult = await runEphemeralSubagentTurn({
+          session: workerSession,
+          prompt: workerPrompt,
+          signal,
+          onUpdate,
+          updateDetails: {
+            phase: 'run',
+            contextMode,
+            provider: safeString(targetModel && targetModel.provider).trim(),
+            model: safeString(targetModel && targetModel.id).trim(),
+          },
+        })
+
+        const usage = runResult && runResult.usage ? runResult.usage : emptyUsageLocal()
+        const totalUsage = mergeUsageLocal(preparationUsage, usage)
+        const resultText = safeString(runResult && runResult.text).trim() || '(no output)'
+        const details = {
+          current: {
+            provider: safeString(targetModel && targetModel.provider).trim(),
+            model: safeString(targetModel && targetModel.id).trim(),
+            thinking: requestedThinking || undefined,
+          },
+          contextMode,
+          context: {
+            inheritedMessageCount: contextSnapshot.messages.length,
+            trimmedToolCallTail: Boolean(contextSnapshot.trimmedToolCallTail),
+            summaryPreview: summaryText ? truncateMiddleTextLocal(summaryText, 4_000) : undefined,
+          },
+          usage,
+          preparationUsage: preparationUsage.turns > 0 || preparationUsage.input > 0 || preparationUsage.output > 0
+            ? preparationUsage
+            : undefined,
+          totalUsage,
+        }
+
+        const isError = Boolean(
+          runResult && (runResult.aborted || safeString(runResult.errorMessage).trim() || safeString(runResult.stopReason).trim() === 'error'),
+        )
+        const errorText = safeString(runResult && runResult.errorMessage).trim()
+        return toolResultFromText(isError ? errorText || resultText : resultText, details, isError)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      } finally {
+        if (workerSession && typeof workerSession.dispose === 'function') {
+          try { workerSession.dispose() } catch {}
+        }
       }
     },
   }
@@ -1827,7 +2118,7 @@ function createRinBuiltinTools({
     },
   }
 
-  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, skillTool, contextTool]
+  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, subagentTool, skillTool, contextTool]
 }
 
 function createRinBuiltinExtensionFactory({
