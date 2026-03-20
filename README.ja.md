@@ -6,45 +6,87 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-**Rin** は、チャット連携型エージェントのワークフロー向けに設計されたローカルファーストなランタイムです。エージェントがスケジュール、自動化、および長期間のブリッジ配信を管理できる、安定したデーモン駆動の環境を提供します。単一のターミナルセッションやエディタウィンドウに縛られることはありません。
+**一つの runtime で、agent を terminal、chat、memory、time にまたがって動かす。**
+
+**Rin** は、chat-connected agent のためのローカルファーストなランタイムです。設計の中心は「現在の作業ディレクトリ」ではなく「ユーザー」にあり、agent がコンテキスト、メモリ、ツール、スケジュール、配信面を一つにまとめ、セッションをまたいで動き続けられるようにします。
+
+Rin が目指すのは、リポジトリごとに毎回作り直す一時的な補助役ではなく、長く育てていける agent runtime です。
 
 ## なぜ Rin なのか？
 
-Rin は、エージェントのエコシステムにおいて独自の地位を占めています。多くのツールが即時のコード生成やエディタ統合に焦点を当てている一方で、Rin は**ランタイムのルート**、つまりエージェントが継続的なアシスタントとして機能することを可能にする永続的なバックグラウンドレイヤーに焦点を当てています。
+- **cwd ではなくユーザー中心。** Rin が追うのは、その時開いているリポジトリではなく人です。
+- **多層メモリ。** メモリはランタイムに組み込まれた能力であり、一時的なチャットログに縮退しません。
+- **TUI + Koishi。** ローカルのターミナルでも使え、同じランタイムをチャットプラットフォームにもつなげられます。
+- **自己ブートストラップ。** Rin は、自分が動いているランタイム環境をそのまま点検し、利用し、整え続けられます。
+- **タイマーと巡検が第一級。** バックグラウンド routine と inspection はネイティブな能力です。
+- **All in agent。** 公開 CLI は小さく保ち、より豊かな振る舞いは agent runtime 自体から提供することで、すぐ使えて agent 自身でも設定しやすくしています。
 
-### 位置づけ
+## 短い manifesto
 
-| 機能 | Rin | ターミナル型コーディングエージェント | IDE 中心型エージェント |
-| :--- | :--- | :--- | :--- |
-| **主なインターフェース** | ローカルランタイム & TUI | CLI コマンド | エディタ / 拡張機能 |
-| **実行モデル** | 永続デーモン | タスク固有のプロセス | エディタに紐づくプラグイン |
-| **状態管理** | 中央集約型 (`~/.rin`) | セッションベース | エディタのワークスペース |
-| **ツールサーフェス** | 内部ランタイム API | CLI サブコマンド | エディタコマンド |
-| **主な焦点** | 連携ワークフロー | 直接的なファイル編集 | エディタ内での支援 |
+多くの agent ツールは、表面から始まります。
+一つのコマンド、一つのエディタパネル、一つの作業ディレクトリ。
 
-*関連するカテゴリの例には、Codex CLI、Claude Code、Gemini CLI などのターミナルエージェントや、Cursor、Windsurf、Cline などの IDE 中心型ツールが含まれます。*
+Rin は、連続性から始めます。
 
-## 主な特徴
+agent には、自分の memory、自分の routine、自分の interface、そして育ち続けられる runtime があるべきです。
 
-- **ローカルファースト・ルート:** すべてのランタイム状態、メモリ、設定は `~/.rin` に保存されます。
-- **デーモン駆動:** バックグラウンドサービスがブリッジ、スケジュール、自動化フローを処理し、UI が閉じられてもタスクが継続されることを保証します。
-- **最小限の CLI サーフェス:** 公開される CLI は意図的に小さく保たれています。複雑なエージェント機能（ウェブ検索、メモリ、インスペクション）は、CLI の複雑さを増すのではなく、ランタイムのツールサーフェスを通じて公開されます。
-- **ユーザーレベルの管理:** `systemd` と深く統合されており、管理されたサービスのライフサイクル（再起動、アップデート、ログ）を提供します。
+一回きりの作業のための補助ではなく、
+持ち続けられる runtime として。
 
-## インストール
+## 全体像
+
+```text
+User
+ ├─ terminal ──> Local TUI ────┐
+ └─ chat ──────> Koishi bridge │
+                               ├──> Rin agent runtime
+                               │      ├─ memory
+                               │      ├─ skills
+                               │      ├─ models
+                               │      ├─ schedules
+                               │      └─ inspections
+                               │
+                               └──> persistent runtime state (~/.rin)
+```
+
+## 3 ステップでつかむ Rin
+
+**1. Install**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+```
+
+**2. Launch**
+
+```bash
+rin
+```
+
+**3. 同じ runtime を育て続ける**
+
+ローカル TUI で使い、チャットにもつなぎ、リポジトリごとに毎回リセットするのではなく、同じ agent runtime を積み上げていきます。
+
+## クイックスタート
+
+### 要件
+
+- ユーザーレベル `systemd` を使える Linux 互換環境
+- Node.js >= 22
+- `npm`、`git`、`mktemp`
 
 ### クイックインストール
-`systemd`、Node.js >= 22、`npm`、`git`、および `mktemp` を備えた Linux 互換環境が必要です。
 
 ```bash
 # 最新の main をインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 
-# 特定のリファレンスをインストール
+# 特定の ref をインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
 ```
 
-### ソースからのインストール
+### ソースからインストール
+
 ```bash
 git clone https://github.com/THE-cattail/rin.git
 cd rin
@@ -53,43 +95,71 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-## コマンドサーフェス
+### Rin を起動
 
-Rin は、作業の邪魔にならないよう、無駄のない CLI を維持しています。
+```bash
+rin
+```
+
+## 典型的なユースケース
+
+| | |
+| :--- | :--- |
+| **個人向けターミナル agent**<br>リポジトリをまたいでも、そのたびにゼロから始めなくてよい。 | **チャット接続型アシスタント**<br>ブリッジされたメッセージ基盤を通じて受信・処理・配信できる。 |
+| **自己保守するランタイム**<br>agent 自身がドキュメント、スキル、メモリ、スケジュールを点検し、そのまま改善を続けられる。 | **バックグラウンド自動化の相棒**<br>定期 routine、周期的チェック、長寿命の agent ワークフローに向く。 |
+
+## 位置づけ
+
+| 問い | Rin | ターミナル型コーディングエージェント | IDE 中心型エージェント |
+| :--- | :--- | :--- | :--- |
+| **agent は何に属するか？** | ユーザー | 現在の shell / repo | 現在の editor workspace |
+| **主にどこで出会うか？** | TUI とチャットブリッジ | CLI 実行 | エディタのパネルや拡張 |
+| **表面を閉じた後はどうなるか？** | runtime 自体の連続性が残る | 多くはプロセス終了で終わる | 体験はエディタに結び付いたまま |
+| **どれだけの機能が agent の内側にあるか？** | memory、routine、inspection、configuration | 主にタスク実行 | 主にエディタ補助 |
+| **重心はどこか？** | 継続運用できる個人向け agent runtime | 直接的なターミナル作業 | エディタ内支援 |
+
+*関連カテゴリの例として、Codex CLI、Claude Code、Gemini CLI のようなターミナル型エージェントや、Cursor、Windsurf、Cline のような IDE 中心型ツールがあります。*
+
+## 公開コマンドサーフェス
+
+Rin は公開 CLI を意図的に小さく保っています。
 
 - `rin`: インタラクティブなローカル TUI を起動します。
 - `rin restart`: バックグラウンドの Rin デーモンサービスを再起動します。
-- `rin update`: 設定されたソースリポジトリとリファレンスから Rin を再インストール/アップデートします。
-- `rin uninstall --keep-state --yes`: アプリケーションとランチャーを削除しますが、`~/.rin` 内のデータは保持します。
-- `rin uninstall --purge --yes`: アプリケーションと `~/.rin` ディレクトリを完全に削除します。
+- `rin update`: 設定されたソースリポジトリと ref から Rin を再インストールまたは更新します。
+- `rin uninstall --keep-state --yes`: インストール済みアプリとランチャーを削除しますが、`~/.rin` 内のデータは残します。
+- `rin uninstall --purge --yes`: アプリと完全な `~/.rin` ランタイムを削除します。
 
-## ランタイムのレイアウト
+## 同梱される機能
 
-ランタイムの状態は、ホームディレクトリ内に厳密に収められています。
+- **ローカル TUI** による対話型 agent セッション。
+- **Koishi ベースのチャット接続** によるブリッジ配信。
+- **ランタイム内蔵のメモリシステム**。
+- **ネイティブな定期 routine と巡検能力**。
+- **ランタイムのドキュメント、スキル、内部ツールを通じた agent 主導の設定**。
+- **小さな公開コマンド面による、すぐ使える体験**。
 
-- `~/.rin/`: 主要な状態のルート。
-- `~/.rin/data/web-search/config.json`: ウェブ検索の設定。
-- `~/.rin/bin/`: ランチャーとバイナリ。
+## ドキュメント
 
-## ウェブ検索
-
-Rin は柔軟なウェブ検索ランタイム機能を備えています。Docker を介したローカルの **SearxNG** インスタンスの管理（オプションのサイドカー）、既存の SearxNG インスタンスへの接続、または **Serper** クレデンシャルの使用が可能です。設定は `~/.rin/data/web-search/config.json` で管理されます。
+- [ランタイムリファレンス](install/home/docs/rin/README.md)
+- [TUI ガイド](install/home/docs/rin/docs/tui.md)
+- [モデルとプロバイダ](install/home/docs/rin/docs/models.md)
+- [スキル](install/home/docs/rin/docs/skills.md)
+- [拡張](install/home/docs/rin/docs/extensions.md)
+- [SDK](install/home/docs/rin/docs/sdk.md)
+- [サンプル](install/home/docs/rin/examples/README.md)
+- [開発ノート](install/home/docs/rin/docs/development.md)
 
 ## 開発
 
-### 必要条件
-- Node.js >= 22
-- ユーザーレベルの `systemd` を備えた Linux
-- Docker（管理された SearxNG サイドカーを使用する場合のオプション）
-
-### 検証
 ローカルの変更を検証するには、以下を実行してください。
+
 ```bash
 npm run check
 ```
 
-貢献の詳細については、[CONTRIBUTING.md](CONTRIBUTING.md) および [CODE_STYLE.md](CODE_STYLE.md) を参照してください。内部ドキュメントは `install/home/docs/rin/README.md` にあります。
+貢献の詳細は [CONTRIBUTING.md](CONTRIBUTING.md) と [CODE_STYLE.md](CODE_STYLE.md) を参照してください。
 
 ## ライセンス
 
-このプロジェクトは MIT ライセンスの下でライセンスされています。詳細は [LICENSE](LICENSE) ファイルを参照してください。
+このプロジェクトは MIT ライセンスで提供されています。詳細は [LICENSE](LICENSE) を参照してください。
