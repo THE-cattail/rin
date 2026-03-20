@@ -1,6 +1,5 @@
 # rin
 
-[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -175,8 +174,12 @@ Rin は、表に見えるコマンドを小さく保っています。
 ローカルの変更を確かめるには、次を実行してください。
 
 ```bash
+npm ci
 npm run check
+npm run check:container
 ```
+
+`npm ci` を実行すると、Git checkout ではローカルの Husky hooks も設定されます。`pre-push` hook が push 前に `npm run check:container` を自動実行するので、ローカルで Docker が使える必要があります。
 
 詳しくは [CONTRIBUTING.md](CONTRIBUTING.md) と [CODE_STYLE.md](CODE_STYLE.md) を参照してください。
 

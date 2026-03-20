@@ -16,9 +16,14 @@ git clone https://github.com/THE-cattail/rin.git
 cd rin
 npm ci
 npm run check
+npm run check:container
 ```
 
 `npm run check` builds the project, runs unit tests, and runs repository portability/doc checks.
+
+`npm run check:container` runs the same verification in the project Docker container.
+
+`npm ci` also installs the local Husky hooks in a Git checkout. The `pre-push` hook runs `npm run check:container` automatically before each push, so Docker needs to be available locally. If you intentionally need to bypass it once, use `git push --no-verify`.
 
 ## What good changes look like
 

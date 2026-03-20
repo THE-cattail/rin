@@ -41,7 +41,10 @@
     "test:repo": "node scripts/check-repo.mjs",
     "metrics": "node scripts/measure-baselines.mjs",
     "test": "npm run build && npm run test:unit && npm run test:repo",
-    "check": "npm run test"
+    "check": "npm run test",
+    "check:container": "sh scripts/check-in-container.sh",
+    "prepare": "node .husky/install.mjs",
+    "hooks:install": "node .husky/install.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
@@ -62,6 +65,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "husky": "^9.1.7",
     "typescript": "^5.8.2"
   }
 }

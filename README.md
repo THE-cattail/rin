@@ -1,6 +1,5 @@
 # rin
 
-[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -173,8 +172,12 @@ Rin keeps the public command set intentionally small:
 To verify local changes:
 
 ```bash
+npm ci
 npm run check
+npm run check:container
 ```
+
+`npm ci` also installs the local Husky hooks in a Git checkout. The `pre-push` hook runs `npm run check:container` automatically before each push, so Docker needs to be available locally.
 
 For contribution details, see [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_STYLE.md](CODE_STYLE.md).
 

@@ -1,6 +1,5 @@
 # rin
 
-[![CI](https://github.com/THE-cattail/rin/actions/workflows/ci.yml/badge.svg)](https://github.com/THE-cattail/rin/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -173,8 +172,12 @@ Rin 有意把公开命令收得很小：
 验证本地改动：
 
 ```bash
+npm ci
 npm run check
+npm run check:container
 ```
+
+`npm ci` 也会在 Git 工作区里把本地 Husky hooks 装好。`pre-push` 会在每次推送前自动运行 `npm run check:container`，所以本地需要有 Docker。
 
 贡献细节见 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [CODE_STYLE.md](CODE_STYLE.md)。
 
