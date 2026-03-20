@@ -43,6 +43,21 @@ function isPidAlive(pid: unknown): boolean {
   }
 }
 
+function expandHomeAgainst(homeDir: string, value: string): string {
+  const raw = safeString(value).trim()
+  const base = path.resolve(homeDir || os.homedir())
+  if (!raw) return ''
+  if (raw === '~') return base
+  if (raw.startsWith('~/')) return path.join(base, raw.slice(2))
+  return raw
+}
+
+function resolveRinHomeRoot(homeDir = os.homedir()): string {
+  const override = safeString(process.env.RIN_HOME).trim()
+  if (override) return path.resolve(expandHomeAgainst(homeDir, override))
+  return path.resolve(path.join(homeDir, '.rin'))
+}
+
 function lockRootDir(): string {
   const override = safeString(process.env.RIN_LOCK_DIR).trim()
   if (override) return path.resolve(override)
@@ -64,8 +79,10 @@ function lockFilePathForKey(key: string): string {
 
 function resolveRinLayout({
   sourceHint = '',
+  homeDir = os.homedir(),
 }: {
   sourceHint?: string
+  homeDir?: string
 } = {}): {
   repoRoot: string
   homeRoot: string
@@ -76,7 +93,7 @@ function resolveRinLayout({
 } {
   const repoOverride = safeString(process.env.RIN_REPO_ROOT).trim()
   const repoRoot = path.resolve(safeString(sourceHint).trim() || repoOverride || path.join(__dirname, '..'))
-  const homeRoot = path.resolve(path.join(os.homedir(), '.rin'))
+  const homeRoot = resolveRinHomeRoot(homeDir)
   return {
     repoRoot,
     homeRoot,
@@ -195,6 +212,8 @@ export {
   writeJsonAtomic,
   safeString,
   isPidAlive,
+  expandHomeAgainst,
+  resolveRinHomeRoot,
   lockRootDir,
   lockFilePathForKey,
   resolveRinLayout,

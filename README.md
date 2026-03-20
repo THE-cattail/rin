@@ -58,7 +58,14 @@ You
 **1. Install**
 
 ```bash
+# Interactive installer (runtime root, provider, and chat bridge choices included)
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# Custom runtime root
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# Dry run the installer without writing anything
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 ```
 
 **2. Open it**
@@ -75,15 +82,22 @@ Use Rin in the terminal, connect it to chat if you like, and let the same assist
 
 ### Requirements
 
-- Linux-compatible environment with user-level `systemd`
+- Linux, macOS, or Windows (use Git Bash / a POSIX shell on Windows for `install.sh`)
+- Background daemon backend auto-selects from `systemd`, `launchd`, or a detached process
 - Node.js >= 22
 - `npm`, `git`, and `mktemp`
 
 ### Quick Install
 
 ```bash
-# Install latest main
+# Install latest main with the interactive setup wizard
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# Install into a custom runtime root
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# Preview the install without changing your environment
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 
 # Install specific ref
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
@@ -96,7 +110,7 @@ git clone https://github.com/THE-cattail/rin.git
 cd rin
 npm ci
 npm run build
-RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
+RIN_REPO_URL="$(pwd)" ./install.sh --current-user
 ```
 
 ### Launch Rin

@@ -10,6 +10,7 @@ const {
   lockFilePathForKey,
   lockRootDir,
   readJson,
+  resolveRinHomeRoot,
   resolveRinLayout,
   writeJsonAtomic,
 } = require('../dist/runtime-paths.js')
@@ -65,13 +66,24 @@ test('lockFilePathForKey hashes the key under the lock root', () => {
 })
 
 test('resolveRinLayout prefers sourceHint over repo override', () => {
-  const layout = withEnv({ RIN_REPO_ROOT: '/tmp/from-env' }, () => resolveRinLayout({ sourceHint: '/tmp/from-arg' }))
+  const layout = withEnv({ RIN_REPO_ROOT: '/tmp/from-env', RIN_HOME: null, RIN_STATE_ROOT: null }, () => resolveRinLayout({ sourceHint: '/tmp/from-arg' }))
   assert.equal(layout.repoRoot, path.resolve('/tmp/from-arg'))
   assert.equal(layout.homeRoot, path.join(os.homedir(), '.rin'))
   assert.equal(layout.dataDir, path.join(layout.homeRoot, 'data'))
   assert.equal(layout.localeDir, path.join(layout.homeRoot, 'locale'))
   assert.equal(layout.routinesDir, path.join(layout.homeRoot, 'routines'))
   assert.equal(layout.kbDir, path.join(layout.homeRoot, 'kb'))
+})
+
+test('resolveRinLayout respects RIN_HOME override', () => {
+  const layout = withEnv({ RIN_HOME: '~/custom-rin-home', RIN_STATE_ROOT: null }, () => resolveRinLayout())
+  assert.equal(layout.homeRoot, path.join(os.homedir(), 'custom-rin-home'))
+  assert.equal(layout.dataDir, path.join(layout.homeRoot, 'data'))
+})
+
+test('resolveRinHomeRoot expands against the provided home directory', () => {
+  const root = withEnv({ RIN_HOME: '~/custom-rin-home' }, () => resolveRinHomeRoot('/tmp/rin-user-home'))
+  assert.equal(root, path.resolve('/tmp/rin-user-home/custom-rin-home'))
 })
 
 test('readJson returns fallback for invalid files and writeJsonAtomic writes valid json', () => {

@@ -631,10 +631,12 @@ function findLatestSessionFile(sessionDir: string): string {
 
 function readChatTranscriptFiles(stateRoot: string, chatKey: string): TranscriptEntry[] {
   const key = safeString(chatKey).trim()
-  const match = key.match(/^([^:]+):(.+)$/)
+  const match = key.match(/^([^/:]+)(?:\/([^:]+))?:(.+)$/)
   if (!match) return []
-  const [, platform, chatId] = match
-  const logsDir = path.join(stateRoot, 'data', 'chats', platform, chatId, 'logs')
+  const [, platform, botId = '', chatId] = match
+  const logsDir = botId
+    ? path.join(stateRoot, 'data', 'chats', platform, botId, chatId, 'logs')
+    : path.join(stateRoot, 'data', 'chats', platform, chatId, 'logs')
   if (!fs.existsSync(logsDir)) return []
   const files = fs.readdirSync(logsDir)
     .filter((name) => name.endsWith('.jsonl'))
@@ -2264,7 +2266,7 @@ function stockPiAgentDir(): string {
 function resolvePiAgentDir(workspaceRoot = ''): string {
   const workspace = safeString(workspaceRoot).trim()
   if (workspace) return path.resolve(workspace)
-  return path.join(os.homedir(), '.rin')
+  return resolveRinLayout().homeRoot
 }
 
 function seedPiAgentDirFromStock(agentDir: string) {

@@ -5,12 +5,12 @@ Precedence: This file overrides upstream Pi documentation for Rin-specific behav
 
 ## 1. Canonical Roots
 
-- **Runtime Root:** `~/.rin`
-- **Docs Root:** `~/.rin/docs/rin`
-- **Data Root:** `~/.rin/data`
+- **Runtime Root:** defaults to `~/.rin`; may be overridden by `RIN_HOME` or the installer.
+- **Docs Root:** `<runtime-root>/docs/rin`
+- **Data Root:** `<runtime-root>/data`
 - **Source Repo:** Distinct from runtime state (e.g., `~/rin-src`).
 
-Operational Rule: Reference `~/.rin` directly. Do not derive it from subpaths (cache, sessions, or data).
+Operational Rule: Treat the runtime root as one explicit path. Use `~/.rin` only as the default, not as a hardcoded assumption.
 
 ## 2. Runtime Surfaces
 
@@ -34,20 +34,20 @@ Execution State:
 
 ## 4. Auto-Loaded Content
 
-Rin discovers content exclusively within `~/.rin`.
+Rin discovers content exclusively within the configured runtime root.
 - **Config:** `AGENTS.md`, `auth.json`, `settings.json`, `models.json`
 - **Logic:** `skills/**`
 - **Reference:** `docs/rin/**`
 - **State:** `data/**`
 
 Settings:
-- Use global `~/.rin/settings.json`.
+- Use global `<runtime-root>/settings.json`.
 - Project-local `.pi/settings.json` is ignored.
 
 ## 5. Non-Discovered Content
 
 The following are NOT auto-discovered:
-- `AGENTS.md` outside `~/.rin`.
+- `AGENTS.md` outside the runtime root.
 - Project-local `.pi/` resources (skills, prompts, etc.).
 - `~/.agents/skills`.
 - Legacy resource chains.
@@ -56,11 +56,11 @@ Manual Inspection: If a task targets a directory, manually check for `AGENTS.md`
 
 ## 6. Path Semantics
 
-Rin has no ambient project working directory. Runtime root is `~/.rin`.
+Rin has no ambient project working directory. Runtime root is the configured runtime path.
 Tools inherit Pi's `cwd` requirement, pinned to `$HOME`.
 - **Relative paths:** Resolve from `$HOME`.
-- **TUI sessions:** `~/.rin/sessions/default`.
-- **Daemon sessions:** `~/.rin/data/chats/...`.
+- **TUI sessions:** `<runtime-root>/sessions/default`.
+- **Daemon sessions:** `<runtime-root>/data/chats/...`.
 
 Operation:
 - Use absolute paths.
@@ -71,7 +71,7 @@ Operation:
 
 Core Tools: `read`, `bash`, `edit`, `write`.
 Rin Tools: `rin_brain`, `rin_koishi`, `rin_schedule`, `web_search`.
-Web search runtime config lives under `~/.rin/data/web-search/config.json`.
+Web search runtime config lives under `<runtime-root>/data/web-search/config.json`.
 Default web search uses the built-in vanilla SearxNG sidecar against Google Web. Users can point SearxNG at another base URL/API key or add their own Serper API in that config file.
 
 Constraints:
@@ -108,7 +108,7 @@ Mapping:
 ## 10. Execution Guidance
 
 Internal Edits:
-- Runtime/private files: `~/.rin`.
+- Runtime/private files: `<runtime-root>`.
 - Source changes: Repository checkout.
 - Inspect state directly; do not rely on assumptions.
 - Verify behavior via resulting state changes.
@@ -116,4 +116,4 @@ Internal Edits:
 External Targets:
 - Directories are explicit targets, not working-directory context.
 - Manually inspect target files.
-- Ensure Rin runtime state remains in `~/.rin`.
+- Ensure Rin runtime state remains under the configured runtime root.

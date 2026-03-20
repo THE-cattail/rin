@@ -23,6 +23,10 @@ function safeString(value: unknown): string {
   return String(value)
 }
 
+function pluginBaseName(name: string) {
+  return safeString(name).replace(/^~/, '').split(':', 1)[0]
+}
+
 function normalizeKoishiAdapterConfig(value: any, defaults: Record<string, any> = {}) {
   const current = value && typeof value === 'object' && !Array.isArray(value)
     ? JSON.parse(JSON.stringify(value))
@@ -37,6 +41,77 @@ function loadDaemonHomeSettings(settingsPath: string) {
   return next
 }
 
+function sanitizeAdapterName(value: any, fallback: string) {
+  const raw = safeString(value).trim().replace(/[^A-Za-z0-9._-]+/g, '-')
+  return raw || fallback
+}
+
+function looksLikeSingleAdapterConfig(value: any) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  if (!keys.length) return true
+  const singleConfigKeys = new Set([
+    'name',
+    'enabled',
+    'endpoint',
+    'selfId',
+    'token',
+    'protocol',
+    'slash',
+    'owners',
+    'ownerUserIds',
+    'botId',
+  ])
+  return keys.some((key) => singleConfigKeys.has(key))
+}
+
+function normalizeAdapterEntries(value: any, defaults: Record<string, any>, fallbackPrefix: string) {
+  const rawEntries: Array<{ name: string, config: Record<string, any> }> = []
+
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
+      rawEntries.push({
+        name: sanitizeAdapterName((entry as any).name, `${fallbackPrefix}-${index + 1}`),
+        config: JSON.parse(JSON.stringify(entry)),
+      })
+    })
+  } else if (looksLikeSingleAdapterConfig(value)) {
+    rawEntries.push({
+      name: sanitizeAdapterName(value && value.name, fallbackPrefix),
+      config: value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {},
+    })
+  } else if (value && typeof value === 'object') {
+    for (const [name, entry] of Object.entries(value)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      rawEntries.push({
+        name: sanitizeAdapterName((entry as any).name || name, safeString(name) || fallbackPrefix),
+        config: JSON.parse(JSON.stringify(entry)),
+      })
+    }
+  }
+
+  return rawEntries
+    .filter((entry) => entry.config.enabled !== false)
+    .map((entry) => {
+      const config = normalizeKoishiAdapterConfig(entry.config, defaults)
+      delete (config as any).name
+      delete (config as any).owners
+      delete (config as any).ownerUserIds
+      delete (config as any).botId
+      return { name: entry.name, config }
+    })
+}
+
+function applyAdapterPlugins(plugins: Record<string, any>, baseName: string, value: any, defaults: Record<string, any>, fallbackPrefix: string) {
+  const entries = normalizeAdapterEntries(value, defaults, fallbackPrefix)
+  if (!entries.length) return
+  entries.forEach((entry, index) => {
+    const key = index === 0 ? baseName : `${baseName}:${entry.name || index + 1}`
+    plugins[key] = entry.config
+  })
+}
+
 function buildDaemonConfigFromSettings(settings: any) {
   const next = {
     name: 'rin',
@@ -49,24 +124,17 @@ function buildDaemonConfigFromSettings(settings: any) {
   }
 
   const koishi = settings && typeof settings.koishi === 'object' ? settings.koishi : {}
-  const onebot = koishi && typeof koishi.onebot === 'object' ? koishi.onebot : null
-  const telegram = koishi && typeof koishi.telegram === 'object' ? koishi.telegram : null
-
-  if (onebot && onebot.enabled !== false) {
-    next.plugins['adapter-onebot'] = normalizeKoishiAdapterConfig(onebot, {
-      protocol: 'ws',
-      endpoint: '',
-      selfId: '',
-      token: '',
-    })
-  }
-  if (telegram && telegram.enabled !== false) {
-    next.plugins['adapter-telegram'] = normalizeKoishiAdapterConfig(telegram, {
-      protocol: 'polling',
-      token: '',
-      slash: true,
-    })
-  }
+  applyAdapterPlugins(next.plugins, 'adapter-onebot', koishi && koishi.onebot, {
+    protocol: 'ws',
+    endpoint: '',
+    selfId: '',
+    token: '',
+  }, 'onebot')
+  applyAdapterPlugins(next.plugins, 'adapter-telegram', koishi && koishi.telegram, {
+    protocol: 'polling',
+    token: '',
+    slash: true,
+  }, 'telegram')
 
   return next
 }
@@ -81,28 +149,53 @@ function materializeDaemonConfig(configPath: string, settings: any) {
 function findPluginConfig(plugins: any, name: string) {
   if (!plugins || typeof plugins !== 'object') return null
   for (const [key, value] of Object.entries(plugins)) {
-    const base = String(key).replace(/^~/, '').split(':', 1)[0]
-    if (base === name) return value
+    if (pluginBaseName(String(key)) === name) return value
   }
   return null
 }
 
+function findPluginConfigs(plugins: any, name: string) {
+  if (!plugins || typeof plugins !== 'object') return []
+  return Object.entries(plugins)
+    .filter(([key]) => pluginBaseName(String(key)) === name)
+    .map(([key, value]) => ({ key: String(key), value }))
+}
+
+function composeChatKey(platform: string, chatId: string, botId = '') {
+  const nextPlatform = safeString(platform).trim()
+  const nextChatId = safeString(chatId).trim()
+  const nextBotId = safeString(botId).trim()
+  if (!nextPlatform || !nextChatId) return ''
+  return nextBotId ? `${nextPlatform}/${nextBotId}:${nextChatId}` : `${nextPlatform}:${nextChatId}`
+}
+
 function parseChatKey(chatKey: string) {
-  const sep = safeString(chatKey).indexOf(':')
-  if (sep <= 0) return null
-  return { platform: safeString(chatKey).slice(0, sep), chatId: safeString(chatKey).slice(sep + 1) }
+  const match = safeString(chatKey).trim().match(/^([^/:]+)(?:\/([^:]+))?:(.+)$/)
+  if (!match) return null
+  const [, platform, botId = '', chatId] = match
+  if (!platform || !chatId) return null
+  return { platform, botId, chatId }
 }
 
 function listChatStateFiles(chatsRoot: string) {
-  const out: Array<{ platform: string, chatId: string, statePath: string }> = []
+  const out: Array<{ platform: string, botId?: string, chatId: string, statePath: string }> = []
   try {
     const platforms = fs.readdirSync(chatsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
     for (const platform of platforms) {
-      const pdir = path.join(chatsRoot, platform)
-      const chats = fs.readdirSync(pdir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
-      for (const chatId of chats) {
-        const statePath = path.join(pdir, chatId, 'state.json')
-        if (fs.existsSync(statePath)) out.push({ platform, chatId, statePath })
+      const platformDir = path.join(chatsRoot, platform)
+      const levelOne = fs.readdirSync(platformDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+      for (const first of levelOne) {
+        const firstDir = path.join(platformDir, first)
+        const directStatePath = path.join(firstDir, 'state.json')
+        if (fs.existsSync(directStatePath)) {
+          out.push({ platform, chatId: first, statePath: directStatePath })
+          continue
+        }
+        const levelTwo = fs.readdirSync(firstDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+        for (const chatId of levelTwo) {
+          const statePath = path.join(firstDir, chatId, 'state.json')
+          if (fs.existsSync(statePath)) out.push({ platform, botId: first, chatId, statePath })
+        }
       }
     }
   } catch {}
@@ -118,34 +211,40 @@ function ownerChatKeysFromIdentity(dataDir: string) {
     if (!a || a.personId !== 'owner') continue
     const platform = safeString(a.platform)
     const userId = safeString(a.userId)
+    const botId = safeString(a.botId || a.selfId)
     if (!platform || !userId) continue
     const chatId = platform === 'onebot' ? `private:${userId}` : userId
-    out.push(`${platform}:${chatId}`)
+    out.push(composeChatKey(platform, chatId, botId))
   }
-  return Array.from(new Set(out))
+  return Array.from(new Set(out.filter(Boolean)))
 }
 
 function preferredOwnerChatKey(dataDir: string) {
   const uniq = ownerChatKeysFromIdentity(dataDir)
-  return uniq.find((k) => k.startsWith('onebot:private:'))
+  return uniq.find((k) => k.startsWith('onebot/'))
+    || uniq.find((k) => k.startsWith('onebot:private:'))
+    || uniq.find((k) => k.startsWith('telegram/'))
     || uniq.find((k) => k.startsWith('telegram:'))
     || uniq[0]
     || ''
 }
 
-function findBot(app: any, platform: string) {
+function findBot(app: any, platform: string, botId = '') {
   const bots = (app && app.bots) ? app.bots : []
-  for (const bot of bots) {
-    if (bot && bot.platform === platform) return bot
-  }
-  return null
+  const nextPlatform = safeString(platform).trim()
+  const nextBotId = safeString(botId).trim()
+  if (!nextPlatform) return null
+  const matches = bots.filter((bot: any) => bot && bot.platform === nextPlatform)
+  if (!matches.length) return null
+  if (!nextBotId) return matches[0]
+  return matches.find((bot: any) => safeString(bot && bot.selfId).trim() === nextBotId) || null
 }
 
 async function sendTextToChatKey(app: any, chatKey: string, text: string) {
   const parsed = parseChatKey(chatKey)
   if (!parsed) throw new Error(`invalid_chatKey:${chatKey}`)
-  const bot = findBot(app, parsed.platform)
-  if (!bot) throw new Error(`no_bot_for_platform:${parsed.platform}`)
+  const bot = findBot(app, parsed.platform, parsed.botId)
+  if (!bot) throw new Error(`no_bot_for_platform:${parsed.platform}${parsed.botId ? `/${parsed.botId}` : ''}`)
   await bot.sendMessage(parsed.chatId, safeString(text))
 }
 
@@ -177,6 +276,8 @@ export {
   buildDaemonConfigFromSettings,
   materializeDaemonConfig,
   findPluginConfig,
+  findPluginConfigs,
+  composeChatKey,
   parseChatKey,
   listChatStateFiles,
   ownerChatKeysFromIdentity,

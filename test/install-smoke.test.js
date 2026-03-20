@@ -16,6 +16,7 @@ function makeBundleFixture(rootDir) {
   fs.writeFileSync(path.join(rootDir, 'dist', 'brain.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'daemon.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'dist', 'tui.js'), 'module.exports = {}\n')
+  fs.writeFileSync(path.join(rootDir, 'dist', 'tui-debug.js'), 'module.exports = {}\n')
   fs.writeFileSync(path.join(rootDir, 'install', 'home', 'docs', 'rin', 'README.md'), '# fixture runtime docs\n')
   fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({ name: 'rin-fixture', version: '0.0.0' }, null, 2))
 }
@@ -77,6 +78,55 @@ test('performInstall simulates update by replacing the current release and pruni
 
   const installMeta = JSON.parse(fs.readFileSync(path.join(second.stateRoot, 'install.json'), 'utf8'))
   assert.equal(installMeta.installSource.ref, 'stable')
+})
+
+test('performInstall supports custom runtime roots and launcher export', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-custom-root-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  const customStateRoot = path.join(tempRoot, 'runtime-home')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const result = performInstall({
+    homeDir,
+    stateRoot: customStateRoot,
+    bundleRoot,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'main',
+    releaseId: '2026-03-21T00-00-00-000Z',
+    seedHomeDir: homeDir,
+  })
+
+  assert.equal(result.stateRoot, customStateRoot)
+  const launcherText = fs.readFileSync(result.launcherPath, 'utf8')
+  assert.match(launcherText, new RegExp(`RIN_HOME=${JSON.stringify(customStateRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+})
+
+test('performInstall supports dry-run previews without touching disk', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-dry-run-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  const stateRoot = path.join(tempRoot, 'state-root')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const result = performInstall({
+    homeDir,
+    stateRoot,
+    bundleRoot,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'main',
+    dryRun: true,
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.dryRun, true)
+  assert.equal(result.stateRoot, stateRoot)
+  assert.equal(fs.existsSync(stateRoot), false)
+  assert.equal(fs.existsSync(result.launcherPath), false)
+  assert.match(result.launcherText, /RIN_HOME=/)
+  assert.match(result.plannedChanges.join('\n'), /would create launcher/)
 })
 
 test('performUninstall supports keep-state and purge flows', () => {

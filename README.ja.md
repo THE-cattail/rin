@@ -60,7 +60,14 @@ You
 **1. Install**
 
 ```bash
+# 対話式セットアップ（保存先・provider・チャット連携を案内）
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# ランタイム保存先を指定
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# 環境を書き換えずにインストール手順だけ試す
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 ```
 
 **2. Open**
@@ -77,15 +84,22 @@ rin
 
 ### 要件
 
-- ユーザーレベル `systemd` を使える Linux 互換環境
+- Linux・macOS・Windows（Windows では Git Bash など POSIX 系シェルから `install.sh` を実行）
+- バックグラウンド daemon は `systemd`・`launchd`・detached process から利用可能なものを自動選択
 - Node.js >= 22
 - `npm`、`git`、`mktemp`
 
 ### クイックインストール
 
 ```bash
-# 最新の main をインストール
+# 対話式セットアップで最新の main をインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# ランタイム保存先を指定してインストール
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# 環境を書き換えずに結果だけ確認
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 
 # 特定の ref をインストール
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
@@ -98,7 +112,7 @@ git clone https://github.com/THE-cattail/rin.git
 cd rin
 npm ci
 npm run build
-RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
+RIN_REPO_URL="$(pwd)" ./install.sh --current-user
 ```
 
 ### 起動

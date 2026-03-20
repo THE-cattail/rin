@@ -6,7 +6,9 @@ import * as os from 'node:os'
 import { Loader, Logger, h } from 'koishi'
 import {
   buildDaemonConfigFromSettings,
+  composeChatKey,
   findPluginConfig,
+  findPluginConfigs,
   listChatStateFiles,
   loadDaemonHomeSettings,
   materializeDaemonConfig,
@@ -17,7 +19,9 @@ import {
   sendTextToOwners,
 } from './daemon-support'
 import { loadPiSdkModule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { startDaemonTuiRpcServer } from './daemon-tui-rpc'
 import { ensureSearxngSidecar, stopSearxngSidecar } from './web-search'
+import { resolveRinLayout } from './runtime-paths'
 
 type RinDaemonConfig = {
   name?: string
@@ -2353,7 +2357,7 @@ const rinBridge = (() => {
 	        type: 'message',
 	        content: safeString(content || ''),
 	        elements: [],
-	        bot: { selfId: '' },
+	        bot: { selfId: safeString(parsed && parsed.botId || '') },
 	      }
 	    }
 
@@ -2843,7 +2847,7 @@ const rinBridge = (() => {
       const maybeHasImg = safeString(session?.content).includes('<img')
       if (!hasEmptyImg && !maybeHasImg) return elements
 
-      const bot = findBot('telegram')
+      const bot = findBot('telegram', safeString(session?.bot?.selfId || ''))
       if (!bot) return elements
 
       const msg = pickTelegramMessageLike(session)
@@ -2937,17 +2941,36 @@ const rinBridge = (() => {
     }
 
     function parseChatKey(chatKey) {
-      const sep = String(chatKey || '').indexOf(':')
-      if (sep <= 0) return null
-      return { platform: String(chatKey).slice(0, sep), chatId: String(chatKey).slice(sep + 1) }
+      const match = safeString(chatKey || '').trim().match(/^([^/:]+)(?:\/([^:]+))?:(.+)$/)
+      if (!match) return null
+      const [, platform, botId = '', chatId] = match
+      if (!platform || !chatId) return null
+      return { platform, botId, chatId }
     }
 
-    function findBot(platform) {
+    function composeRuntimeChatKey(platform, chatId, botId = '') {
+      const nextPlatform = safeString(platform || '').trim()
+      const nextChatId = safeString(chatId || '').trim()
+      const nextBotId = safeString(botId || '').trim()
+      if (!nextPlatform || !nextChatId) return ''
+      return nextBotId ? `${nextPlatform}/${nextBotId}:${nextChatId}` : `${nextPlatform}:${nextChatId}`
+    }
+
+    function chatDirForParsed(parsed) {
+      if (!parsed || !parsed.platform || !parsed.chatId) return ''
+      return parsed.botId
+        ? path.join(chatsRoot, parsed.platform, String(parsed.botId), String(parsed.chatId))
+        : path.join(chatsRoot, parsed.platform, String(parsed.chatId))
+    }
+
+    function findBot(platform, botId = '') {
       const bots = ctx.bots || []
-      for (const b of bots) {
-        if (b && b.platform === platform) return b
-      }
-      return null
+      const nextPlatform = safeString(platform || '').trim()
+      const nextBotId = safeString(botId || '').trim()
+      const matches = bots.filter((b) => b && b.platform === nextPlatform)
+      if (!matches.length) return null
+      if (!nextBotId) return matches[0]
+      return matches.find((b) => safeString(b && b.selfId || '').trim() === nextBotId) || null
     }
 
     async function sendToChat({ chatKey, parsed, text, elements = [], images, files, via = 'rin-send', replyToMessageId = '' }) {
@@ -2961,8 +2984,8 @@ const rinBridge = (() => {
       const quoteId = safeString(replyToMessageId)
       const outboundMessageIds = []
 
-      const bot = findBot(parsed.platform)
-      if (!bot) throw new Error(`no_bot_for_platform:${parsed.platform}`)
+      const bot = findBot(parsed.platform, parsed.botId)
+      if (!bot) throw new Error(`no_bot_for_platform:${parsed.platform}${parsed.botId ? `/${parsed.botId}` : ''}`)
 
       // Telegram note: bot.internal uses JSON POST and does not support uploading raw binary buffers.
       // Use it only for text messages; send images through the normal Satori sendMessage path.
@@ -3051,8 +3074,9 @@ const rinBridge = (() => {
     function getChatCtx(session) {
 		      const platform = session.platform
 		      const chatId = pickChatId(session)
-		      const chatKey = `${platform}:${chatId}`
-		      const chatDir = path.join(chatsRoot, platform, String(chatId))
+        const botId = safeString(session && session.bot && session.bot.selfId || '').trim()
+		      const chatKey = composeRuntimeChatKey(platform, chatId, botId)
+		      const chatDir = chatDirForParsed({ platform, botId, chatId })
 	      const statePath = path.join(chatDir, 'state.json')
       ensureDir(path.join(chatDir, 'logs'))
       ensureDir(path.join(chatDir, 'batches'))
@@ -3178,7 +3202,7 @@ const rinBridge = (() => {
 	        Object.assign(state, merged)
 	        writeJsonAtomic(statePath, state)
 	      }
-	      return { platform, chatId, chatKey, chatDir, state, saveState }
+	      return { platform, botId, chatId, chatKey, chatDir, state, saveState }
 	    }
 
     function extractCommandLikeText(text) {
@@ -3524,7 +3548,7 @@ const rinBridge = (() => {
       try {
         if (parsed && safeString(parsed.platform) === 'telegram') {
           const chatId = safeString(parsed.chatId || '')
-          const bot = findBot('telegram')
+          const bot = findBot('telegram', safeString(parsed.botId || ''))
           const sendTyping = async () => {
             if (!chatId || !bot || !bot.internal || typeof bot.internal.sendChatAction !== 'function') return
             try { await bot.internal.sendChatAction({ chat_id: chatId, action: 'typing' }) } catch {}
@@ -4438,7 +4462,7 @@ const rinBridge = (() => {
 
       const trimmed = (result.lastMessage || '').trim()
       const parsed = safeString(chatKey || '') ? parseChatKey(safeString(chatKey || '')) : null
-      const chatDir = parsed ? path.join(chatsRoot, parsed.platform, String(parsed.chatId)) : ''
+      const chatDir = parsed ? chatDirForParsed(parsed) : ''
       if (runtimeKind === 'pi' && parsed && Number(result.code || 0) === 0) {
         const normalized = normalizeFinalAgentMessage(result.lastMessage || '')
         if (normalized.kind === 'reply') {
@@ -4587,7 +4611,8 @@ const rinBridge = (() => {
 	    async function activate(session) {
 	      const platform = session.platform
 	      const chatId = pickChatId(session)
-	      const chatKey = `${platform}:${chatId}`
+        const botId = safeString(session && session.bot && session.bot.selfId || '').trim()
+	      const chatKey = composeRuntimeChatKey(platform, chatId, botId)
         const primaryRuntime = primaryRuntimeForChat(chatKey)
 
 	      const prev = perChat.get(chatKey) || Promise.resolve()
@@ -5176,7 +5201,7 @@ const rinBridge = (() => {
             if (!messageId) return reply({ ok: false, error: 'missing_messageId' })
             const parsed = parseChatKey(chatKey)
             if (!parsed) return reply({ ok: false, error: 'invalid_chatKey' })
-            const chatDir = path.join(chatsRoot, parsed.platform, String(parsed.chatId))
+            const chatDir = chatDirForParsed(parsed)
             const record = findLoggedMessageById(chatDir, messageId)
             if (!record) return reply({ ok: false, error: 'message_not_found' })
             return reply({ ok: true, message: buildHistoryLookupMessage(chatKey, record) })
@@ -5223,6 +5248,8 @@ const rinBridge = (() => {
 	      logger.info(`ctl socket ready: ${ctlSockPath}`)
 	    })
 
+      const tuiRpcServer = startDaemonTuiRpcServer({ repoRoot, stateRoot: homeRoot, logger })
+
 	    // Schedule runner (inspection + timer): runs inside this single daemon.
 	    const scheduleTickMs = Math.max(Number(config.scheduleTickMs || 0), 5000)
     const scheduleTimer = setInterval(() => { void tickSchedulesOnce().catch(() => {}) }, scheduleTickMs)
@@ -5237,54 +5264,53 @@ const rinBridge = (() => {
 
             const clearedStaleProcessing: string[] = []
             try {
-              const platforms = fs.readdirSync(chatsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
-              for (const platform of platforms) {
-                const pdir = path.join(chatsRoot, platform)
-                const chats = fs.readdirSync(pdir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
-                for (const chatId of chats) {
-                  const st = readJson(path.join(pdir, chatId, 'state.json'), null)
-                  if (!st || typeof st !== 'object' || !Boolean(st.processing)) continue
-                  const chatKey = safeString(st.chatKey || `${platform}:${chatId}`)
-                  if (!chatKey) continue
+              const chatStates = listChatStateFiles(chatsRoot)
+              for (const entry of chatStates) {
+                const platform = safeString(entry && entry.platform || '')
+                const chatId = safeString(entry && entry.chatId || '')
+                const botId = safeString(entry && entry.botId || '')
+                const st = readJson(entry.statePath, null)
+                if (!st || typeof st !== 'object' || !Boolean(st.processing)) continue
+                const chatKey = safeString(st.chatKey || composeRuntimeChatKey(platform, chatId, botId))
+                if (!chatKey) continue
 
-                  let stale = false
-                  const pid = Number(st.processingPid || 0)
-                  const startedAt = Number(st.processingStartedAt || 0)
-                  if (Number.isFinite(pid) && pid > 0) {
-                    try {
-                      process.kill(pid, 0)
-                    } catch (e) {
-                      if (!e || (e as any).code === 'ESRCH') stale = true
-                    }
-                  } else if (!startedAt || nowMs() - startedAt > 5 * 60 * 1000) {
-                    stale = true
-                  }
-                  if (!stale) continue
-
+                let stale = false
+                const pid = Number(st.processingPid || 0)
+                const startedAt = Number(st.processingStartedAt || 0)
+                if (Number.isFinite(pid) && pid > 0) {
                   try {
-                    const lastSeq = Number(st.lastAgentInboundSeq || 0)
-                    const lastProcessed = Number(st.lastProcessedSeq || 0)
-                    const resetSeq = Number(st.lastResetSeq || 0)
-                    const effectiveProcessed = Math.max(
-                      Number.isFinite(lastProcessed) ? lastProcessed : 0,
-                      Number.isFinite(resetSeq) ? resetSeq : 0,
-                    )
-                    const hasUnprocessed = Number.isFinite(lastSeq) && Number.isFinite(effectiveProcessed) && lastSeq > effectiveProcessed
-                    const keepForceContinue = Boolean(st.forceContinue) || !hasUnprocessed
-                    await withChatLock(chatKey, async () => {
-                      const parsed = parseChatKey(chatKey)
-                      if (!parsed) return
-                      const pseudo0 = pseudoSessionFromParsed(parsed, '')
-                      const { state, saveState } = getChatCtx(pseudo0)
-                      resetEphemeral(chatKey)
-                      clearPersistentRunFlags(state, { keepPendingTrigger: true, keepResetPending: true })
-                      state.pendingWake = true
-                      if (keepForceContinue) state.forceContinue = true
-                      saveState()
-                    }, { op: 'boot_clear_stale_processing', chatKey })
-                    clearedStaleProcessing.push(chatKey)
-                  } catch {}
+                    process.kill(pid, 0)
+                  } catch (e) {
+                    if (!e || (e as any).code === 'ESRCH') stale = true
+                  }
+                } else if (!startedAt || nowMs() - startedAt > 5 * 60 * 1000) {
+                  stale = true
                 }
+                if (!stale) continue
+
+                try {
+                  const lastSeq = Number(st.lastAgentInboundSeq || 0)
+                  const lastProcessed = Number(st.lastProcessedSeq || 0)
+                  const resetSeq = Number(st.lastResetSeq || 0)
+                  const effectiveProcessed = Math.max(
+                    Number.isFinite(lastProcessed) ? lastProcessed : 0,
+                    Number.isFinite(resetSeq) ? resetSeq : 0,
+                  )
+                  const hasUnprocessed = Number.isFinite(lastSeq) && Number.isFinite(effectiveProcessed) && lastSeq > effectiveProcessed
+                  const keepForceContinue = Boolean(st.forceContinue) || !hasUnprocessed
+                  await withChatLock(chatKey, async () => {
+                    const parsed = parseChatKey(chatKey)
+                    if (!parsed) return
+                    const pseudo0 = pseudoSessionFromParsed(parsed, '')
+                    const { state, saveState } = getChatCtx(pseudo0)
+                    resetEphemeral(chatKey)
+                    clearPersistentRunFlags(state, { keepPendingTrigger: true, keepResetPending: true })
+                    state.pendingWake = true
+                    if (keepForceContinue) state.forceContinue = true
+                    saveState()
+                  }, { op: 'boot_clear_stale_processing', chatKey })
+                  clearedStaleProcessing.push(chatKey)
+                } catch {}
               }
             } catch {}
             if (clearedStaleProcessing.length) {
@@ -5293,12 +5319,12 @@ const rinBridge = (() => {
 
 	          const catchUp = new Map<string, string>()
 	          try {
-	            const platforms = fs.readdirSync(chatsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
-	            for (const platform of platforms) {
-	              const pdir = path.join(chatsRoot, platform)
-	              const chats = fs.readdirSync(pdir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
-	              for (const chatId of chats) {
-	                const st = readJson(path.join(pdir, chatId, 'state.json'), null)
+              const chatStates = listChatStateFiles(chatsRoot)
+              for (const entry of chatStates) {
+                const platform = safeString(entry && entry.platform || '')
+                const chatId = safeString(entry && entry.chatId || '')
+                const botId = safeString(entry && entry.botId || '')
+	                const st = readJson(entry.statePath, null)
 	                if (!st || typeof st !== 'object') continue
 	                const lastSeq = Number(st.lastAgentInboundSeq || 0)
 	                const lastProcessed = Number(st.lastProcessedSeq || 0)
@@ -5328,11 +5354,10 @@ const rinBridge = (() => {
                       Boolean(pending && (pending as any).isMentioned)
 
                   if (!shouldCatchUp) continue
-	                const chatKey = safeString(st.chatKey || `${platform}:${chatId}`)
+	                const chatKey = safeString(st.chatKey || composeRuntimeChatKey(platform, chatId, botId))
 	                const lastText = safeString(st?.pendingTrigger?.content || st?.lastAgentInboundText || '')
 	                catchUp.set(chatKey, lastText)
-	              }
-	            }
+                }
 	          } catch {}
 
 	          if (!catchUp.size) return
@@ -5342,7 +5367,7 @@ const rinBridge = (() => {
 	          for (const chatKey of chatKeys) {
 	            const parsed = parseChatKey(chatKey)
 	            if (!parsed) continue
-	            if (!findBot(parsed.platform)) continue
+	            if (!findBot(parsed.platform, parsed.botId)) continue
 
 	            // On boot, clear stale resume flags so we don't "recover twice".
 	            try {
@@ -5369,7 +5394,7 @@ const rinBridge = (() => {
 	            let content = safeString(catchUp.get(chatKey) || '')
 	            if (!content) {
 	              try {
-	                const chatDir = path.join(chatsRoot, parsed.platform, String(parsed.chatId))
+	                const chatDir = chatDirForParsed(parsed)
 	                const logsDir = path.join(chatDir, 'logs')
 	                const files = fs.existsSync(logsDir)
 	                  ? fs.readdirSync(logsDir).filter((n) => n.endsWith('.jsonl')).sort()
@@ -5435,6 +5460,7 @@ const rinBridge = (() => {
 	      try { clearInterval(scheduleTimer) } catch {}
 	      try { ctlServer.close() } catch {}
 	      try { fs.rmSync(ctlSockPath, { force: true }) } catch {}
+        try { tuiRpcServer && typeof tuiRpcServer.close === 'function' && tuiRpcServer.close() } catch {}
         try {
           if (codexAppServerSupervisor && typeof codexAppServerSupervisor.forceRestart === 'function') {
             codexAppServerSupervisor.forceRestart('daemon_dispose')
@@ -5507,7 +5533,8 @@ function daemonRuntimeLocaleDir() {
 
 // When compiled, this file runs from `dist/daemon.js`.
 const daemonDir = path.resolve(__dirname, '..')
-const homeRoot = path.resolve(path.join(os.homedir(), '.rin'))
+const daemonLayout = resolveRinLayout({ sourceHint: daemonDir })
+const homeRoot = daemonLayout.homeRoot
 const dataDir = path.join(homeRoot, 'data')
 ensureDir(dataDir)
 const restartMarkerPath = path.join(dataDir, 'restart.json')
@@ -6032,19 +6059,23 @@ function patchOneBotAdapterFileNoticesOnce() {
 }
 
 function validateDaemonConfig(configPath: string, config: RinDaemonConfig) {
-  const onebot = findPluginConfig(config?.plugins, 'adapter-onebot') as Record<string, any> | null
-  const telegram = findPluginConfig(config?.plugins, 'adapter-telegram') as Record<string, any> | null
-  if (!onebot && !telegram) {
+  const onebots = findPluginConfigs(config?.plugins, 'adapter-onebot').map((entry) => entry.value as Record<string, any>)
+  const telegrams = findPluginConfigs(config?.plugins, 'adapter-telegram').map((entry) => entry.value as Record<string, any>)
+  if (!onebots.length && !telegrams.length) {
     throw new Error(`daemon_config_missing_adapters:${configPath}`)
   }
-  if (onebot && !topSafeString(onebot.endpoint)) {
-    throw new Error(`daemon_config_missing_field:adapter-onebot.endpoint`)
+  for (const onebot of onebots) {
+    if (!topSafeString(onebot && onebot.endpoint)) {
+      throw new Error(`daemon_config_missing_field:adapter-onebot.endpoint`)
+    }
+    if (!topSafeString(onebot && onebot.selfId)) {
+      throw new Error(`daemon_config_missing_field:adapter-onebot.selfId`)
+    }
   }
-  if (onebot && !topSafeString(onebot.selfId)) {
-    throw new Error(`daemon_config_missing_field:adapter-onebot.selfId`)
-  }
-  if (telegram && !topSafeString(telegram.token)) {
-    throw new Error(`daemon_config_missing_field:adapter-telegram.token`)
+  for (const telegram of telegrams) {
+    if (!topSafeString(telegram && telegram.token)) {
+      throw new Error(`daemon_config_missing_field:adapter-telegram.token`)
+    }
   }
 }
 

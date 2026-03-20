@@ -58,7 +58,14 @@ Rin 想从“持续留下来”开始。
 **1. 安装**
 
 ```bash
+# 交互式安装向导（会引导选择运行目录、provider、聊天桥接）
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# 指定自定义运行目录
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# 只体验安装流程，不落盘
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 ```
 
 **2. 打开它**
@@ -75,15 +82,22 @@ rin
 
 ### 环境要求
 
-- 支持用户级 `systemd` 的 Linux 兼容环境
+- Linux、macOS，或 Windows（Windows 上请用 Git Bash / 兼容 POSIX 的 shell 运行 `install.sh`）
+- 后台 daemon 会在 `systemd`、`launchd`、分离后台进程之间自动选一个可用后端
 - Node.js >= 22
 - `npm`、`git`、`mktemp`
 
 ### 快速安装
 
 ```bash
-# 安装最新 main
+# 用交互式安装向导安装最新 main
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
+
+# 安装到自定义运行目录
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --state-root ~/rin-home
+
+# 只预览安装结果，不写入环境
+curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh -s -- --dry-run
 
 # 安装指定 ref
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | RIN_REF=main sh
@@ -96,7 +110,7 @@ git clone https://github.com/THE-cattail/rin.git
 cd rin
 npm ci
 npm run build
-RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
+RIN_REPO_URL="$(pwd)" ./install.sh --current-user
 ```
 
 ### 启动 Rin

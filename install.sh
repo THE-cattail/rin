@@ -25,8 +25,51 @@ run_npm_install() {
   fi
 }
 
+spinner() {
+  pid="$1"
+  label="$2"
+  frames='|/-\\'
+  i=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    frame=$(printf '%s' "$frames" | cut -c $((i % 4 + 1)))
+    printf '\r[%s] %s' "$frame" "$label" >&2
+    i=$((i + 1))
+    sleep 0.1
+  done
+}
+
+run_quiet() {
+  label="$1"
+  shift
+  log_file="$TMP_ROOT/$(date +%s)-$$.log"
+  (
+    "$@"
+  ) >"$log_file" 2>&1 &
+  cmd_pid=$!
+  spinner "$cmd_pid" "$label" &
+  spinner_pid=$!
+  wait_status=0
+  if ! wait "$cmd_pid"; then
+    wait_status=$?
+  fi
+  kill "$spinner_pid" >/dev/null 2>&1 || true
+  wait "$spinner_pid" 2>/dev/null || true
+  if [ "$wait_status" -eq 0 ]; then
+    printf '\r[✓] %s\n' "$label" >&2
+    rm -f "$log_file"
+    return 0
+  fi
+  printf '\r[✗] %s\n' "$label" >&2
+  if [ -f "$log_file" ]; then
+    printf '\n---- command output ----\n' >&2
+    cat "$log_file" >&2
+    printf '------------------------\n' >&2
+  fi
+  return "$wait_status"
+}
+
 if [ "$#" -eq 0 ]; then
-  set -- --current-user --yes
+  set -- --current-user
 fi
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rin-install.XXXXXX")"
@@ -37,14 +80,20 @@ trap cleanup EXIT INT TERM
 
 CLONE_DIR="$TMP_ROOT/repo"
 
-echo "==> Cloning Rin from $REPO_URL ($REF)"
-if ! git clone --depth 1 --branch "$REF" "$REPO_URL" "$CLONE_DIR"; then
+printf '[…] Preparing Rin installer\n' >&2
+if ! run_quiet "Cloning Rin from $REPO_URL ($REF)" git clone --depth 1 --branch "$REF" "$REPO_URL" "$CLONE_DIR"; then
   rm -rf "$CLONE_DIR"
-  git clone --depth 1 "$REPO_URL" "$CLONE_DIR"
-  (cd "$CLONE_DIR" && git checkout "$REF")
+  run_quiet "Cloning Rin from $REPO_URL (fallback)" git clone --depth 1 "$REPO_URL" "$CLONE_DIR"
+  run_quiet "Checking out $REF" sh -c "cd \"$CLONE_DIR\" && git checkout \"$REF\""
 fi
 
 cd "$CLONE_DIR"
-run_npm_install
-npm run -s build
-node ./dist/index.js __install "$@" --source-repo "$REPO_URL" --source-ref "$REF"
+run_quiet "Installing npm dependencies" sh -c '
+  if [ -f package-lock.json ]; then
+    npm ci --no-fund --no-audit
+  else
+    npm install --no-fund --no-audit
+  fi
+'
+run_quiet "Building Rin" npm run -s build
+exec node ./dist/index.js __install "$@" --source-repo "$REPO_URL" --source-ref "$REF"

@@ -11,7 +11,9 @@ import {
   lockRootDir,
   lockFilePathForKey,
   acquireExclusiveFileLock,
+  expandHomeAgainst,
   resolveRinLayout,
+  resolveRinHomeRoot,
 } from './runtime-paths'
 
 const fs = require('node:fs')
@@ -153,6 +155,419 @@ const DEFAULT_RUNTIME_AGENTS_MD = [
   '- This file resides in the local runtime state and is excluded from the public source tree.',
   '',
 ].join('\n')
+
+const AUTH_KEY_BY_PROVIDER = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  'openai-codex': 'openai',
+  google: 'google',
+  gemini: 'google',
+  mistral: 'mistral',
+  groq: 'groq',
+  cerebras: 'cerebras',
+  xai: 'xai',
+  openrouter: 'openrouter',
+  'vercel-ai-gateway': 'vercel-ai-gateway',
+  zai: 'zai',
+  opencode: 'opencode',
+  'opencode-go': 'opencode-go',
+  huggingface: 'huggingface',
+  'kimi-coding': 'kimi-coding',
+  minimax: 'minimax',
+  'minimax-cn': 'minimax-cn',
+}
+
+function authKeyForProvider(provider = '') {
+  const key = safeString(provider).trim().toLowerCase()
+  return AUTH_KEY_BY_PROVIDER[key] || key
+}
+
+function splitCommaList(value = '') {
+  return safeString(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function installBridgeAccountName(platform, value, index) {
+  const base = safeString(value).trim().replace(/[^A-Za-z0-9._-]+/g, '-')
+  return base || `${platform}-${index}`
+}
+
+function installBridgeBotId(platform, config = {}) {
+  if (safeString(platform).trim() === 'telegram') {
+    const token = safeString(config && config.token).trim()
+    const match = token.match(/^(\d+):/)
+    return match ? match[1] : ''
+  }
+  if (safeString(platform).trim() === 'onebot') return safeString(config && config.selfId).trim()
+  return ''
+}
+
+function openInstallPromptInterface() {
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    return {
+      rl: readline.createInterface({ input: process.stdin, output: process.stderr }),
+      close() {},
+    }
+  }
+  try {
+    const input = fs.createReadStream('/dev/tty')
+    const output = fs.createWriteStream('/dev/tty')
+    const rl = readline.createInterface({ input, output })
+    return {
+      rl,
+      close() {
+        try { rl.close() } catch {}
+        try { input.close() } catch {}
+        try { output.close() } catch {}
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+const INSTALL_PROVIDER_PRESETS = [
+  {
+    value: 'anthropic',
+    label: 'Claude / Anthropic API key',
+    authKey: 'anthropic',
+    models: [
+      { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4 — balanced default' },
+      { value: 'claude-opus-4-20250514', label: 'Claude Opus 4 — stronger, pricier' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'openai-codex',
+    label: 'ChatGPT / Codex subscription',
+    authKey: 'openai',
+    models: [
+      { value: 'gpt-5.4', label: 'GPT-5.4 — recommended' },
+      { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'openai',
+    label: 'OpenAI API',
+    authKey: 'openai',
+    models: [
+      { value: 'gpt-5.4', label: 'GPT-5.4 — newest default' },
+      { value: 'gpt-4.1', label: 'GPT-4.1' },
+      { value: 'gpt-4o', label: 'GPT-4o' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'google',
+    label: 'Gemini / Google',
+    authKey: 'google',
+    models: [
+      { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — stronger reasoning' },
+      { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — faster / cheaper' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'openrouter',
+    label: 'OpenRouter',
+    authKey: 'openrouter',
+    models: [
+      { value: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4 via OpenRouter' },
+      { value: 'openai/gpt-4.1', label: 'GPT-4.1 via OpenRouter' },
+      { value: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro via OpenRouter' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'groq',
+    label: 'Groq',
+    authKey: 'groq',
+    models: [
+      { value: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B Versatile' },
+      { value: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
+      { value: 'custom', label: 'Custom model id' },
+    ],
+  },
+  {
+    value: 'custom',
+    label: 'Other / custom provider',
+    authKey: '',
+    models: [
+      { value: 'custom', label: 'Enter custom model id' },
+    ],
+  },
+]
+
+const INSTALL_THINKING_OPTIONS = [
+  { value: '', label: 'Leave unset' },
+  { value: 'off', label: 'Off' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+]
+
+function findInstallProviderPreset(value = '') {
+  const key = safeString(value).trim()
+  return INSTALL_PROVIDER_PRESETS.find((item) => item.value === key) || INSTALL_PROVIDER_PRESETS[0]
+}
+
+function findChoiceIndex(options, value) {
+  const index = options.findIndex((item) => item && item.value === value)
+  return index >= 0 ? index : 0
+}
+
+async function promptInstallChoiceWithDefault(rl, question, options, fallbackValue = '') {
+  console.error(question)
+  const fallbackIndex = findChoiceIndex(options, fallbackValue)
+  options.forEach((opt, index) => {
+    const marker = index === fallbackIndex ? ' (default)' : ''
+    console.error(`  ${index + 1}) ${opt.label}${marker}`)
+  })
+  while (true) {
+    const raw = safeString(await rl.question('Select an option: ')).trim()
+    if (!raw) return options[fallbackIndex].value
+    const idx = Number(raw)
+    if (Number.isFinite(idx) && idx >= 1 && idx <= options.length) return options[idx - 1].value
+  }
+}
+
+async function collectInstallAuthConfig(rl, provider = '', presetAuthKey = '') {
+  const mode = await promptInstallChoiceWithDefault(rl, 'How should Rin store provider credentials', [
+    { value: 'skip', label: 'Skip for now' },
+    { value: 'literal', label: 'Store a literal API key in auth.json' },
+    { value: 'env', label: 'Store an environment variable name in auth.json' },
+    { value: 'command', label: 'Store a shell command (!command) in auth.json' },
+  ], 'skip')
+  if (mode === 'skip') return {}
+
+  const defaultAuthKey = safeString(presetAuthKey || authKeyForProvider(provider)).trim()
+  const authKey = safeString(provider).trim() === 'custom'
+    ? await promptInstallText(rl, 'auth.json provider key', defaultAuthKey)
+    : defaultAuthKey
+
+  let keyValue = ''
+  if (mode === 'literal') keyValue = await promptInstallText(rl, 'API key', '')
+  if (mode === 'env') keyValue = await promptInstallText(rl, 'Environment variable name', '')
+  if (mode === 'command') keyValue = `!${safeString(await promptInstallText(rl, 'Shell command (without leading !)', '')).trim()}`
+
+  if (!safeString(authKey).trim() || !safeString(keyValue).trim()) return {}
+  return {
+    [safeString(authKey).trim()]: {
+      type: 'api_key',
+      key: safeString(keyValue).trim(),
+    },
+  }
+}
+
+async function collectInstallProviderConfig(rl, defaults = {}) {
+  const fallbackProvider = safeString(defaults.provider || 'anthropic').trim() || 'anthropic'
+  const providerChoice = await promptInstallChoiceWithDefault(
+    rl,
+    'Pick how you want Rin to talk to models',
+    [
+      ...INSTALL_PROVIDER_PRESETS.map((item) => ({ value: item.value, label: item.label })),
+      { value: 'skip', label: 'Skip for now' },
+    ],
+    fallbackProvider,
+  )
+  if (providerChoice === 'skip') return null
+
+  const providerPreset = findInstallProviderPreset(providerChoice)
+  const provider = providerChoice === 'custom'
+    ? await promptInstallText(rl, 'Custom provider id', '')
+    : providerChoice
+
+  const modelChoice = await promptInstallChoiceWithDefault(
+    rl,
+    'Choose the default model',
+    providerPreset.models,
+    safeString(defaults.model || providerPreset.models[0]?.value || 'custom').trim(),
+  )
+  const model = modelChoice === 'custom'
+    ? await promptInstallText(rl, 'Custom model id', '')
+    : modelChoice
+
+  const thinking = await promptInstallChoiceWithDefault(
+    rl,
+    'Choose the default thinking level',
+    INSTALL_THINKING_OPTIONS,
+    safeString(defaults.thinking || 'medium').trim(),
+  )
+
+  const authEntries = await collectInstallAuthConfig(rl, provider, providerPreset.authKey)
+
+  return {
+    settingsPatch: {
+      defaultProvider: safeString(provider).trim(),
+      defaultModel: safeString(model).trim(),
+      defaultThinkingLevel: safeString(thinking).trim(),
+    },
+    authEntries,
+  }
+}
+
+async function collectOneBotAccounts(rl) {
+  const accounts = []
+  let keepAdding = true
+  while (keepAdding) {
+    const index = accounts.length + 1
+    const endpointMode = await promptInstallChoiceWithDefault(rl, 'OneBot endpoint', [
+      { value: 'napcat-local', label: 'NapCat / local default (ws://127.0.0.1:6700)' },
+      { value: 'custom', label: 'Custom endpoint' },
+    ], 'napcat-local')
+    const endpoint = endpointMode === 'custom'
+      ? await promptInstallText(rl, 'OneBot WebSocket endpoint', 'ws://127.0.0.1:6700')
+      : 'ws://127.0.0.1:6700'
+    const selfId = await promptInstallText(rl, 'OneBot self ID', '')
+    const saveToken = await promptInstallYesNo(rl, 'Does this OneBot account require a token', false)
+    const token = saveToken ? await promptInstallText(rl, 'OneBot token', '') : ''
+    const ownerUserIds = splitCommaList(await promptInstallText(rl, 'Owner user IDs for this account (comma-separated, empty to skip)', ''))
+    const name = installBridgeAccountName('onebot', '', index)
+    accounts.push({
+      platform: 'onebot',
+      name,
+      config: { name, protocol: 'ws', endpoint, selfId, token, owners: ownerUserIds },
+    })
+    keepAdding = await promptInstallYesNo(rl, 'Add another OneBot account', false)
+  }
+  return accounts
+}
+
+async function collectTelegramAccounts(rl) {
+  const accounts = []
+  let keepAdding = true
+  while (keepAdding) {
+    const index = accounts.length + 1
+    const token = await promptInstallText(rl, 'Telegram bot token', '')
+    const protocol = await promptInstallChoiceWithDefault(rl, 'Telegram delivery mode', [
+      { value: 'polling', label: 'Polling (recommended for simple setups)' },
+      { value: 'webhook', label: 'Webhook' },
+    ], 'polling')
+    const ownerUserIds = splitCommaList(await promptInstallText(rl, 'Owner user IDs for this bot (comma-separated, empty to skip)', ''))
+    const name = installBridgeAccountName('telegram', '', index)
+    accounts.push({
+      platform: 'telegram',
+      name,
+      config: { name, token, protocol: safeString(protocol).trim() || 'polling', slash: true, owners: ownerUserIds },
+    })
+    keepAdding = await promptInstallYesNo(rl, 'Add another Telegram bot', false)
+  }
+  return accounts
+}
+
+async function collectInstallBridgeAccounts(rl) {
+  const bridgeMode = await promptInstallChoiceWithDefault(rl, 'Configure chat bridge accounts', [
+    { value: 'skip', label: 'Skip for now' },
+    { value: 'onebot', label: 'Configure OneBot / NapCat / QQ only' },
+    { value: 'telegram', label: 'Configure Telegram only' },
+    { value: 'both', label: 'Configure both OneBot and Telegram' },
+  ], 'skip')
+  if (bridgeMode === 'skip') return null
+
+  const accounts = []
+  if (bridgeMode === 'onebot' || bridgeMode === 'both') accounts.push(...await collectOneBotAccounts(rl))
+  if (bridgeMode === 'telegram' || bridgeMode === 'both') accounts.push(...await collectTelegramAccounts(rl))
+  if (!accounts.length) return null
+
+  const onebot = accounts.filter((item) => item.platform === 'onebot').map((item) => item.config)
+  const telegram = accounts.filter((item) => item.platform === 'telegram').map((item) => item.config)
+  const ownerAliases = []
+  for (const item of accounts) {
+    const botId = installBridgeBotId(item.platform, item.config)
+    const owners = Array.isArray(item.config.owners) ? item.config.owners : []
+    for (const userId of owners) ownerAliases.push({ platform: item.platform, userId, botId })
+  }
+
+  return {
+    settingsPatch: {
+      koishi: {
+        ...(onebot.length ? { onebot } : {}),
+        ...(telegram.length ? { telegram } : {}),
+      },
+    },
+    ownerAliases,
+  }
+}
+
+async function collectInstallStateRoot(rl, homeDir, requestedStateRoot = '') {
+  const defaultStateRoot = installStateRootForHome(homeDir)
+  const requested = safeString(requestedStateRoot).trim()
+  const options = [{ value: 'default', label: `Use the default runtime root (${defaultStateRoot})` }]
+  let fallback = 'default'
+  if (requested && path.resolve(expandHomeAgainst(homeDir, requested)) !== path.resolve(defaultStateRoot)) {
+    options.push({ value: 'requested', label: `Use the preset runtime root (${path.resolve(expandHomeAgainst(homeDir, requested))})` })
+    fallback = 'requested'
+  }
+  options.push({ value: 'custom', label: 'Enter a custom runtime root' })
+
+  const choice = await promptInstallChoiceWithDefault(rl, 'Choose where Rin should keep its runtime home', options, fallback)
+  if (choice === 'default') return defaultStateRoot
+  if (choice === 'requested') return path.resolve(expandHomeAgainst(homeDir, requested))
+  return await promptInstallText(rl, 'Custom runtime root', requested || defaultStateRoot)
+}
+
+function mergeInstallConfigSections(...configs) {
+  const out = { settingsPatch: {}, authEntries: {}, ownerAliases: [] }
+  for (const config of configs) {
+    if (!config || typeof config !== 'object') continue
+    out.settingsPatch = mergeInstallObject(out.settingsPatch, config.settingsPatch)
+    out.authEntries = mergeInstallObject(out.authEntries, config.authEntries)
+    out.ownerAliases = [...out.ownerAliases, ...(Array.isArray(config.ownerAliases) ? config.ownerAliases : [])]
+  }
+  return out
+}
+
+function daemonManagerChoicesForPlatform() {
+  if (process.platform === 'darwin') {
+    return [
+      { value: 'auto', label: 'Auto (prefer launchd, fallback to detached)' },
+      { value: 'launchd', label: 'launchd agent' },
+      { value: 'detached', label: 'Detached background process' },
+    ]
+  }
+  if (process.platform === 'win32') {
+    return [
+      { value: 'auto', label: 'Auto (detached background process)' },
+      { value: 'detached', label: 'Detached background process' },
+    ]
+  }
+  return [
+    { value: 'auto', label: 'Auto (prefer systemd, fallback to detached)' },
+    { value: 'systemd', label: 'systemd user service' },
+    { value: 'detached', label: 'Detached background process' },
+  ]
+}
+
+async function collectInstallServiceManager(rl, fallbackValue = 'auto') {
+  return await promptInstallChoiceWithDefault(rl, 'Choose how Rin should keep its background daemon running', daemonManagerChoicesForPlatform(), fallbackValue)
+}
+
+function summarizeInstallPlan({ targetUser, requestedStateRoot, installConfig, serviceManager = 'auto', dryRun = false }: any = {}) {
+  const settings = installConfig && installConfig.settingsPatch && typeof installConfig.settingsPatch === 'object'
+    ? installConfig.settingsPatch
+    : {}
+  const koishi = settings && settings.koishi && typeof settings.koishi === 'object' ? settings.koishi : {}
+  const onebotCount = Array.isArray(koishi.onebot) ? koishi.onebot.length : koishi.onebot ? 1 : 0
+  const telegramCount = Array.isArray(koishi.telegram) ? koishi.telegram.length : koishi.telegram ? 1 : 0
+  const authKeys = Object.keys(installConfig && installConfig.authEntries && typeof installConfig.authEntries === 'object' ? installConfig.authEntries : {})
+  return [
+    dryRun ? 'Install summary (dry run):' : 'Install summary:',
+    `  User: ${safeString(targetUser && targetUser.username || '')}`,
+    `  Runtime root: ${safeString(requestedStateRoot || '')}`,
+    `  Service backend: ${safeString(serviceManager || 'auto')}`,
+    `  Default provider: ${safeString(settings.defaultProvider || '(unset)')}`,
+    `  Default model: ${safeString(settings.defaultModel || '(unset)')}`,
+    `  Thinking: ${safeString(settings.defaultThinkingLevel || '(unset)')}`,
+    `  Saved auth entries: ${authKeys.length ? authKeys.join(', ') : '(none)'}`,
+    `  Bridge accounts: OneBot ${onebotCount}, Telegram ${telegramCount}`,
+    dryRun ? '  Writes: skipped (preview only)' : '  Writes: enabled',
+  ].join('\n')
+}
 
 function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = '' } = {}) {
   const repo = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
@@ -326,8 +741,14 @@ function ensureRinTuiHost() {
   return ensureRinDistFile('tui.js')
 }
 
-function installStateRootForHome(homeDir) {
-  return path.join(path.resolve(homeDir), '.rin')
+function ensureRinTuiDebugHost() {
+  return ensureRinDistFile('tui-debug.js')
+}
+
+function installStateRootForHome(homeDir, stateRoot = '') {
+  const explicit = safeString(stateRoot).trim()
+  if (explicit) return path.resolve(expandHomeAgainst(homeDir, explicit))
+  return resolveRinHomeRoot(homeDir)
 }
 
 function lookupUserRecord(username) {
@@ -384,7 +805,7 @@ function chownRecursiveIfPossible(targetPath, uid, gid) {
 
 function ensureInstallableBundle(bundleRoot = '') {
   const root = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
-  for (const rel of ['dist/index.js', 'dist/brain.js', 'dist/daemon.js', 'dist/tui.js']) {
+  for (const rel of ['dist/index.js', 'dist/brain.js', 'dist/daemon.js', 'dist/tui.js', 'dist/tui-debug.js']) {
     const filePath = path.join(root, rel)
     if (!fs.existsSync(filePath)) throw new Error(`rin_dist_missing:${rel.replace(/^dist\//, '')}`)
   }
@@ -447,17 +868,24 @@ function installRuntimeBundle(stateRoot, { bundleRoot = '', releaseId = '' } = {
   return { releaseId: nextReleaseId, releaseRoot, currentRoot: currentLink, prunedReleaseIds }
 }
 
+function installedLauncherText({ stateRoot }) {
+  const targetPath = path.join(stateRoot, 'app', 'current', 'dist', 'index.js')
+  return [
+    '#!/usr/bin/env sh',
+    `export RIN_HOME=${JSON.stringify(path.resolve(stateRoot))}`,
+    `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(targetPath)} "$@"`,
+    '',
+  ].join('\n')
+}
+
 function createInstalledLauncher({ stateRoot, userHome }) {
   const localBinDir = path.join(userHome, '.local', 'bin')
   ensureDir(localBinDir)
   const launcherPath = path.join(localBinDir, 'rin')
   const targetPath = path.join(stateRoot, 'app', 'current', 'dist', 'index.js')
+  const launcherText = installedLauncherText({ stateRoot })
   try { fs.rmSync(launcherPath, { force: true }) } catch {}
-  try {
-    fs.symlinkSync(targetPath, launcherPath)
-  } catch {
-    fs.copyFileSync(targetPath, launcherPath)
-  }
+  fs.writeFileSync(launcherPath, launcherText, 'utf8')
   try { fs.chmodSync(targetPath, 0o755) } catch {}
   try { fs.chmodSync(launcherPath, 0o755) } catch {}
   return launcherPath
@@ -469,66 +897,178 @@ function writeInstallMetadata(stateRoot, data) {
   return file
 }
 
+function mergeInstallObject(base, patch) {
+  const left = base && typeof base === 'object' && !Array.isArray(base) ? base : {}
+  const right = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {}
+  const out = { ...left }
+  for (const [key, value] of Object.entries(right)) {
+    if (value == null) continue
+    if (Array.isArray(value)) {
+      out[key] = JSON.parse(JSON.stringify(value))
+      continue
+    }
+    if (value && typeof value === 'object') {
+      out[key] = mergeInstallObject(out[key], value)
+      continue
+    }
+    out[key] = value
+  }
+  return out
+}
+
+function normalizeOwnerAlias(platform, userId, botId = '') {
+  const nextPlatform = safeString(platform).trim()
+  const nextUserId = safeString(userId).trim()
+  const nextBotId = safeString(botId).trim()
+  if (!nextPlatform || !nextUserId) return null
+  return nextBotId
+    ? { platform: nextPlatform, userId: nextUserId, botId: nextBotId, personId: 'owner' }
+    : { platform: nextPlatform, userId: nextUserId, personId: 'owner' }
+}
+
+function applyInstallConfiguration({ stateRoot, settingsPatch = {}, authEntries = {}, ownerAliases = [] } = {}) {
+  const settingsPath = path.join(stateRoot, 'settings.json')
+  const authPath = path.join(stateRoot, 'auth.json')
+  const identityPath = path.join(stateRoot, 'data', 'identity.json')
+
+  const currentSettings = readJson(settingsPath, {})
+  const nextSettings = mergeInstallObject(currentSettings, settingsPatch)
+  writeJsonAtomic(settingsPath, nextSettings)
+
+  const currentAuth = readJson(authPath, {})
+  const nextAuth = mergeInstallObject(currentAuth, authEntries)
+  writeJsonAtomic(authPath, nextAuth)
+
+  const identity = readJson(identityPath, { persons: { owner: { trust: 'OWNER' } }, aliases: [], trusted: [] })
+  identity.persons ||= {}
+  identity.aliases ||= []
+  identity.trusted ||= []
+  identity.persons.owner = identity.persons.owner && typeof identity.persons.owner === 'object'
+    ? { ...identity.persons.owner, trust: 'OWNER' }
+    : { trust: 'OWNER' }
+
+  for (const entry of ownerAliases.map((item) => normalizeOwnerAlias(item && item.platform, item && item.userId, item && item.botId)).filter(Boolean)) {
+    const existing = identity.aliases.find((alias) => alias
+      && alias.platform === entry.platform
+      && String(alias.userId) === entry.userId
+      && safeString(alias.botId || '') === safeString(entry.botId || ''))
+    if (existing) Object.assign(existing, entry)
+    else identity.aliases.push(entry)
+  }
+  writeJsonAtomic(identityPath, identity)
+
+  return { settingsPath, authPath, identityPath }
+}
+
 function performInstall({
   targetUser,
   homeDir,
+  stateRoot = '',
+  serviceManager = 'auto',
   overwriteManaged = true,
   sourceRepo = '',
   sourceRef = '',
   bundleRoot = '',
   releaseId = '',
   seedHomeDir = '',
+  installConfig = null,
+  dryRun = false,
 } = {}) {
   const userHome = path.resolve(homeDir)
-  const stateRoot = installStateRootForHome(userHome)
+  const resolvedStateRoot = installStateRootForHome(userHome, stateRoot)
   const resolvedBundleRoot = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
-  ensureDir(stateRoot)
-  const baseline = ensureWorkspaceBaseline(stateRoot, { overwriteManaged, bundleRoot: resolvedBundleRoot })
-  const bundle = installRuntimeBundle(stateRoot, { bundleRoot: resolvedBundleRoot, releaseId })
-  const bootstrap = ensurePiBootstrapAt({ agentDir: stateRoot, stateRoot, homeDir: path.resolve(seedHomeDir || userHome) })
-  const launcherPath = createInstalledLauncher({ stateRoot, userHome })
-  const metadataPath = writeInstallMetadata(stateRoot, {
+  const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
+  const metadataPath = path.join(resolvedStateRoot, 'install.json')
+
+  if (dryRun) {
+    const settings = installConfig && installConfig.settingsPatch && typeof installConfig.settingsPatch === 'object'
+      ? installConfig.settingsPatch
+      : {}
+    const koishi = settings && settings.koishi && typeof settings.koishi === 'object' ? settings.koishi : {}
+    const onebotCount = Array.isArray(koishi.onebot) ? koishi.onebot.length : koishi.onebot ? 1 : 0
+    const telegramCount = Array.isArray(koishi.telegram) ? koishi.telegram.length : koishi.telegram ? 1 : 0
+    return {
+      ok: true,
+      dryRun: true,
+      stateRoot: resolvedStateRoot,
+      launcherPath,
+      launcherText: installedLauncherText({ stateRoot: resolvedStateRoot }),
+      metadataPath,
+      preview: {
+        targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
+        runtimeRoot: resolvedStateRoot,
+        repoRoot: resolvedBundleRoot,
+        installSource: {
+          repo: safeString(sourceRepo).trim(),
+          ref: safeString(sourceRef).trim(),
+        },
+        serviceManager: safeString(serviceManager || 'auto').trim() || 'auto',
+        defaultProvider: safeString(settings.defaultProvider || ''),
+        defaultModel: safeString(settings.defaultModel || ''),
+        defaultThinkingLevel: safeString(settings.defaultThinkingLevel || ''),
+        bridgeAccounts: { onebot: onebotCount, telegram: telegramCount },
+      },
+      plannedChanges: [
+        `would prepare runtime root: ${resolvedStateRoot}`,
+        `would write runtime docs and managed assets under: ${resolvedStateRoot}`,
+        `would create launcher: ${launcherPath}`,
+        `would write install metadata: ${metadataPath}`,
+      ],
+    }
+  }
+
+  ensureDir(resolvedStateRoot)
+  const baseline = ensureWorkspaceBaseline(resolvedStateRoot, { overwriteManaged, bundleRoot: resolvedBundleRoot })
+  const bundle = installRuntimeBundle(resolvedStateRoot, { bundleRoot: resolvedBundleRoot, releaseId })
+  const bootstrap = ensurePiBootstrapAt({ agentDir: resolvedStateRoot, stateRoot: resolvedStateRoot, homeDir: path.resolve(seedHomeDir || userHome) })
+  const appliedConfig = installConfig && typeof installConfig === 'object'
+    ? applyInstallConfiguration({ stateRoot: resolvedStateRoot, ...installConfig })
+    : null
+  const createdLauncherPath = createInstalledLauncher({ stateRoot: resolvedStateRoot, userHome })
+  const writtenMetadataPath = writeInstallMetadata(resolvedStateRoot, {
     installedAt: new Date().toISOString(),
-    stateRoot,
-    appRoot: bundle.currentRoot,
-    launcherPath,
+    stateRoot: resolvedStateRoot,
+    appRoot: path.join(resolvedStateRoot, 'app', 'current'),
+    launcherPath: createdLauncherPath,
     targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
     installSource: {
       repo: safeString(sourceRepo).trim(),
       ref: safeString(sourceRef).trim(),
     },
+    serviceManager: safeString(serviceManager || 'auto').trim() || 'auto',
   })
   if (targetUser) {
-    chownRecursiveIfPossible(stateRoot, targetUser.uid, targetUser.gid)
+    chownRecursiveIfPossible(resolvedStateRoot, targetUser.uid, targetUser.gid)
     chownRecursiveIfPossible(path.join(userHome, '.local'), targetUser.uid, targetUser.gid)
   }
   return {
     ok: true,
-    stateRoot,
-    launcherPath,
+    stateRoot: resolvedStateRoot,
+    launcherPath: createdLauncherPath,
     baseline,
     bundle,
     bootstrap,
-    metadataPath,
+    appliedConfig,
+    metadataPath: writtenMetadataPath,
   }
 }
 
-function performUninstall({ homeDir = os.homedir(), mode = 'keep' } = {}) {
+function performUninstall({ homeDir = os.homedir(), stateRoot = '', mode = 'keep' } = {}) {
   const userHome = path.resolve(homeDir)
-  const stateRoot = installStateRootForHome(userHome)
+  const resolvedStateRoot = installStateRootForHome(userHome, stateRoot)
   const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
 
   try { fs.rmSync(launcherPath, { force: true }) } catch {}
 
   const removed = []
   if (mode === 'purge') {
-    if (fs.existsSync(stateRoot)) {
-      try { fs.rmSync(stateRoot, { recursive: true, force: true }) } catch {}
-      removed.push(stateRoot)
+    if (fs.existsSync(resolvedStateRoot)) {
+      try { fs.rmSync(resolvedStateRoot, { recursive: true, force: true }) } catch {}
+      removed.push(resolvedStateRoot)
     }
   } else {
     for (const rel of ['app', 'install.json']) {
-      const target = path.join(stateRoot, rel)
+      const target = path.join(resolvedStateRoot, rel)
       if (!fs.existsSync(target)) continue
       try { fs.rmSync(target, { recursive: true, force: true }) } catch {}
       removed.push(target)
@@ -538,7 +1078,7 @@ function performUninstall({ homeDir = os.homedir(), mode = 'keep' } = {}) {
   return {
     ok: true,
     mode,
-    stateRoot,
+    stateRoot: resolvedStateRoot,
     launcherPath,
     launcherRemoved: !fs.existsSync(launcherPath),
     removed,
@@ -566,6 +1106,7 @@ function daemonSystemdUnitText() {
     '[Service]',
     'Type=simple',
     `WorkingDirectory=${stateRoot}`,
+    `Environment=RIN_HOME=${stateRoot}`,
     `Environment=RIN_REPO_ROOT=${repoRoot}`,
     `ExecStart=${process.execPath} ${entry}`,
     'Restart=always',
@@ -752,12 +1293,14 @@ function usage(exitCode = 2) {
   console.error([
     'Usage:',
     '  rin',
+    '  rin debug',
     '  rin restart',
     '  rin update [--repo <git-url>] [--ref <branch|tag|commit>]',
     '  rin uninstall [--yes] [--keep-state | --purge]',
     '',
     'Notes:',
-    '  - `rin` starts Pi\'s native interactive mode.',
+    '  - `rin` starts the daemon-backed Rin TUI frontend.',
+    '  - `rin debug` starts the old in-process Pi InteractiveMode for recovery/debugging.',
     '  - `rin restart` restarts the Rin daemon service.',
     '  - install is handled by install.sh, not by a public CLI subcommand.',
     '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
@@ -790,22 +1333,28 @@ async function promptInstallChoice(rl, question, options) {
 
 async function cmdInstall(argv) {
   let yes = false
+  let dryRun = false
   let mode = ''
   let targetUserName = ''
   let createUserName = ''
+  let requestedStateRoot = safeString(process.env.RIN_HOME).trim()
+  let serviceManager = safeString(process.env.RIN_SERVICE_MANAGER).trim() || 'auto'
   let sourceRepo = safeString(process.env.RIN_INSTALL_SOURCE_REPO).trim()
   let sourceRef = safeString(process.env.RIN_INSTALL_SOURCE_REF).trim()
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--yes' || a === '-y') { yes = true; continue }
+    if (a === '--dry-run' || a === '-n') { dryRun = true; continue }
     if (a === '--source-repo') { sourceRepo = argv[i + 1] || ''; i++; continue }
     if (a === '--source-ref') { sourceRef = argv[i + 1] || ''; i++; continue }
+    if (a === '--service-manager') { serviceManager = argv[i + 1] || ''; i++; continue }
+    if (a === '--state-root' || a === '--home' || a === '--dir') { requestedStateRoot = argv[i + 1] || ''; i++; continue }
     if (a === '--current-user') { mode = 'current'; continue }
     if (a === '--user') { mode = 'existing'; targetUserName = argv[i + 1] || ''; i++; continue }
     if (a === '--create-user') { mode = 'create'; createUserName = argv[i + 1] || ''; i++; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin install [--yes] [--current-user | --user <name> | --create-user <name>]')
+      console.error('Usage:\n  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--current-user | --user <name> | --create-user <name>]')
       process.exit(0)
     }
     console.error(`Unknown arg: ${a}`)
@@ -813,9 +1362,11 @@ async function cmdInstall(argv) {
   }
 
   const currentUser = currentUserRecord()
-  if (!mode && !yes && process.stdin.isTTY && process.stdout.isTTY) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
-    try {
+  const promptSession = !yes ? openInstallPromptInterface() : null
+  const rl = promptSession ? promptSession.rl : null
+
+  try {
+    if (!mode && rl) {
       mode = await promptInstallChoice(rl, 'Rin install target', [
         { value: 'current', label: `Install for current user (${currentUser.username})` },
         { value: 'existing', label: 'Install for an existing user' },
@@ -823,48 +1374,61 @@ async function cmdInstall(argv) {
       ])
       if (mode === 'existing') targetUserName = await promptInstallText(rl, 'Existing username')
       if (mode === 'create') createUserName = await promptInstallText(rl, 'New username')
-      console.error('Warning: Rin operates from the target user\'s installed state and user-home file space.')
+    }
+
+    let targetUser = null
+    if (!mode || mode === 'current') {
+      targetUser = currentUser
+    } else if (mode === 'existing') {
+      targetUser = lookupUserRecord(targetUserName)
+      if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
+      if (typeof process.getuid === 'function' && process.getuid() !== 0 && targetUser.username !== currentUser.username) {
+        throw new Error('install_requires_root_for_other_user')
+      }
+    } else if (mode === 'create') {
+      const nextName = safeString(createUserName).trim()
+      if (!nextName) throw new Error('missing_create_user_name')
+      if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
+        throw new Error('install_requires_root_to_create_user')
+      }
+      if (!lookupUserRecord(nextName)) {
+        const created = spawnSync('useradd', ['-m', '-s', '/bin/bash', nextName], { stdio: 'inherit' })
+        if (created.status !== 0) throw new Error(`useradd_failed:${nextName}`)
+      }
+      targetUser = lookupUserRecord(nextName)
+      if (!targetUser) throw new Error(`user_lookup_failed:${nextName}`)
+    }
+
+    let installConfig = null
+    if (rl) {
+      requestedStateRoot = await collectInstallStateRoot(rl, targetUser.homeDir, requestedStateRoot)
+      serviceManager = await collectInstallServiceManager(rl, serviceManager)
+      const providerConfig = await collectInstallProviderConfig(rl, {})
+      const bridgeConfig = await collectInstallBridgeAccounts(rl)
+      installConfig = mergeInstallConfigSections(providerConfig, bridgeConfig)
+      console.error(summarizeInstallPlan({ targetUser, requestedStateRoot, installConfig, serviceManager, dryRun }))
       const confirmed = await promptInstallYesNo(rl, 'Proceed with this install', true)
       if (!confirmed) process.exit(1)
-    } finally {
-      try { rl.close() } catch {}
     }
-  }
 
-  let targetUser = null
-  if (!mode || mode === 'current') {
-    targetUser = currentUser
-  } else if (mode === 'existing') {
-    targetUser = lookupUserRecord(targetUserName)
-    if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
-    if (typeof process.getuid === 'function' && process.getuid() !== 0 && targetUser.username !== currentUser.username) {
-      throw new Error('install_requires_root_for_other_user')
+    const result = performInstall({
+      targetUser,
+      homeDir: targetUser.homeDir,
+      stateRoot: requestedStateRoot,
+      serviceManager,
+      overwriteManaged: true,
+      sourceRepo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
+      sourceRef: safeString(sourceRef).trim() || detectInstallSourceRef(),
+      installConfig,
+      dryRun,
+    })
+    if (!dryRun && targetUser && targetUser.username === currentUser.username) {
+      try { ensureDaemonSystemdServiceFile() } catch {}
     }
-  } else if (mode === 'create') {
-    const nextName = safeString(createUserName).trim()
-    if (!nextName) throw new Error('missing_create_user_name')
-    if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
-      throw new Error('install_requires_root_to_create_user')
-    }
-    if (!lookupUserRecord(nextName)) {
-      const created = spawnSync('useradd', ['-m', '-s', '/bin/bash', nextName], { stdio: 'inherit' })
-      if (created.status !== 0) throw new Error(`useradd_failed:${nextName}`)
-    }
-    targetUser = lookupUserRecord(nextName)
-    if (!targetUser) throw new Error(`user_lookup_failed:${nextName}`)
+    printJson(result)
+  } finally {
+    try { promptSession && promptSession.close() } catch {}
   }
-
-  const result = performInstall({
-    targetUser,
-    homeDir: targetUser.homeDir,
-    overwriteManaged: true,
-    sourceRepo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
-    sourceRef: safeString(sourceRef).trim() || detectInstallSourceRef(),
-  })
-  if (targetUser && targetUser.username === currentUser.username) {
-    try { ensureDaemonSystemdServiceFile() } catch {}
-  }
-  printJson(result)
 }
 
 async function cmdUpdate(argv) {
@@ -890,6 +1454,7 @@ async function cmdUpdate(argv) {
     : {}
   const repoUrl = normalizeGitUrl(safeString(repo).trim() || safeString(installSource.repo).trim() || detectInstallSourceRepo())
   const sourceRef = safeString(ref).trim() || safeString(installSource.ref).trim() || detectInstallSourceRef()
+  const serviceManager = safeString(installMeta && installMeta.serviceManager).trim() || 'auto'
   const git = findExecutableOnPath('git')
   if (!git) throw new Error('git_not_found')
 
@@ -916,6 +1481,7 @@ async function cmdUpdate(argv) {
       '__install',
       '--current-user',
       '--yes',
+      '--service-manager', serviceManager,
       '--source-repo', repoUrl,
       '--source-ref', sourceRef,
     ]
@@ -961,9 +1527,10 @@ async function cmdUninstall(argv) {
     usage(2)
   }
 
+  const currentStateRoot = rootDir()
   const choices = [
-    { value: 'keep', label: 'Remove the installed app and launcher, but keep ~/.rin state' },
-    { value: 'purge', label: 'Remove Rin completely, including ~/.rin state' },
+    { value: 'keep', label: `Remove the installed app and launcher, but keep ${currentStateRoot}` },
+    { value: 'purge', label: `Remove Rin completely, including ${currentStateRoot}` },
   ]
 
   if (!mode && process.stdin.isTTY && process.stdout.isTTY) {
@@ -973,8 +1540,8 @@ async function cmdUninstall(argv) {
       const confirmed = await promptInstallYesNo(
         rl,
         mode === 'purge'
-          ? 'This will remove ~/.rin and the launcher. Continue'
-          : 'This will remove the installed app and launcher, but keep ~/.rin state. Continue',
+          ? `This will remove ${currentStateRoot} and the launcher. Continue`
+          : `This will remove the installed app and launcher, but keep ${currentStateRoot}. Continue`,
         false,
       )
       if (!confirmed) process.exit(1)
@@ -987,9 +1554,9 @@ async function cmdUninstall(argv) {
   if (!mode) mode = 'keep'
   if (!yes) throw new Error('uninstall_requires_confirmation_or_yes')
 
-  try { await removeDaemonSystemdService() } catch {}
+  try { await removeDaemonManagedService() } catch {}
 
-  printJson(performUninstall({ homeDir: os.homedir(), mode }))
+  printJson(performUninstall({ homeDir: os.homedir(), stateRoot: currentStateRoot, mode }))
 }
 
 function daemonPackageDir() {
@@ -1174,6 +1741,42 @@ async function cmdPi(argv) {
   const hostArgs = argv.slice(index)
   const hostPath = ensureRinTuiHost()
   if (!noBootstrap) ensurePiBootstrap()
+  await ensureDaemonStarted()
+  await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
+    cwd: sessionRoot,
+    env: {
+      RIN_REPO_ROOT: repoDir(),
+      PI_SKIP_VERSION_CHECK: '1',
+    },
+  })
+}
+
+async function cmdDebug(argv) {
+  const sessionRoot = os.homedir()
+  let noBootstrap = false
+  let index = 0
+
+  while (index < argv.length) {
+    const a = argv[index]
+    if (a === '--') { index += 1; break }
+    if (a === '--no-bootstrap') { noBootstrap = true; index += 1; continue }
+    if (a === '-h' || a === '--help' || a === 'help') {
+      const hostPath = ensureRinTuiDebugHost()
+      await spawnInherit(process.execPath, [hostPath, '--help'], {
+        cwd: sessionRoot,
+        env: {
+          RIN_REPO_ROOT: repoDir(),
+          PI_SKIP_VERSION_CHECK: '1',
+        },
+      })
+      return
+    }
+    break
+  }
+
+  const hostArgs = argv.slice(index)
+  const hostPath = ensureRinTuiDebugHost()
+  if (!noBootstrap) ensurePiBootstrap()
   await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
     cwd: sessionRoot,
     env: {
@@ -1184,23 +1787,80 @@ async function cmdPi(argv) {
 }
 
 function daemonStatusSnapshot() {
-  const daemonSystemctl = detectDaemonSystemdService()
-  if (daemonSystemctl) {
-    const { active, pid } = readDaemonSystemdPid(daemonSystemctl)
-    return { ok: true, running: active && !!pid, pid: active ? pid : 0, manager: 'systemd', systemctl: daemonSystemctl }
+  const resolved = resolveDaemonManager()
+  if (resolved.actual === 'systemd') {
+    const daemonSystemctl = detectDaemonSystemdService()
+    if (daemonSystemctl) {
+      const { active, pid } = readDaemonSystemdPid(daemonSystemctl)
+      return { ok: true, running: active && !!pid, pid: active ? pid : 0, manager: 'systemd', systemctl: daemonSystemctl }
+    }
+  }
+  if (resolved.actual === 'launchd') {
+    const launchctl = detectDaemonLaunchdService()
+    if (launchctl) {
+      const { active, pid } = readDaemonLaunchdPid()
+      return { ok: true, running: active && !!pid, pid: active ? pid : 0, manager: 'launchd', launchctl }
+    }
   }
   const pid = readDaemonPid()
-  return { ok: true, running: Boolean(pid && isPidAlive(pid)), pid: pid && isPidAlive(pid) ? pid : 0, manager: '' }
+  return { ok: true, running: Boolean(pid && isPidAlive(pid)), pid: pid && isPidAlive(pid) ? pid : 0, manager: resolved.actual }
+}
+
+async function ensureDaemonStarted() {
+  const resolved = resolveDaemonManager()
+  if (resolved.actual === 'systemd') {
+    try { ensureDaemonSystemdServiceFile() } catch {}
+    const daemonSystemctl = detectDaemonSystemdService()
+    if (!daemonSystemctl) {
+      if (resolved.requested === 'auto') return await startDetachedDaemonRuntime()
+      return { ok: false, reason: 'systemd_unavailable' }
+    }
+    const current = readDaemonSystemdPid(daemonSystemctl)
+    if (current.active && current.pid) return { ok: true, pid: current.pid, manager: 'systemd' }
+    runDaemonSystemctl(daemonSystemctl, ['start', daemonSystemdServiceName()])
+    const next = readDaemonSystemdPid(daemonSystemctl)
+    if (!next.active || !next.pid) throw new Error('daemon_start_failed_systemd')
+    return { ok: true, pid: next.pid, manager: 'systemd' }
+  }
+  if (resolved.actual === 'launchd') {
+    const plistPath = ensureDaemonLaunchdServiceFile()
+    const launchctl = findExecutableOnPath('launchctl')
+    if (!launchctl) {
+      if (resolved.requested === 'auto') return await startDetachedDaemonRuntime()
+      return { ok: false, reason: 'launchd_unavailable' }
+    }
+    const current = readDaemonLaunchdPid()
+    if (!current.active) {
+      try { launchctlUser(['bootstrap', daemonLaunchdDomainTarget(), plistPath]) } catch {}
+    }
+    launchctlUser(['kickstart', '-k', daemonLaunchdServiceTarget()])
+    const next = readDaemonLaunchdPid()
+    if (!next.active) throw new Error('daemon_start_failed_launchd')
+    await cleanupStrayDaemonProcesses({ keepPid: next.pid || 0 })
+    return { ok: true, pid: next.pid || 0, manager: 'launchd' }
+  }
+  return await startDetachedDaemonRuntime()
 }
 
 async function stopDaemonRuntime() {
-  const daemonSystemctl = detectDaemonSystemdService()
-  if (daemonSystemctl) {
-    const { active } = readDaemonSystemdPid(daemonSystemctl)
-    const hadManaged = Boolean(active)
-    if (hadManaged) runDaemonSystemctl(daemonSystemctl, ['stop', daemonSystemdServiceName()])
+  const resolved = resolveDaemonManager()
+  if (resolved.actual === 'systemd') {
+    const daemonSystemctl = detectDaemonSystemdService()
+    if (daemonSystemctl) {
+      const { active } = readDaemonSystemdPid(daemonSystemctl)
+      const hadManaged = Boolean(active)
+      if (hadManaged) runDaemonSystemctl(daemonSystemctl, ['stop', daemonSystemdServiceName()])
+      const cleaned = await cleanupStrayDaemonProcesses()
+      return { stopped: hadManaged || cleaned.daemonPids.length > 0, manager: 'systemd' }
+    }
+  }
+  if (resolved.actual === 'launchd') {
+    const loaded = detectDaemonLaunchdService()
+    if (loaded) {
+      try { launchctlUser(['bootout', daemonLaunchdDomainTarget(), daemonLaunchdPlistPath()]) } catch {}
+    }
     const cleaned = await cleanupStrayDaemonProcesses()
-    return { stopped: hadManaged || cleaned.daemonPids.length > 0, systemctl: daemonSystemctl }
+    return { stopped: Boolean(loaded) || cleaned.daemonPids.length > 0, manager: 'launchd' }
   }
   const pid = readDaemonPid()
   let stopped = false
@@ -1212,38 +1872,79 @@ async function stopDaemonRuntime() {
     if (!stopped) throw new Error(`daemon_stop_timeout:${pid}`)
   }
   const cleaned = await cleanupStrayDaemonProcesses()
-  return { stopped: stopped || cleaned.daemonPids.length > 0, systemctl: '' }
+  return { stopped: stopped || cleaned.daemonPids.length > 0, manager: 'detached' }
 }
 
 async function startDaemonRuntime(action = 'restart') {
-  try { ensureDaemonSystemdServiceFile() } catch {}
-  const daemonSystemctl = detectDaemonSystemdService()
-  if (!daemonSystemctl) {
-    throw new Error(`daemon_${action}_requires_systemd:${daemonSystemdServiceName()}`)
+  const resolved = resolveDaemonManager()
+  if (resolved.actual === 'systemd') {
+    try { ensureDaemonSystemdServiceFile() } catch {}
+    const daemonSystemctl = detectDaemonSystemdService()
+    if (!daemonSystemctl) {
+      if (resolved.requested === 'auto') return await startDetachedDaemonRuntime()
+      throw new Error(`daemon_${action}_requires_systemd:${daemonSystemdServiceName()}`)
+    }
+    runDaemonSystemctl(daemonSystemctl, [action, daemonSystemdServiceName()])
+    const { active, pid } = readDaemonSystemdPid(daemonSystemctl)
+    if (!active || !pid) throw new Error(`daemon_${action}_failed_systemd`)
+    await cleanupStrayDaemonProcesses({ keepPid: pid })
+    return { ok: true, pid, manager: 'systemd' }
   }
-  runDaemonSystemctl(daemonSystemctl, [action, daemonSystemdServiceName()])
-  const { active, pid } = readDaemonSystemdPid(daemonSystemctl)
-  if (!active || !pid) throw new Error(`daemon_${action}_failed_systemd`)
-  await cleanupStrayDaemonProcesses({ keepPid: pid })
-  return { ok: true, pid, manager: 'systemd' }
-}
-
-async function removeDaemonSystemdService() {
-  const unitPath = daemonSystemdUnitPath()
-  const daemonSystemctl = detectDaemonSystemdService()
-  if (daemonSystemctl) {
-    try { runDaemonSystemctl(daemonSystemctl, ['disable', '--now', daemonSystemdServiceName()]) } catch {}
-  } else {
+  if (resolved.actual === 'launchd') {
+    const plistPath = ensureDaemonLaunchdServiceFile()
+    if (action === 'restart') {
+      try { launchctlUser(['bootout', daemonLaunchdDomainTarget(), plistPath]) } catch {}
+      const boot = launchctlUser(['bootstrap', daemonLaunchdDomainTarget(), plistPath])
+      if (boot.status !== 0) throw new Error(`daemon_${action}_failed_launchd`)
+      launchctlUser(['kickstart', '-k', daemonLaunchdServiceTarget()])
+    } else if (action === 'start') {
+      const current = readDaemonLaunchdPid()
+      if (!current.active) {
+        const boot = launchctlUser(['bootstrap', daemonLaunchdDomainTarget(), plistPath])
+        if (boot.status !== 0) throw new Error(`daemon_${action}_failed_launchd`)
+      }
+      launchctlUser(['kickstart', '-k', daemonLaunchdServiceTarget()])
+    } else {
+      throw new Error(`daemon_${action}_unsupported_launchd`)
+    }
+    const { active, pid } = readDaemonLaunchdPid()
+    if (!active) throw new Error(`daemon_${action}_failed_launchd`)
+    await cleanupStrayDaemonProcesses({ keepPid: pid || 0 })
+    return { ok: true, pid: pid || 0, manager: 'launchd' }
+  }
+  if (action === 'restart') {
     try { await stopDaemonRuntime() } catch {}
   }
-  try { fs.rmSync(unitPath, { force: true }) } catch {}
-  const reload = systemctlUser(['daemon-reload'])
-  if (reload.status !== 0) {
-    const msg = safeString(reload.stderr || reload.stdout).trim()
-    if (msg) console.error(msg)
+  return await startDetachedDaemonRuntime()
+}
+
+async function removeDaemonManagedService() {
+  const resolved = resolveDaemonManager()
+  if (resolved.actual === 'systemd') {
+    const unitPath = daemonSystemdUnitPath()
+    const daemonSystemctl = detectDaemonSystemdService()
+    if (daemonSystemctl) {
+      try { runDaemonSystemctl(daemonSystemctl, ['disable', '--now', daemonSystemdServiceName()]) } catch {}
+    } else {
+      try { await stopDaemonRuntime() } catch {}
+    }
+    try { fs.rmSync(unitPath, { force: true }) } catch {}
+    const reload = systemctlUser(['daemon-reload'])
+    if (reload.status !== 0) {
+      const msg = safeString(reload.stderr || reload.stdout).trim()
+      if (msg) console.error(msg)
+    }
+    try { systemctlUser(['reset-failed']) } catch {}
+    return unitPath
   }
-  try { systemctlUser(['reset-failed']) } catch {}
-  return unitPath
+  if (resolved.actual === 'launchd') {
+    const plistPath = daemonLaunchdPlistPath()
+    try { launchctlUser(['bootout', daemonLaunchdDomainTarget(), plistPath]) } catch {}
+    try { fs.rmSync(plistPath, { force: true }) } catch {}
+    return plistPath
+  }
+  try { await stopDaemonRuntime() } catch {}
+  return ''
 }
 
 function systemctlUser(args) {
@@ -1264,6 +1965,137 @@ function systemctlUser(args) {
   return { status: r.status == null ? 1 : r.status, stdout: safeString(r.stdout), stderr: safeString(r.stderr) }
 }
 
+function daemonLaunchdLabel() {
+  return 'moe.kneco.rin.daemon'
+}
+
+function daemonLaunchdDomainTarget() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+  return `gui/${uid}`
+}
+
+function daemonLaunchdServiceTarget() {
+  return `${daemonLaunchdDomainTarget()}/${daemonLaunchdLabel()}`
+}
+
+function daemonLaunchdPlistPath() {
+  return path.join(os.homedir(), 'Library', 'LaunchAgents', `${daemonLaunchdLabel()}.plist`)
+}
+
+function daemonLaunchdPlistText() {
+  const stateRoot = rootDir().replace(/\\/g, '/')
+  const repoRoot = repoDir().replace(/\\/g, '/')
+  const entry = daemonDistPath().replace(/\\/g, '/')
+  const stdoutPath = path.join(rootDir(), 'data', 'daemon.stdout.log').replace(/\\/g, '/')
+  const stderrPath = path.join(rootDir(), 'data', 'daemon.stderr.log').replace(/\\/g, '/')
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    `  <key>Label</key><string>${daemonLaunchdLabel()}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    `    <string>${process.execPath}</string>`,
+    `    <string>${entry}</string>`,
+    '  </array>',
+    `  <key>WorkingDirectory</key><string>${stateRoot}</string>`,
+    '  <key>EnvironmentVariables</key>',
+    '  <dict>',
+    `    <key>RIN_HOME</key><string>${stateRoot}</string>`,
+    `    <key>RIN_REPO_ROOT</key><string>${repoRoot}</string>`,
+    '  </dict>',
+    '  <key>RunAtLoad</key><true/>',
+    '  <key>KeepAlive</key><true/>',
+    `  <key>StandardOutPath</key><string>${stdoutPath}</string>`,
+    `  <key>StandardErrorPath</key><string>${stderrPath}</string>`,
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n')
+}
+
+function launchctlUser(args) {
+  const r = spawnSync('launchctl', args, { encoding: 'utf8' })
+  return { status: r.status == null ? 1 : r.status, stdout: safeString(r.stdout), stderr: safeString(r.stderr) }
+}
+
+function ensureDaemonLaunchdServiceFile() {
+  const plistPath = daemonLaunchdPlistPath()
+  const text = daemonLaunchdPlistText()
+  ensureDir(path.dirname(plistPath))
+  const current = fs.existsSync(plistPath) ? fs.readFileSync(plistPath, 'utf8') : ''
+  if (current !== text) fs.writeFileSync(plistPath, text, 'utf8')
+  return plistPath
+}
+
+function detectDaemonLaunchdService() {
+  if (process.platform !== 'darwin' || !findExecutableOnPath('launchctl')) return ''
+  const out = launchctlUser(['print', daemonLaunchdServiceTarget()])
+  if (out.status !== 0) return ''
+  return 'launchctl'
+}
+
+function readDaemonLaunchdPid() {
+  const out = launchctlUser(['print', daemonLaunchdServiceTarget()])
+  if (out.status !== 0) return { active: false, pid: 0 }
+  const text = `${out.stdout || ''}\n${out.stderr || ''}`
+  const m = text.match(/\bpid = (\d+)\b/)
+  const pid = m ? Number(m[1]) : 0
+  return { active: true, pid: Number.isFinite(pid) && pid > 1 ? pid : 0 }
+}
+
+function configuredDaemonManager() {
+  const installMeta = readJson(path.join(rootDir(), 'install.json'), {})
+  const configured = safeString(installMeta && installMeta.serviceManager).trim()
+  return configured || 'auto'
+}
+
+function daemonManagerAvailable(manager) {
+  const name = safeString(manager).trim()
+  if (name === 'systemd') return process.platform === 'linux' && Boolean(findExecutableOnPath('systemctl'))
+  if (name === 'launchd') return process.platform === 'darwin' && Boolean(findExecutableOnPath('launchctl'))
+  if (name === 'detached') return true
+  return false
+}
+
+function resolveDaemonManager(preferred = '') {
+  const requested = safeString(preferred || configuredDaemonManager()).trim() || 'auto'
+  if (requested !== 'auto') return { requested, actual: requested }
+  if (daemonManagerAvailable('systemd')) return { requested, actual: 'systemd' }
+  if (daemonManagerAvailable('launchd')) return { requested, actual: 'launchd' }
+  return { requested, actual: 'detached' }
+}
+
+async function waitForDetachedDaemonStart(timeoutMs = 15_000) {
+  const deadline = Date.now() + Number(timeoutMs || 0)
+  while (Date.now() < deadline) {
+    const pid = readDaemonPid()
+    if (pid && isPidAlive(pid)) return pid
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  return 0
+}
+
+async function startDetachedDaemonRuntime() {
+  const daemonEntry = daemonDistPath()
+  const child = spawn(process.execPath, [daemonEntry], {
+    detached: true,
+    stdio: 'ignore',
+    cwd: rootDir(),
+    env: {
+      ...process.env,
+      RIN_HOME: rootDir(),
+      RIN_REPO_ROOT: repoDir(),
+    },
+  })
+  child.unref()
+  const pid = await waitForDetachedDaemonStart(15_000)
+  if (!pid) throw new Error('daemon_start_failed_detached')
+  await cleanupStrayDaemonProcesses({ keepPid: pid })
+  return { ok: true, pid, manager: 'detached' }
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   const cmd = argv[0]
@@ -1274,6 +2106,7 @@ async function main() {
   if (cmd === 'restart') return await cmdRestart(rest)
   if (cmd === 'update') return await cmdUpdate(rest)
   if (cmd === 'uninstall') return await cmdUninstall(rest)
+  if (cmd === 'debug') return await cmdDebug(rest)
 
   if (cmd === '__install') return await cmdInstall(rest)
 

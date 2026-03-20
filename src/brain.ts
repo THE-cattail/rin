@@ -9,6 +9,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
+import { resolveRinLayout } from './runtime-paths';
+
 import { connect, Index } from '@lancedb/lancedb';
 import type { Table } from '@lancedb/lancedb';
 
@@ -1711,7 +1713,7 @@ function usage(exitCode = 2): never {
 }
 
 export async function runBrainCli(argvInput = process.argv.slice(2), rootOverride = ''): Promise<number> {
-  const root = path.resolve(rootOverride || path.join(os.homedir(), '.rin'));
+  const root = path.resolve(rootOverride || resolveRinLayout().homeRoot);
   const paths = new RuntimePaths(root);
   const argv = argvInput.slice();
   const area = argv.shift();
