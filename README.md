@@ -6,46 +6,51 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-**One runtime for your agent. Across terminal, chat, memory, and time.**
+**One little home for your agent.**
 
-**Rin** is a local-first runtime for chat-connected agents. It is designed around the user rather than the current working directory, so the agent can keep context, memory, tools, schedules, and delivery surfaces together and keep working across sessions.
+**Rin** is a local-first companion for people who want an agent that stays with them. Instead of starting over every time you switch projects, windows, or devices, Rin helps the same agent keep its memory, habits, and ways of talking to you.
 
-Rin treats the agent as something you live with, not something you re-create for each repo, shell, or editor tab.
+A small assistant should not feel disposable.
+Rin is built so it can stay, learn your rhythm, and keep things in order.
 
 ## Why Rin?
 
-- **User-scoped, not cwd-scoped.** Rin follows the person, not whichever repository happens to be open.
-- **Layered memory.** Memory is built into the runtime instead of being reduced to a single transient chat log.
-- **TUI + Koishi.** Work locally in the terminal and connect the same runtime to chat platforms.
-- **Self-bootstrapping.** Rin can inspect, use, and refine the runtime that it already lives in.
-- **Timers and inspections.** Background routines and inspection jobs are first-class capabilities.
-- **All in agent.** The public CLI stays small while richer behavior is exposed through the agent runtime itself, so the system is usable out of the box and configurable by the agent.
+- **It follows you, not just one folder.** Your agent is centered around the person using it.
+- **It remembers.** Not as a pile of temporary chat scraps, but as something the assistant can keep carrying forward.
+- **It can meet you in more than one place.** Talk in the terminal, or let it speak through your chat apps too.
+- **It can tidy itself.** Rin can read its own notes, tools, and little house rules, then keep improving how it works.
+- **It can keep watch.** Repeating routines and quiet check-ins are part of the system, not an afterthought.
+- **It feels ready out of the box.** The command line stays small, while most of the real behavior lives inside the assistant itself.
 
 ## A short manifesto
 
-Most agent tools begin from the surface: a shell command, an editor pane, a working directory.
+Many agent tools begin with a surface.
+A command. A panel. A project.
 
-Rin begins from continuity.
+Rin begins with continuity.
 
-The agent should keep its own memory, its own routines, its own interfaces, and its own room to grow.
+The assistant should be able to stay.
+To remember.
+To keep its place.
+To grow with the person who uses it.
 
-Not a throwaway helper for one task.
-A runtime you can keep.
+Not a one-off trick.
+A companion you can keep around.
 
-## Architecture at a glance
+## How Rin fits together
 
 ```text
-User
- ├─ terminal ──> Local TUI ────┐
- └─ chat ──────> Koishi bridge │
-                               ├──> Rin agent runtime
-                               │      ├─ memory
-                               │      ├─ skills
-                               │      ├─ models
-                               │      ├─ schedules
-                               │      └─ inspections
-                               │
-                               └──> persistent runtime state (~/.rin)
+You
+ ├─ talk in the terminal ─┐
+ └─ talk in chat apps ────┤
+                          ├──> Rin
+                          │      ├─ remembers things
+                          │      ├─ uses tools
+                          │      ├─ keeps notes and rules
+                          │      ├─ handles repeating jobs
+                          │      └─ checks in when needed
+                          │
+                          └──> keeps going across sessions
 ```
 
 ## Get the feel in 3 steps
@@ -56,15 +61,15 @@ User
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 ```
 
-**2. Launch**
+**2. Open it**
 
 ```bash
 rin
 ```
 
-**3. Let the runtime grow with you**
+**3. Keep the same assistant with you**
 
-Use Rin locally in the TUI, connect it to chat, and keep the same agent runtime instead of resetting per repository.
+Use Rin in the terminal, connect it to chat if you like, and let the same assistant keep growing with you instead of resetting for every project.
 
 ## Quick Start
 
@@ -100,43 +105,43 @@ RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 rin
 ```
 
-## Typical use cases
+## What people might use it for
 
 | | |
 | :--- | :--- |
-| **Personal terminal agent**<br>Keeps working across repositories instead of starting from zero in each one. | **Chat-connected assistant**<br>Receives, processes, and delivers work through bridged messaging platforms. |
-| **Self-maintaining runtime**<br>Inspects its own docs, skills, memory, and routines, then keeps iterating on them. | **Background automation companion**<br>Handles recurring routines, periodic checks, and long-lived agent workflows. |
+| **A personal helper in the terminal**<br>It keeps going across projects instead of acting like a stranger every time. | **A helper that can also speak in chat**<br>Useful when you want the same assistant to receive, handle, and send things for you. |
+| **A self-tidying assistant home**<br>It can look through its own notes, habits, and tools, then keep refining itself. | **A quiet background helper**<br>Good for repeating chores, gentle reminders, and long-running workflows. |
 
 ## Compared with other agent products
 
 | Question | Rin | Terminal Coding Agents | IDE-Centric Agents |
 | :--- | :--- | :--- | :--- |
-| **What does the agent belong to?** | The user | The current shell or repo | The current editor workspace |
-| **Where do you meet it?** | TUI and chat bridges | CLI command runs | Editor panels and extensions |
-| **What happens when you close the surface?** | The runtime keeps its own continuity | The task usually ends with the process | The experience stays tied to the editor |
-| **How much of the system lives inside the agent?** | Memory, routines, inspections, configuration | Mostly task execution | Mostly editor assistance |
-| **What is the center of gravity?** | A continuous personal agent runtime | Direct terminal work | In-editor help |
+| **Who does the assistant belong to?** | The person using it | The current shell or repo | The current editor workspace |
+| **Where do you meet it?** | Terminal and chat | Command runs | Editor panels and extensions |
+| **What happens when you close the surface?** | The assistant keeps its own continuity | The task often ends with the process | The experience stays tied to the editor |
+| **What lives inside the assistant?** | Memory, routines, checks, and more | Mostly task execution | Mostly editor help |
+| **What is it trying to be?** | A lasting personal assistant home | A tool for direct terminal work | A helper inside the editor |
 
 *Examples of related categories include terminal agents like Codex CLI, Claude Code, or Gemini CLI, and IDE-centric tools like Cursor, Windsurf, or Cline.*
 
 ## Public Command Surface
 
-Rin keeps the public CLI intentionally small:
+Rin keeps the public command set intentionally small:
 
-- `rin`: Launches the interactive local TUI.
-- `rin restart`: Restarts the background Rin daemon service.
-- `rin update`: Reinstalls or updates Rin from the configured source repository and ref.
-- `rin uninstall --keep-state --yes`: Removes the installed app and launcher but keeps data in `~/.rin`.
-- `rin uninstall --purge --yes`: Removes the app and the full `~/.rin` runtime.
+- `rin`: Opens the local interactive interface.
+- `rin restart`: Restarts the background service.
+- `rin update`: Reinstalls or updates Rin from the configured source.
+- `rin uninstall --keep-state --yes`: Removes the app but keeps your saved state.
+- `rin uninstall --purge --yes`: Removes both the app and its saved state.
 
 ## Included Capabilities
 
-- **Local TUI** for direct interactive agent sessions.
-- **Koishi-backed chat connectivity** for bridged delivery.
-- **Memory built into the runtime** instead of a single disposable session log.
-- **Scheduled routines and inspections** as native capabilities.
-- **Agent-driven configuration** through runtime docs, skills, and internal tools.
-- **Out-of-the-box runtime** with a minimal public command surface.
+- **A local chat-like interface** for talking to your assistant directly.
+- **Chat app delivery** so the same assistant can speak outside the terminal.
+- **Built-in memory** so it can keep more than the current conversation.
+- **Repeating jobs and quiet checks** as part of the system itself.
+- **Assistant-led setup** through its own notes, tools, and internal instructions.
+- **A small surface, with more of the real work living inside the assistant.**
 
 ## Documentation
 

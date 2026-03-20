@@ -6,47 +6,53 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-**一つの runtime で、agent を terminal、chat、memory、time にまたがって動かす。**
+**あなたの agent に、小さな居場所を。**
 
-**Rin** は、chat-connected agent のためのローカルファーストなランタイムです。設計の中心は「現在の作業ディレクトリ」ではなく「ユーザー」にあり、agent がコンテキスト、メモリ、ツール、スケジュール、配信面を一つにまとめ、セッションをまたいで動き続けられるようにします。
+**Rin** は、ローカルファーストな agent の相棒です。目指しているのは、その場しのぎの一回きりの手伝いではなく、だんだん息が合っていく助手をそばに置いておけること。プロジェクトや画面を切り替えるたびに最初からやり直すのではなく、同じ助手が少しずつ覚え、慣れ、付き添っていけるようにします。
 
-Rin が目指すのは、リポジトリごとに毎回作り直す一時的な補助役ではなく、長く育てていける agent runtime です。
+小さな助手は、使い捨てでなくていい。
+Rin は、そばに置いて、覚えて、少しずつ整っていく毎日の居場所を作ろうとしています。
 
 ## なぜ Rin なのか？
 
-- **cwd ではなくユーザー中心。** Rin が追うのは、その時開いているリポジトリではなく人です。
-- **多層メモリ。** メモリはランタイムに組み込まれた能力であり、一時的なチャットログに縮退しません。
-- **TUI + Koishi。** ローカルのターミナルでも使え、同じランタイムをチャットプラットフォームにもつなげられます。
-- **自己ブートストラップ。** Rin は、自分が動いているランタイム環境をそのまま点検し、利用し、整え続けられます。
-- **タイマーと巡検が第一級。** バックグラウンド routine と inspection はネイティブな能力です。
-- **All in agent。** 公開 CLI は小さく保ち、より豊かな振る舞いは agent runtime 自体から提供することで、すぐ使えて agent 自身でも設定しやすくしています。
+- **フォルダではなく人についてくる。** 助手の中心にあるのは、今開いているプロジェクトではなく使っている人です。
+- **ちゃんと覚えていける。** 一時的な会話の切れ端を積むだけではなく、少しずつ持ち越していけます。
+- **会える場所が一つではない。** ターミナルでも話せるし、チャットにもつなげられます。
+- **自分で整っていける。** 自分のメモ、道具、ちいさなルールを読み返しながら、やり方を整えていけます。
+- **静かに見守るのも得意。** 繰り返す用事や、時間を置いて見ておきたいことも、最初から役目のうちです。
+- **最初から扱いやすい。** 表に見えるコマンドは少なく、いろいろな振る舞いは助手の内側に収まっています。
 
 ## 短い manifesto
 
 多くの agent ツールは、表面から始まります。
-一つのコマンド、一つのエディタパネル、一つの作業ディレクトリ。
+コマンドひとつ。
+パネルひとつ。
+プロジェクトひとつ。
 
-Rin は、連続性から始めます。
+Rin は、続いていくことから始めます。
 
-agent には、自分の memory、自分の routine、自分の interface、そして育ち続けられる runtime があるべきです。
+助手は覚えていていい。
+自分のやり方を持っていていい。
+居場所を持っていていい。
+使う人と一緒に育っていっていい。
 
-一回きりの作業のための補助ではなく、
-持ち続けられる runtime として。
+一回だけの小技ではなく、
+長く置いておける相棒として。
 
-## 全体像
+## Rin がどうまとまっているか
 
 ```text
-User
- ├─ terminal ──> Local TUI ────┐
- └─ chat ──────> Koishi bridge │
-                               ├──> Rin agent runtime
-                               │      ├─ memory
-                               │      ├─ skills
-                               │      ├─ models
-                               │      ├─ schedules
-                               │      └─ inspections
-                               │
-                               └──> persistent runtime state (~/.rin)
+You
+ ├─ terminal で話す ───┐
+ └─ chat で話す ───────┤
+                       ├──> Rin
+                       │      ├─ いくつか覚える
+                       │      ├─ 道具を使う
+                       │      ├─ メモやルールを持つ
+                       │      ├─ 繰り返しの用事をこなす
+                       │      └─ 必要なときに静かに見る
+                       │
+                       └──> セッションをまたいで続いていく
 ```
 
 ## 3 ステップでつかむ Rin
@@ -57,15 +63,15 @@ User
 curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | sh
 ```
 
-**2. Launch**
+**2. Open**
 
 ```bash
 rin
 ```
 
-**3. 同じ runtime を育て続ける**
+**3. 同じ助手をそばに置いておく**
 
-ローカル TUI で使い、チャットにもつなぎ、リポジトリごとに毎回リセットするのではなく、同じ agent runtime を積み上げていきます。
+ターミナルで使い、必要ならチャットにもつなぎ、プロジェクトごとに毎回リセットするのではなく、同じ助手を少しずつ育てていきます。
 
 ## クイックスタート
 
@@ -95,71 +101,71 @@ npm run build
 RIN_REPO_URL="$(pwd)" ./install.sh --current-user --yes
 ```
 
-### Rin を起動
+### 起動
 
 ```bash
 rin
 ```
 
-## 典型的なユースケース
+## こんなふうに使える
 
 | | |
 | :--- | :--- |
-| **個人向けターミナル agent**<br>リポジトリをまたいでも、そのたびにゼロから始めなくてよい。 | **チャット接続型アシスタント**<br>ブリッジされたメッセージ基盤を通じて受信・処理・配信できる。 |
-| **自己保守するランタイム**<br>agent 自身がドキュメント、スキル、メモリ、スケジュールを点検し、そのまま改善を続けられる。 | **バックグラウンド自動化の相棒**<br>定期 routine、周期的チェック、長寿命の agent ワークフローに向く。 |
+| **ターミナルのそばにいる個人用助手**<br>プロジェクトをまたいでも、毎回はじめましてになりません。 | **チャットでも話せる助手**<br>受け取って、考えて、送り返すところまで同じ助手に任せたいときに向きます。 |
+| **自分で部屋を整えていく助手**<br>メモや習慣や道具を見返しながら、少しずつやり方を整えていけます。 | **静かな背景仕事の相棒**<br>繰り返しの用事、定期的な確認、長めに走る流れに向いています。 |
 
-## 位置づけ
+## ほかの agent 製品と比べると
 
 | 問い | Rin | ターミナル型コーディングエージェント | IDE 中心型エージェント |
 | :--- | :--- | :--- | :--- |
-| **agent は何に属するか？** | ユーザー | 現在の shell / repo | 現在の editor workspace |
-| **主にどこで出会うか？** | TUI とチャットブリッジ | CLI 実行 | エディタのパネルや拡張 |
-| **表面を閉じた後はどうなるか？** | runtime 自体の連続性が残る | 多くはプロセス終了で終わる | 体験はエディタに結び付いたまま |
-| **どれだけの機能が agent の内側にあるか？** | memory、routine、inspection、configuration | 主にタスク実行 | 主にエディタ補助 |
-| **重心はどこか？** | 継続運用できる個人向け agent runtime | 直接的なターミナル作業 | エディタ内支援 |
+| **助手は誰のそばにいるか？** | 使う人のそば | 今の shell や repo | 今の editor workspace |
+| **どこで会うことが多いか？** | terminal と chat | コマンド実行の場 | エディタのパネルや拡張 |
+| **表面を閉じたあとどうなるか？** | 助手の流れは続いていく | 多くはプロセスと一緒に終わる | 体験はエディタに結びついたまま |
+| **どれだけ助手の内側に入っているか？** | memory、繰り返し作業、見守り、整え方 | 主にその場の実行 | 主にエディタ内の補助 |
+| **何を目指しているか？** | 長く一緒にいられる個人用助手の居場所 | ターミナルで作業するための道具 | エディタの中の補助役 |
 
-*関連カテゴリの例として、Codex CLI、Claude Code、Gemini CLI のようなターミナル型エージェントや、Cursor、Windsurf、Cline のような IDE 中心型ツールがあります。*
+*Examples of related categories include terminal agents like Codex CLI, Claude Code, or Gemini CLI, and IDE-centric tools like Cursor, Windsurf, or Cline.*
 
-## 公開コマンドサーフェス
+## 公開コマンド
 
-Rin は公開 CLI を意図的に小さく保っています。
+Rin は、表に見えるコマンドを小さく保っています。
 
-- `rin`: インタラクティブなローカル TUI を起動します。
-- `rin restart`: バックグラウンドの Rin デーモンサービスを再起動します。
-- `rin update`: 設定されたソースリポジトリと ref から Rin を再インストールまたは更新します。
-- `rin uninstall --keep-state --yes`: インストール済みアプリとランチャーを削除しますが、`~/.rin` 内のデータは残します。
-- `rin uninstall --purge --yes`: アプリと完全な `~/.rin` ランタイムを削除します。
+- `rin`: ローカルの対話画面を開きます。
+- `rin restart`: バックグラウンドサービスを再起動します。
+- `rin update`: 設定された取得元から再インストールまたは更新します。
+- `rin uninstall --keep-state --yes`: アプリ本体を外し、保存された状態は残します。
+- `rin uninstall --purge --yes`: アプリ本体と保存された状態の両方を外します。
 
-## 同梱される機能
+## 最初から入っていること
 
-- **ローカル TUI** による対話型 agent セッション。
-- **Koishi ベースのチャット接続** によるブリッジ配信。
-- **ランタイム内蔵のメモリシステム**。
-- **ネイティブな定期 routine と巡検能力**。
-- **ランタイムのドキュメント、スキル、内部ツールを通じた agent 主導の設定**。
-- **小さな公開コマンド面による、すぐ使える体験**。
+- **ローカルの対話画面** で、そのまま助手と話せる。
+- **チャットへの橋渡し** で、同じ助手が外でも話せる。
+- **内蔵の memory** で、今の会話だけで終わらない。
+- **繰り返しの用事や静かな見守り** が、最初から役目に入っている。
+- **助手自身が整えに参加できる作り** で、メモ、道具、内側の説明を見ながら調整できる。
+- **表面は軽く、本事はもっと内側にある。**
 
-## ドキュメント
+## Documentation
 
-- [ランタイムリファレンス](install/home/docs/rin/README.md)
-- [TUI ガイド](install/home/docs/rin/docs/tui.md)
-- [モデルとプロバイダ](install/home/docs/rin/docs/models.md)
-- [スキル](install/home/docs/rin/docs/skills.md)
-- [拡張](install/home/docs/rin/docs/extensions.md)
+- [Runtime reference](install/home/docs/rin/README.md)
+- [TUI guide](install/home/docs/rin/docs/tui.md)
+- [Models and providers](install/home/docs/rin/docs/models.md)
+- [Skills](install/home/docs/rin/docs/skills.md)
+- [Extensions](install/home/docs/rin/docs/extensions.md)
 - [SDK](install/home/docs/rin/docs/sdk.md)
-- [サンプル](install/home/docs/rin/examples/README.md)
-- [開発ノート](install/home/docs/rin/docs/development.md)
+- [Examples](install/home/docs/rin/examples/README.md)
+- [Development notes](install/home/docs/rin/docs/development.md)
 
-## 開発
+## Development
 
-ローカルの変更を検証するには、以下を実行してください。
+ローカルの変更を確かめるには、次を実行してください。
 
 ```bash
 npm run check
 ```
 
-貢献の詳細は [CONTRIBUTING.md](CONTRIBUTING.md) と [CODE_STYLE.md](CODE_STYLE.md) を参照してください。
+詳しくは [CONTRIBUTING.md](CONTRIBUTING.md) と [CODE_STYLE.md](CODE_STYLE.md) を参照してください。
 
-## ライセンス
+## License
 
-このプロジェクトは MIT ライセンスで提供されています。詳細は [LICENSE](LICENSE) を参照してください。
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

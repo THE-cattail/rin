@@ -54,7 +54,6 @@ for (const [file, text] of Object.entries(readmeTexts)) {
   assert(text.includes('`rin restart`'), `${file}: missing public command \`rin restart\``)
   assert(text.includes('`rin update`'), `${file}: missing public command \`rin update\``)
   assert(text.includes('`rin uninstall'), `${file}: missing public command family \`rin uninstall ...\``)
-  assert(text.includes('~/.rin'), `${file}: missing runtime state location`)
 }
 assert(readmeTexts['README.md'].includes('Compared with other agent products'), 'README.md: missing positioning/comparison section')
 
