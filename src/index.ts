@@ -808,16 +808,35 @@ function installCanCreateUsers(capabilities: any = {}) {
 }
 
 function installTargetChoices(currentUser = currentUserRecord(), capabilities: any = {}) {
+  const platform = safeString(capabilities.platform || process.platform).trim() || process.platform
+  const hasGetent = typeof capabilities.hasGetent === 'boolean'
+    ? capabilities.hasGetent
+    : Boolean(findExecutableOnPath('getent'))
+  const dryRun = capabilities.dryRun === true
   const choices = [
     { value: 'current', label: `Install for current user (${currentUser.username})` },
   ]
-  if (installCanManageExistingUsers(capabilities)) {
-    choices.push({ value: 'existing', label: 'Install for an existing user' })
+  if (installCanManageExistingUsers(capabilities) || (dryRun && platform === 'linux' && hasGetent)) {
+    choices.push({ value: 'existing', label: dryRun ? 'Preview install for an existing user' : 'Install for an existing user' })
   }
-  if (installCanCreateUsers(capabilities)) {
-    choices.push({ value: 'create', label: 'Create a new user and install there' })
+  if (installCanCreateUsers(capabilities) || (dryRun && platform === 'linux')) {
+    choices.push({ value: 'create', label: dryRun ? 'Preview install for a new user' : 'Create a new user and install there' })
   }
   return choices
+}
+
+function previewUserRecordForInstall(username, currentUser = currentUserRecord()) {
+  const name = safeString(username).trim() || 'preview-user'
+  const currentHome = safeString(currentUser && currentUser.homeDir).trim() || os.homedir()
+  const parentHome = currentHome ? path.dirname(currentHome) : os.homedir()
+  const homeDir = path.join(parentHome, name)
+  return {
+    username: name,
+    uid: -1,
+    gid: -1,
+    homeDir,
+    shell: safeString(currentUser && currentUser.shell).trim() || process.env.SHELL || '/bin/bash',
+  }
 }
 
 function formatCliErrorMessage(error) {
@@ -1411,7 +1430,7 @@ async function cmdInstall(argv) {
 
   try {
     if (!mode && rl) {
-      const targetChoices = installTargetChoices(currentUser)
+      const targetChoices = installTargetChoices(currentUser, { dryRun })
       if (targetChoices.length === 1) {
         mode = 'current'
         console.error(`Install target: current user (${currentUser.username})`)
@@ -1427,24 +1446,35 @@ async function cmdInstall(argv) {
       targetUser = currentUser
     } else if (mode === 'existing') {
       if (!installCanManageExistingUsers()) {
-        if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_for_other_user')
-        throw new Error('install_existing_user_unsupported')
+        if (dryRun) {
+          targetUser = lookupUserRecord(targetUserName)
+          if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
+        } else {
+          if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_for_other_user')
+          throw new Error('install_existing_user_unsupported')
+        }
+      } else {
+        targetUser = lookupUserRecord(targetUserName)
+        if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
       }
-      targetUser = lookupUserRecord(targetUserName)
-      if (!targetUser) throw new Error(`user_not_found:${targetUserName}`)
     } else if (mode === 'create') {
       const nextName = safeString(createUserName).trim()
       if (!nextName) throw new Error('missing_create_user_name')
       if (!installCanCreateUsers()) {
-        if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_to_create_user')
-        throw new Error('install_create_user_unsupported')
+        if (dryRun) {
+          targetUser = lookupUserRecord(nextName) || previewUserRecordForInstall(nextName, currentUser)
+        } else {
+          if (typeof process.getuid !== 'function' || process.getuid() !== 0) throw new Error('install_requires_root_to_create_user')
+          throw new Error('install_create_user_unsupported')
+        }
+      } else {
+        if (!lookupUserRecord(nextName)) {
+          const created = spawnSync('useradd', ['-m', '-s', '/bin/bash', nextName], { stdio: 'inherit' })
+          if (created.status !== 0) throw new Error(`useradd_failed:${nextName}`)
+        }
+        targetUser = lookupUserRecord(nextName)
+        if (!targetUser) throw new Error(`user_lookup_failed:${nextName}`)
       }
-      if (!lookupUserRecord(nextName)) {
-        const created = spawnSync('useradd', ['-m', '-s', '/bin/bash', nextName], { stdio: 'inherit' })
-        if (created.status !== 0) throw new Error(`useradd_failed:${nextName}`)
-      }
-      targetUser = lookupUserRecord(nextName)
-      if (!targetUser) throw new Error(`user_lookup_failed:${nextName}`)
     }
 
     let installConfig = null

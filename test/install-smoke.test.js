@@ -37,6 +37,10 @@ test('installTargetChoices hides unsupported user-management options', () => {
     installTargetChoices(currentUser, { platform: 'linux', isRoot: true, hasGetent: true, hasUseradd: true }).map((item) => item.value),
     ['current', 'existing', 'create'],
   )
+  assert.deepEqual(
+    installTargetChoices(currentUser, { platform: 'linux', isRoot: false, hasGetent: true, hasUseradd: false, dryRun: true }).map((item) => item.value),
+    ['current', 'existing', 'create'],
+  )
 })
 
 test('formatCliErrorMessage turns installer capability errors into guidance', () => {
