@@ -24,5 +24,5 @@ Example extensions demonstrating:
 ## Documentation
 
 - [SDK Reference](sdk/README.md)
-- [Extensions Documentation](../docs/extensions.md)
-- [Skills Documentation](../docs/skills.md)
+
+Detailed SDK and extension reference docs are no longer bundled locally; use upstream Pi docs when needed.

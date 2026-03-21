@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { importPiTuiModule } from './pi-upstream'
-import { createRinPiSession, queueBrainFinalizeAsync, flushBrainQueue } from './runtime'
+import { createRinPiSession } from './runtime'
 import { resolveRinLayout } from './runtime-paths'
 
 function safeString(value: any): string {
@@ -30,6 +30,7 @@ async function installBuiltinTuiKeybindings() {
     defaults.newLine = Array.from(new Set([...current, 'ctrl+j']))
   } catch {}
 }
+
 
 async function runRinInteractiveMode({
   repoRoot,
@@ -62,24 +63,20 @@ async function runRinInteractiveMode({
     provider,
     model,
     thinking,
+    enableBrainHooks: false,
   })
 
   const mode = new pi.InteractiveMode(session, {
     modelFallbackMessage,
   })
-
-  let finalizedBrain = false
-  const finalizeBrain = async (reason = 'manual') => {
-    if (finalizedBrain) return
-    finalizedBrain = true
-    try { queueBrainFinalizeAsync({ repoRoot, stateRoot: workspaceRoot, chatKey: brainChatKey, reason }) } catch {}
-    try { await flushBrainQueue({ repoRoot, stateRoot: workspaceRoot, chatKey: brainChatKey, timeoutMs: 8000 }) } catch {}
-  }
+  try {
+    const bridgeMod = await importPiCodingAgentModule(path.join('dist', 'modes', 'interactive', 'rin-daemon-bridge.js'))
+    bridgeMod.ensureCtrlJNewLine?.((mode as any).keybindings)
+  } catch {}
 
   const originalShutdown = typeof mode.shutdown === 'function' ? mode.shutdown.bind(mode) : null
   if (originalShutdown && session?.settingsManager && typeof session.settingsManager.flush === 'function') {
     mode.shutdown = async () => {
-      try { await finalizeBrain('manual') } catch {}
       try { await session.settingsManager.flush() } catch {}
       return await originalShutdown()
     }
@@ -88,7 +85,6 @@ async function runRinInteractiveMode({
   try {
     await mode.run()
   } finally {
-    try { await finalizeBrain('manual') } catch {}
     if (session?.settingsManager && typeof session.settingsManager.flush === 'function') {
       try { await session.settingsManager.flush() } catch {}
     }

@@ -158,16 +158,16 @@ Rin は、表に見えるコマンドを小さく保っています。
 - **助手自身が整えに参加できる作り** で、メモ、道具、内側の説明を見ながら調整できる。
 - **表面は軽く、本事はもっと内側にある。**
 
+## Pi を土台に
+
+Pi は成熟した agent runtime であり、堅牢な session モデル、幅広い provider / model 対応、実用的な terminal UI、そして拡張にきちんと使える SDK / extension を備えています。
+
+Rin はその基盤の上で、ローカルファーストな持続型の個人用 assistant runtime へと重心を移しています。一回きりの session や単一の repo を中心にするのではなく、memory、chat bridge、定期実行、そして助手自身の notes / rules を session をまたいで持ち運べるようにしています。
+
 ## Documentation
 
 - [Runtime reference](install/home/docs/rin/README.md)
-- [TUI guide](install/home/docs/rin/docs/tui.md)
-- [Models and providers](install/home/docs/rin/docs/models.md)
-- [Skills](install/home/docs/rin/docs/skills.md)
-- [Extensions](install/home/docs/rin/docs/extensions.md)
-- [SDK](install/home/docs/rin/docs/sdk.md)
 - [Examples](install/home/docs/rin/examples/README.md)
-- [Development notes](install/home/docs/rin/docs/development.md)
 
 ## Development
 

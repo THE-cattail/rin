@@ -72,6 +72,23 @@ if [ "$#" -eq 0 ]; then
   set -- --current-user
 fi
 
+TARGET_STATE_ROOT="${RIN_HOME:-$HOME/.rin}"
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = '--state-root' ] || [ "$prev" = '--home' ] || [ "$prev" = '--dir' ]; then
+    TARGET_STATE_ROOT="$arg"
+    prev=''
+    continue
+  fi
+  prev="$arg"
+done
+
+if [ -f "$TARGET_STATE_ROOT/app/current/dist/index.js" ] && [ "${RIN_FORCE_INSTALL_EXISTING:-}" != '1' ]; then
+  echo "Rin is already installed at $TARGET_STATE_ROOT." >&2
+  echo "Use 'rin update' to upgrade, or uninstall first before running install.sh again." >&2
+  exit 1
+fi
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rin-install.XXXXXX")"
 cleanup() {
   rm -rf "$TMP_ROOT"

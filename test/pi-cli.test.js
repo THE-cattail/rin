@@ -20,6 +20,7 @@ test('top-level help advertises rin pi instead of rin debug', () => {
 
   assert.equal(result.status, 0)
   assert.match(output, /rin pi/)
+  assert.match(output, /`rin` starts the daemon-backed Rin TUI frontend\./)
   assert.doesNotMatch(output, /rin debug/)
 })
 

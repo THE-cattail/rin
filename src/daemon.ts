@@ -18,7 +18,7 @@ import {
   preferredOwnerChatKey,
   sendTextToOwners,
 } from './daemon-support'
-import { loadPiSdkModule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { loadPiSdkModule, manageSchedule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
 import { startDaemonTuiRpcServer } from './daemon-tui-rpc'
 import { ensureSearxngSidecar, stopSearxngSidecar } from './web-search'
 import { resolveRinLayout } from './runtime-paths'
@@ -3366,9 +3366,9 @@ const rinBridge = (() => {
       }
     }
 
-    async function handleStatus({ chatKey }) {
+    async function buildStatusText(chatKey) {
       const parsed = parseChatKey(chatKey)
-      if (!parsed) return
+      if (!parsed) return ''
       const pseudo = pseudoSessionFromParsed(parsed)
       const { chatDir, state } = getChatCtx(pseudo)
 
@@ -3389,11 +3389,11 @@ const rinBridge = (() => {
               let obj
               try { obj = JSON.parse(t) } catch { continue }
               if (safeString(obj?.sender?.trust) === 'BOT') continue
-            if (!isAgentVisibleRecord(obj)) continue
-            const text = safeString(obj?.text || '')
-            lastInboundSeq = Number(obj?.seq || 0) || lastInboundSeq
-            lastInboundAt = (Number(obj?.ts || 0) || 0) * 1000 || lastInboundAt
-            lastInboundText = text
+              if (!isAgentVisibleRecord(obj)) continue
+              const text = safeString(obj?.text || '')
+              lastInboundSeq = Number(obj?.seq || 0) || lastInboundSeq
+              lastInboundAt = (Number(obj?.ts || 0) || 0) * 1000 || lastInboundAt
+              lastInboundText = text
               break outer
             }
           }
@@ -3409,10 +3409,8 @@ const rinBridge = (() => {
       }
 
       const currentResult = normalizeLastAgentResult(state.lastAgentResult)
-      const currentShadowResult = normalizeLastAgentResult(state.lastShadowResult)
       const currentResetResult = normalizeLastAgentResult(state.lastResetResult)
       const resultForLastInbound = currentResult && currentResult.forInboundSeq >= lastInboundSeq ? currentResult : null
-      const shadowResultForLastInbound = currentShadowResult && currentShadowResult.forInboundSeq >= lastInboundSeq ? currentShadowResult : null
       const resultForLastReset = currentResetResult && currentResetResult.forInboundSeq >= resetCommandSeq ? currentResetResult : null
       const resetInProgress = Boolean(state.processing && state.processingNoInterrupt)
       const processingRuntime = state.processing
@@ -3422,7 +3420,7 @@ const rinBridge = (() => {
         ? `resetting since ${formatStatusTime(state.processingStartedAt)}${processingRuntime ? ` (${processingRuntime})` : ''}`
         : state.processing
           ? `running since ${formatStatusTime(state.processingStartedAt)}${processingRuntime ? ` (${processingRuntime})` : ''}`
-        : 'idle'
+          : 'idle'
       const resetLine = !resetCommandSeq
         ? 'none yet'
         : resetInProgress
@@ -3438,15 +3436,12 @@ const rinBridge = (() => {
       const finishedLine = !state.processing && resultForLastInbound
         ? formatStatusTime(resultForLastInbound.finishedAt)
         : 'n/a'
-      const shadowFinishedLine = shadowResultForLastInbound
-        ? formatStatusTime(shadowResultForLastInbound.finishedAt)
-        : 'n/a'
       const resetFinishedLine = !resetCommandSeq || resetInProgress || !resultForLastReset
         ? 'n/a'
         : formatStatusTime(resultForLastReset.finishedAt)
-	      const inboundPreview = lastInboundText
-	        ? decodeEscapedControlsIfLikely(lastInboundText).replace(/\s+/g, ' ').slice(0, 120)
-	        : ''
+      const inboundPreview = lastInboundText
+        ? decodeEscapedControlsIfLikely(lastInboundText).replace(/\s+/g, ' ').slice(0, 120)
+        : ''
       const piSession = readPiSessionFile(state)
       const piSessionContext = await readPiSessionContextSummary(piSession)
       const currentModelLine = piSessionContext && (piSessionContext.provider || piSessionContext.modelId)
@@ -3472,11 +3467,18 @@ const rinBridge = (() => {
         if (!resetInProgress) parts.push(`Reset result time: ${resetFinishedLine}`)
       }
       if (inboundPreview) parts.push(`Inbound preview: ${inboundPreview}`)
+      return parts.join('\n')
+    }
 
+    async function handleStatus({ chatKey }) {
+      const parsed = parseChatKey(chatKey)
+      if (!parsed) return
+      const text = await buildStatusText(chatKey)
+      if (!text) return
       await sendToChat({
         chatKey,
         parsed,
-        text: parts.join('\n'),
+        text,
         images: [],
         files: [],
         via: 'koishi-cmd',
@@ -5212,6 +5214,22 @@ const rinBridge = (() => {
             const resp = await requestDaemonSelfRestart({ chatKey, reason })
             return reply(resp)
           }
+          if (op === 'schedule.manage') {
+            const result = await manageSchedule({
+              stateRoot: homeRoot,
+              kind: safeString(payload?.kind),
+              action: safeString(payload?.action),
+              name: safeString(payload?.name || ''),
+              chatKey: safeString(payload?.chatKey || ''),
+              routineFile: safeString(payload?.routineFile || ''),
+              file: safeString(payload?.file || ''),
+              command: safeString(payload?.command || ''),
+              todoFile: safeString(payload?.todoFile || ''),
+              start: safeString(payload?.start || ''),
+              every: safeString(payload?.every || ''),
+            })
+            return reply({ ok: true, text: result.text, details: result.details })
+          }
           if (op === 'ping') return reply({ ok: true })
           return reply({ ok: false, error: 'unknown_op' })
         } catch (e) {
@@ -5248,7 +5266,62 @@ const rinBridge = (() => {
 	      logger.info(`ctl socket ready: ${ctlSockPath}`)
 	    })
 
-      const tuiRpcServer = startDaemonTuiRpcServer({ repoRoot, stateRoot: homeRoot, logger })
+      const tuiRpcServer = startDaemonTuiRpcServer({
+        repoRoot,
+        stateRoot: homeRoot,
+        logger,
+        bridge: {
+          listSessions: async () => {
+            const rows: Array<any> = []
+            for (const entry of listChatStateFiles(chatsRoot)) {
+              const platform = safeString(entry && entry.platform || '')
+              const chatId = safeString(entry && entry.chatId || '')
+              const botId = safeString(entry && entry.botId || '')
+              const st = readJson(entry.statePath, null)
+              if (!st || typeof st !== 'object') continue
+              const chatKey = safeString(st.chatKey || composeRuntimeChatKey(platform, chatId, botId)).trim()
+              const sessionFile = readPiSessionFile(st)
+              if (!chatKey || !sessionFile || !fs.existsSync(sessionFile)) continue
+              let modifiedAt = 0
+              try { modifiedAt = Math.max(Number(fs.statSync(sessionFile).mtimeMs || 0), Number(fs.statSync(entry.statePath).mtimeMs || 0)) } catch {}
+              rows.push({ chatKey, sessionFile, modifiedAt })
+            }
+            rows.sort((a, b) => Number(b.modifiedAt || 0) - Number(a.modifiedAt || 0))
+            return rows
+          },
+          getSessionConfig: async (chatKey) => {
+            const parsed = parseChatKey(chatKey)
+            if (!parsed) return null
+            const pseudo = pseudoSessionFromParsed(parsed, '')
+            const { chatDir, state } = getChatCtx(pseudo)
+            return {
+              sessionDir: piSessionDirForChat(chatDir),
+              sessionFile: readPiSessionFile(state),
+              brainChatKey: chatKey,
+              currentChatKey: chatKey,
+            }
+          },
+          runControlCommand: async ({ name, chatKey }) => {
+            const commandName = safeString(name || '').trim()
+            const effectiveChatKey = safeString(chatKey || '').trim()
+            if (commandName === '/status') {
+              if (!effectiveChatKey) throw new Error('bridge_chat_required')
+              return { notices: [await buildStatusText(effectiveChatKey)] }
+            }
+            if (commandName === '/restart') {
+              const resp = await requestDaemonSelfRestart({
+                chatKey: effectiveChatKey,
+                reason: 'tui:/restart',
+              })
+              if (!(resp && (resp as any).ok)) {
+                throw new Error(safeString(resp && (resp as any).error || 'daemon_restart_failed'))
+              }
+              return { restarting: true }
+            }
+            throw new Error(`unsupported_control_command:${commandName}`)
+          },
+        },
+      })
 
 	    // Schedule runner (inspection + timer): runs inside this single daemon.
 	    const scheduleTickMs = Math.max(Number(config.scheduleTickMs || 0), 5000)
@@ -6062,7 +6135,8 @@ function validateDaemonConfig(configPath: string, config: RinDaemonConfig) {
   const onebots = findPluginConfigs(config?.plugins, 'adapter-onebot').map((entry) => entry.value as Record<string, any>)
   const telegrams = findPluginConfigs(config?.plugins, 'adapter-telegram').map((entry) => entry.value as Record<string, any>)
   if (!onebots.length && !telegrams.length) {
-    throw new Error(`daemon_config_missing_adapters:${configPath}`)
+    // Local-only TUI installs may not configure any chat adapters yet.
+    return
   }
   for (const onebot of onebots) {
     if (!topSafeString(onebot && onebot.endpoint)) {

@@ -70,7 +70,7 @@ Operation:
 ## 7. Tool Surface
 
 Core Tools: `read`, `bash`, `edit`, `write`.
-Rin Tools: `rin_brain`, `rin_koishi`, `rin_schedule`, `web_search`.
+Rin Tools: `rin_brain`, `rin_koishi`, `rin_history`, `rin_schedule`, `rin_subagent`, `rin_skills`, `rin_context`, `rin_web_search`.
 Web search runtime config lives under `<runtime-root>/data/web-search/config.json`.
 Default web search uses the built-in vanilla SearxNG sidecar against Google Web. Users can point SearxNG at another base URL/API key or add their own Serper API in that config file.
 
@@ -95,15 +95,8 @@ Architecture:
 ## 9. Documentation Usage
 
 - **Rin Architecture/Behavior:** Reference this file.
-- **Upstream Pi/SDK/TUI:** Reference `docs/` and `examples/`.
-
-Mapping:
-- SDK: `docs/sdk.md`
-- TUI: `docs/tui.md`
-- Extensions: `docs/extensions.md`
-- Skills: `docs/skills.md`
-- Keybindings: `docs/keybindings.md`
-- Models/Providers: `docs/models.md`, `docs/providers.md`, `docs/custom-provider.md`
+- **Bundled local examples:** Reference `examples/`.
+- **Upstream Pi/SDK/TUI details:** Use upstream Pi documentation when needed.
 
 ## 10. Execution Guidance
 

@@ -313,6 +313,7 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger, bridge }:
         provider,
         model,
         thinking,
+        enableBrainHooks: true,
       })
       session = created.session
       if (!session) throw new Error('pi_sdk_session_missing')
@@ -628,6 +629,9 @@ export class DaemonTuiRpcClient {
   private pending = new Map<string, { resolve: (value: any) => void, reject: (error: any) => void }>()
   private listeners = new Set<(event: any) => void>()
   private connected = false
+  private manuallyStopped = false
+  private reconnectPromise: Promise<void> | null = null
+  private lastInit: any = {}
 
   constructor(private readonly stateRoot: string) {}
 
@@ -642,19 +646,29 @@ export class DaemonTuiRpcClient {
     }
   }
 
-  async start(init: { sessionFile?: string, provider?: string, model?: string, thinking?: string, chatKey?: string } = {}) {
-    if (this.connected) return
+  private async connectOnce(init: { sessionFile?: string, provider?: string, model?: string, thinking?: string, chatKey?: string } = {}) {
     const sockPath = tuiRpcSockPathForState(this.stateRoot)
     const socket = new net.Socket()
     socket.setEncoding('utf8')
     this.socket = socket
+    this.buffer = ''
     await new Promise<void>((resolve, reject) => {
-      const onError = (error: any) => {
+      const timeout = setTimeout(() => {
+        try { socket.destroy(new Error('daemon_tui_rpc_connect_timeout')) } catch {}
+        reject(new Error('daemon_tui_rpc_connect_timeout'))
+      }, 1500)
+      try { timeout.unref() } catch {}
+      const cleanup = () => {
+        try { clearTimeout(timeout) } catch {}
+        socket.removeListener('error', onError)
         socket.removeListener('connect', onConnect)
+      }
+      const onError = (error: any) => {
+        cleanup()
         reject(error)
       }
       const onConnect = () => {
-        socket.removeListener('error', onError)
+        cleanup()
         resolve()
       }
       socket.once('error', onError)
@@ -691,12 +705,56 @@ export class DaemonTuiRpcClient {
     })
     socket.on('close', () => {
       this.connected = false
+      this.socket = null
+      for (const [, req] of this.pending) {
+        try { req.reject(new Error('daemon_tui_rpc_disconnected')) } catch {}
+      }
+      this.pending.clear()
       this.emit({ type: 'client_close' })
+      if (!this.manuallyStopped) void this.ensureReconnected()
     })
     await this.send('init', init)
   }
 
+  private async ensureReconnected() {
+    if (this.manuallyStopped || this.connected) return
+    if (this.reconnectPromise) return await this.reconnectPromise
+    this.reconnectPromise = (async () => {
+      this.emit({ type: 'client_reconnecting' })
+      while (!this.manuallyStopped && !this.connected) {
+        try {
+          await this.connectOnce(this.lastInit)
+          this.emit({ type: 'client_reconnected' })
+          return
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+      }
+    })()
+    try {
+      await this.reconnectPromise
+    } finally {
+      this.reconnectPromise = null
+    }
+  }
+
+  setInitState(next: { sessionFile?: string, provider?: string, model?: string, thinking?: string, chatKey?: string } = {}) {
+    this.lastInit = {
+      ...this.lastInit,
+      ...next,
+    }
+  }
+
+  async start(init: { sessionFile?: string, provider?: string, model?: string, thinking?: string, chatKey?: string } = {}) {
+    this.manuallyStopped = false
+    this.setInitState(init)
+    if (this.connected) return
+    if (this.reconnectPromise) return await this.reconnectPromise
+    await this.connectOnce(this.lastInit)
+  }
+
   async stop() {
+    this.manuallyStopped = true
     if (!this.socket) return
     const socket = this.socket
     this.socket = null
@@ -706,6 +764,9 @@ export class DaemonTuiRpcClient {
   }
 
   private async send(command: string, data: any = {}) {
+    if ((!this.socket || !this.connected) && !this.manuallyStopped) {
+      await this.ensureReconnected()
+    }
     if (!this.socket || !this.connected) throw new Error('daemon_tui_rpc_not_connected')
     const id = String(this.requestId++)
     const payload = { id, type: command, ...data }

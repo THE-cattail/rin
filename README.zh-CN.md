@@ -156,16 +156,16 @@ Rin 有意把公开命令收得很小：
 - **由助手自己参与整理的配置方式**，通过它自己的笔记、工具和内部说明来慢慢调顺。
 - **表面很轻，本事更多收在助手里面。**
 
+## 基于 Pi
+
+Pi 是一套成熟的智能体运行时，提供了稳健的 session 机制、广泛的 provider / model 支持、完善的终端 UI，以及已经足够实用的扩展与 SDK 接口。
+
+Rin 则在这层基础上，把方向转向一个本地优先、可长期延续的个人助手运行时。它不把重点放在单次会话或某个仓库上，而是让记忆、聊天桥接、定时任务，以及助手自有的笔记和规则跨会话延续下去。
+
 ## 文档
 
 - [运行时参考](install/home/docs/rin/README.md)
-- [TUI 指南](install/home/docs/rin/docs/tui.md)
-- [模型与提供商](install/home/docs/rin/docs/models.md)
-- [技能](install/home/docs/rin/docs/skills.md)
-- [扩展](install/home/docs/rin/docs/extensions.md)
-- [SDK](install/home/docs/rin/docs/sdk.md)
 - [示例](install/home/docs/rin/examples/README.md)
-- [开发说明](install/home/docs/rin/docs/development.md)
 
 ## 开发
 

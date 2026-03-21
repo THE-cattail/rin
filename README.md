@@ -156,16 +156,16 @@ Rin keeps the public command set intentionally small:
 - **Assistant-led setup** through its own notes, tools, and internal instructions.
 - **A small surface, with more of the real work living inside the assistant.**
 
+## Built on Pi
+
+Pi serves as a mature agent runtime, with a robust session model, broad provider and model support, a capable terminal UI, and an SDK / extension surface that is already practical for real agent work.
+
+Rin builds on that foundation in a different direction. Rather than centering a single repo or a one-off coding session, it turns Pi into a local-first persistent runtime for one person and one continuing assistant—carrying memory, chat bridges, schedules, and assistant-owned notes and rules across sessions.
+
 ## Documentation
 
 - [Runtime reference](install/home/docs/rin/README.md)
-- [TUI guide](install/home/docs/rin/docs/tui.md)
-- [Models and providers](install/home/docs/rin/docs/models.md)
-- [Skills](install/home/docs/rin/docs/skills.md)
-- [Extensions](install/home/docs/rin/docs/extensions.md)
-- [SDK](install/home/docs/rin/docs/sdk.md)
 - [Examples](install/home/docs/rin/examples/README.md)
-- [Development notes](install/home/docs/rin/docs/development.md)
 
 ## Development
 

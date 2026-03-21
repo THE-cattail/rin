@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import nodeCrypto from 'node:crypto'
 import net from 'node:net'
 import nodeUtil from 'node:util'
@@ -496,6 +497,90 @@ async function ctlRequest({
   })
 }
 
+function isCtlUnavailableError(error: any): boolean {
+  const text = safeString(error && error.message ? error.message : error).trim().toLowerCase()
+  if (!text) return false
+  return text.includes('enoent')
+    || text.includes('econnrefused')
+    || text.includes('no such file')
+    || text.includes('not found')
+    || text.includes('connect')
+}
+
+async function ctlRequestRequired({
+  stateRoot,
+  payload,
+  timeoutMs = 20_000,
+  signal,
+  feature = 'rin_daemon_capability',
+}: {
+  stateRoot: string
+  payload: any
+  timeoutMs?: number
+  signal?: AbortSignal
+  feature?: string
+}) {
+  try {
+    return await ctlRequest({ stateRoot, payload, timeoutMs, signal })
+  } catch (error: any) {
+    if (isCtlUnavailableError(error)) throw new Error(`rin_daemon_required:${feature}`)
+    throw error
+  }
+}
+
+async function manageScheduleViaCtl({
+  stateRoot,
+  kind,
+  action,
+  name = '',
+  chatKey = '',
+  routineFile = '',
+  file = '',
+  command = '',
+  todoFile = '',
+  start = '',
+  every = '',
+  signal,
+}: {
+  stateRoot: string
+  kind: string
+  action: string
+  name?: string
+  chatKey?: string
+  routineFile?: string
+  file?: string
+  command?: string
+  todoFile?: string
+  start?: string
+  every?: string
+  signal?: AbortSignal
+}) {
+  const resp = await ctlRequestRequired({
+    stateRoot,
+    payload: {
+      op: 'schedule.manage',
+      kind,
+      action,
+      name,
+      chatKey,
+      routineFile,
+      file,
+      command,
+      todoFile,
+      start,
+      every,
+    },
+    timeoutMs: action === 'run' ? 35 * 60_000 : 20_000,
+    signal,
+    feature: 'schedule',
+  })
+  if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? String(resp.error) : 'schedule_failed')
+  return {
+    text: safeString(resp && resp.text).trim() || 'OK',
+    details: resp && resp.details ? resp.details : { response: resp },
+  }
+}
+
 function resolveHomeFilePath(filePath: string) {
   const raw = safeString(filePath).trim()
   if (!raw) return ''
@@ -535,7 +620,7 @@ async function sendBridgeMessage({
 }) {
   const resolvedImages = ensureReadableFiles(images, 'image')
   const resolvedFiles = ensureReadableFiles(files, 'file')
-  const resp = await ctlRequest({
+  const resp = await ctlRequestRequired({
     stateRoot,
     payload: {
       op: 'send',
@@ -546,6 +631,7 @@ async function sendBridgeMessage({
       files: resolvedFiles.map((filePath) => ({ path: filePath, name: path.basename(filePath) })),
     },
     signal,
+    feature: 'bridge_send',
   })
   if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? String(resp.error) : 'send_failed')
   return { ok: true, images: resolvedImages, files: resolvedFiles, response: resp }
@@ -562,7 +648,7 @@ async function getChatHistoryMessage({
   messageId: string
   signal?: AbortSignal
 }) {
-  const resp = await ctlRequest({
+  const resp = await ctlRequestRequired({
     stateRoot,
     payload: {
       op: 'history.get',
@@ -570,6 +656,7 @@ async function getChatHistoryMessage({
       messageId: safeString(messageId),
     },
     signal,
+    feature: 'bridge_history',
   })
   if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? String(resp.error) : 'history_get_failed')
   return resp
@@ -1342,11 +1429,13 @@ function createRinBuiltinTools({
         Type.Literal('chat'),
       ])),
     }),
-    execute: async (_toolCallId: string, params: any) => {
+    execute: async (_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       const action = safeString(params && params.action).trim()
       const limit = Math.max(1, Number(params && params.limit || 10) || 10)
       const source = safeString(params && params.source || 'auto').trim() || 'auto'
-      const rows = readConversationTranscript({ stateRoot, currentChatKey, sessionDir, sessionFile, source })
+      const runtimeSessionFile = safeString(ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionFile === 'function' ? ctx.sessionManager.getSessionFile() : '').trim() || safeString(sessionFile).trim()
+      const runtimeSessionDir = runtimeSessionFile ? path.dirname(runtimeSessionFile) : safeString(sessionDir).trim()
+      const rows = readConversationTranscript({ stateRoot, currentChatKey, sessionDir: runtimeSessionDir, sessionFile: runtimeSessionFile, source })
       if (action === 'recent') {
         const picked = rows.slice(-limit)
         return toolResultFromText(formatTranscriptEntries(picked), {
@@ -1599,36 +1688,6 @@ function createRinBuiltinTools({
     if (!apiKey) throw new Error(`model_not_available:${safeString(model && model.provider).trim()}/${safeString(model && model.id).trim()}`)
   }
 
-  function createSubagentResourceLoader(systemPrompt: string) {
-    const runtime = typeof pi.createExtensionRuntime === 'function' ? pi.createExtensionRuntime() : undefined
-    return {
-      getExtensions: () => ({ extensions: [], errors: [], runtime }),
-      getSkills: () => ({ skills: [], diagnostics: [] }),
-      getPrompts: () => ({ prompts: [], diagnostics: [] }),
-      getThemes: () => ({ themes: [], diagnostics: [] }),
-      getAgentsFiles: () => ({ agentsFiles: [] }),
-      getSystemPrompt: () => systemPrompt,
-      getAppendSystemPrompt: () => [],
-      getPathMetadata: () => new Map(),
-      extendResources: () => {},
-      reload: async () => {},
-    }
-  }
-
-  function setSessionSystemPromptLocal(session: any, systemPrompt: string) {
-    const next = safeString(systemPrompt).trim()
-    if (!next || !session) return
-    try { session._baseSystemPrompt = next } catch {}
-    try {
-      if (session.agent && session.agent.state && typeof session.agent.state === 'object') {
-        session.agent.state.systemPrompt = next
-      }
-    } catch {}
-    try {
-      if (session.agent && typeof session.agent.setSystemPrompt === 'function') session.agent.setSystemPrompt(next)
-    } catch {}
-  }
-
   function buildSubagentSystemPromptLocal(baseSystemPrompt: string, contextMode: 'full' | 'summary' | 'empty') {
     const base = safeString(baseSystemPrompt).trim()
     const modeRule = contextMode === 'full'
@@ -1658,148 +1717,251 @@ function createRinBuiltinTools({
     return pi.createCodingTools(cwd)
   }
 
-  async function createEphemeralSubagentSession({
-    cwd,
-    model,
-    thinking,
-    tools,
-    systemPrompt,
-  }: {
-    cwd: string
-    model: any
-    thinking?: string
-    tools: Array<any>
-    systemPrompt: string
-  }) {
-    const workerSessionManager = pi.SessionManager.inMemory(cwd)
-    const workerResourceLoader = createSubagentResourceLoader(systemPrompt || 'You are a helpful assistant.')
-    const created = await pi.createAgentSession({
-      cwd,
-      agentDir,
-      authStorage,
-      modelRegistry,
-      resourceLoader: workerResourceLoader,
-      sessionManager: workerSessionManager,
-      model,
-      thinkingLevel: thinking,
-      tools,
-    })
-    if (!created || !created.session) throw new Error('subagent_session_missing')
-    setSessionSystemPromptLocal(created.session, systemPrompt)
+  function getSubagentToolNames(ctx?: any) {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const tool of getSubagentToolSnapshot(ctx)) {
+      const name = safeString(tool && tool.name).trim()
+      if (!name || seen.has(name)) continue
+      seen.add(name)
+      out.push(name)
+    }
+    return out
+  }
+
+  function resolveSubagentRunnerPath() {
+    const candidates = [
+      path.resolve(__dirname, 'subagent-runner.js'),
+      path.resolve(__dirname, '..', 'dist', 'subagent-runner.js'),
+      path.resolve(__dirname, 'dist', 'subagent-runner.js'),
+    ]
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return candidate
+    }
+    throw new Error('subagent_runner_missing')
+  }
+
+  function writeSubagentPayloadTempFile(payload: any) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-subagent-'))
+    const filePath = path.join(dir, 'payload.json')
+    fs.writeFileSync(filePath, JSON.stringify(payload), 'utf8')
     return {
-      session: created.session,
-      sessionManager: workerSessionManager,
+      dir,
+      filePath,
+      cleanup() {
+        try { fs.unlinkSync(filePath) } catch {}
+        try { fs.rmdirSync(dir) } catch {}
+      },
     }
   }
 
-  async function runEphemeralSubagentTurn({
-    session,
+  async function runSubagentProcessLocal({
+    cwd,
+    model,
+    thinking,
+    toolNames,
+    systemPrompt,
     prompt,
+    messages,
+    currentChatKey,
+    parentSessionDir,
+    parentSessionFile,
     signal,
     onUpdate,
     updateDetails,
   }: {
-    session: any
+    cwd: string
+    model: any
+    thinking?: string
+    toolNames?: Array<string>
+    systemPrompt: string
     prompt: string
+    messages?: Array<any>
+    currentChatKey?: string
+    parentSessionDir?: string
+    parentSessionFile?: string
     signal?: AbortSignal
     onUpdate?: any
     updateDetails?: any
   }) {
+    if (pi && typeof pi.__rinRunSubagentProcess === 'function') {
+      return await pi.__rinRunSubagentProcess({
+        cwd,
+        model,
+        thinking,
+        toolNames,
+        systemPrompt,
+        prompt,
+        messages,
+        currentChatKey,
+        parentSessionDir,
+        parentSessionFile,
+        signal,
+        onUpdate,
+        updateDetails,
+      })
+    }
+
+    const runnerPath = resolveSubagentRunnerPath()
+    const payloadFile = writeSubagentPayloadTempFile({
+      repoRoot,
+      workspaceRoot: stateRoot,
+      agentDir,
+      cwd,
+      provider: safeString(model && model.provider).trim(),
+      model: safeString(model && model.id).trim(),
+      thinking: safeString(thinking).trim(),
+      toolNames: Array.isArray(toolNames) ? toolNames : [],
+      systemPrompt,
+      prompt,
+      messages: Array.isArray(messages) ? messages : [],
+      currentChatKey: safeString(currentChatKey).trim(),
+      parentSessionDir: safeString(parentSessionDir).trim(),
+      parentSessionFile: safeString(parentSessionFile).trim(),
+    })
+
     let currentAssistantText = ''
     let lastAssistantText = ''
     let finalMessages: Array<any> = []
     let aborted = false
-    const unsubscribe = typeof session.subscribe === 'function'
-      ? session.subscribe((event: any) => {
-          const eventType = safeString(event && event.type)
-          if (eventType === 'message_start') {
-            const message = event && event.message
-            if (safeString(message && message.role) === 'assistant') currentAssistantText = ''
-            return
-          }
-          if (eventType === 'message_update') {
-            const message = event && event.message
-            const deltaEvent = event && event.assistantMessageEvent
-            if (safeString(message && message.role) !== 'assistant') return
-            if (safeString(deltaEvent && deltaEvent.type) === 'text_delta') {
-              currentAssistantText += safeString(deltaEvent && deltaEvent.delta)
-              if (typeof onUpdate === 'function') {
-                try {
-                  onUpdate({
-                    content: [{ type: 'text', text: currentAssistantText || '(running...)' }],
-                    details: updateDetails || {},
-                  })
-                } catch {}
-              }
-            }
-            return
-          }
-          if (eventType === 'message_end') {
-            const message = event && event.message
-            if (safeString(message && message.role) !== 'assistant') return
-            const text = extractAssistantTextLocal(message) || currentAssistantText
-            if (text) lastAssistantText = text
-            currentAssistantText = text || currentAssistantText
-            return
-          }
-          if (eventType === 'agent_end') {
-            finalMessages = Array.isArray(event && event.messages) ? event.messages : []
-            for (let i = finalMessages.length - 1; i >= 0; i--) {
-              const message = finalMessages[i]
-              if (safeString(message && message.role) !== 'assistant') continue
-              const text = extractAssistantTextLocal(message)
-              if (text) {
-                lastAssistantText = text
-                break
-              }
-            }
-          }
-        })
-      : () => {}
-
-    const abortHandler = () => {
-      aborted = true
-      if (session && typeof session.abort === 'function') {
-        Promise.resolve(session.abort()).catch(() => {})
-      }
-    }
-    if (signal) {
-      if (signal.aborted) abortHandler()
-      else signal.addEventListener('abort', abortHandler, { once: true })
-    }
+    let runnerResult: any = null
+    let stderr = ''
 
     try {
-      if (typeof session.prompt !== 'function') throw new Error('subagent_prompt_unavailable')
-      await session.prompt(prompt)
-    } finally {
-      try { unsubscribe() } catch {}
+      const child = spawn(process.execPath, [runnerPath, payloadFile.filePath], {
+        cwd,
+        env: {
+          ...process.env,
+          RIN_REPO_ROOT: repoRoot,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+
+      const parseSessionEvent = (event: any) => {
+        const eventType = safeString(event && event.type)
+        if (eventType === 'message_start') {
+          const message = event && event.message
+          if (safeString(message && message.role) === 'assistant') currentAssistantText = ''
+          return
+        }
+        if (eventType === 'message_update') {
+          const message = event && event.message
+          const deltaEvent = event && event.assistantMessageEvent
+          if (safeString(message && message.role) !== 'assistant') return
+          if (safeString(deltaEvent && deltaEvent.type) === 'text_delta') {
+            currentAssistantText += safeString(deltaEvent && deltaEvent.delta)
+            if (typeof onUpdate === 'function') {
+              try {
+                onUpdate({
+                  content: [{ type: 'text', text: currentAssistantText || '(running...)' }],
+                  details: updateDetails || {},
+                })
+              } catch {}
+            }
+          }
+          return
+        }
+        if (eventType === 'message_end') {
+          const message = event && event.message
+          if (safeString(message && message.role) !== 'assistant') return
+          const text = extractAssistantTextLocal(message) || currentAssistantText
+          if (text) lastAssistantText = text
+          currentAssistantText = text || currentAssistantText
+          return
+        }
+        if (eventType === 'agent_end') {
+          finalMessages = Array.isArray(event && event.messages) ? event.messages : []
+          for (let i = finalMessages.length - 1; i >= 0; i--) {
+            const message = finalMessages[i]
+            if (safeString(message && message.role) !== 'assistant') continue
+            const text = extractAssistantTextLocal(message)
+            if (text) {
+              lastAssistantText = text
+              break
+            }
+          }
+        }
+      }
+
+      const processLine = (line: string) => {
+        const trimmed = safeString(line).trim()
+        if (!trimmed) return
+        let parsed: any = null
+        try { parsed = JSON.parse(trimmed) } catch { return }
+        if (safeString(parsed && parsed.type) === 'session_event') {
+          parseSessionEvent(parsed.event)
+          return
+        }
+        if (safeString(parsed && parsed.type) === 'runner_result') {
+          runnerResult = parsed
+        }
+      }
+
+      let stdoutBuffer = ''
+      child.stdout.on('data', (chunk: any) => {
+        stdoutBuffer += safeString(chunk)
+        const lines = stdoutBuffer.split('\n')
+        stdoutBuffer = lines.pop() || ''
+        for (const line of lines) processLine(line)
+      })
+      child.stderr.on('data', (chunk: any) => {
+        stderr = trimTail(`${stderr}${safeString(chunk)}`, 64_000)
+      })
+
+      const abortHandler = () => {
+        aborted = true
+        try { child.kill('SIGTERM') } catch {}
+        const killTimer = setTimeout(() => {
+          try { child.kill('SIGKILL') } catch {}
+        }, 5000)
+        try { killTimer.unref() } catch {}
+      }
+      if (signal) {
+        if (signal.aborted) abortHandler()
+        else signal.addEventListener('abort', abortHandler, { once: true })
+      }
+
+      const exitCode = await new Promise<number>((resolve) => {
+        child.on('close', (code: number | null) => {
+          if (stdoutBuffer.trim()) processLine(stdoutBuffer)
+          resolve(code ?? 0)
+        })
+        child.on('error', () => resolve(1))
+      })
+
       if (signal) {
         try { signal.removeEventListener('abort', abortHandler) } catch {}
       }
-    }
 
-    const assistantMessages = finalMessages.filter((message: any) => safeString(message && message.role) === 'assistant')
-    let usage = emptyUsageLocal()
-    for (const message of assistantMessages) {
-      const nextUsage = message && message.usage ? message.usage : null
-      usage = mergeUsageLocal(usage, {
-        input: Number(nextUsage && nextUsage.input || 0),
-        output: Number(nextUsage && nextUsage.output || 0),
-        cacheRead: Number(nextUsage && nextUsage.cacheRead || 0),
-        cacheWrite: Number(nextUsage && nextUsage.cacheWrite || 0),
-        cost: Number(nextUsage && nextUsage.cost && nextUsage.cost.total || 0),
-        contextTokens: Number(nextUsage && nextUsage.totalTokens || 0),
-        turns: 1,
-      })
-    }
-    const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null
-    return {
-      text: safeString(lastAssistantText || currentAssistantText).trim(),
-      stopReason: safeString(lastAssistant && lastAssistant.stopReason).trim(),
-      errorMessage: safeString(lastAssistant && lastAssistant.errorMessage).trim(),
-      usage,
-      messages: finalMessages,
-      aborted,
+      const assistantMessages = finalMessages.filter((message: any) => safeString(message && message.role) === 'assistant')
+      let usage = emptyUsageLocal()
+      for (const message of assistantMessages) {
+        const nextUsage = message && message.usage ? message.usage : null
+        usage = mergeUsageLocal(usage, {
+          input: Number(nextUsage && nextUsage.input || 0),
+          output: Number(nextUsage && nextUsage.output || 0),
+          cacheRead: Number(nextUsage && nextUsage.cacheRead || 0),
+          cacheWrite: Number(nextUsage && nextUsage.cacheWrite || 0),
+          cost: Number(nextUsage && nextUsage.cost && nextUsage.cost.total || 0),
+          contextTokens: Number(nextUsage && nextUsage.totalTokens || 0),
+          turns: 1,
+        })
+      }
+      const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null
+      const runnerError = safeString(runnerResult && runnerResult.error).trim()
+      const errorMessage = safeString(lastAssistant && lastAssistant.errorMessage).trim() || runnerError || (exitCode !== 0 ? stderr : '')
+      return {
+        text: safeString(lastAssistantText || currentAssistantText || (runnerResult && runnerResult.lastAssistantText)).trim(),
+        stopReason: safeString(lastAssistant && lastAssistant.stopReason).trim() || (runnerError ? 'error' : ''),
+        errorMessage,
+        usage,
+        messages: finalMessages,
+        aborted: aborted || Boolean(runnerResult && runnerResult.aborted),
+        exitCode,
+        stderr,
+      }
+    } finally {
+      payloadFile.cleanup()
     }
   }
 
@@ -1809,12 +1971,18 @@ function createRinBuiltinTools({
     thinking,
     messages,
     signal,
+    currentChatKey,
+    parentSessionDir,
+    parentSessionFile,
   }: {
     cwd: string
     model: any
     thinking?: string
     messages: Array<any>
     signal?: AbortSignal
+    currentChatKey?: string
+    parentSessionDir?: string
+    parentSessionFile?: string
   }) {
     const serialized = truncateMiddleTextLocal(serializeMessagesForSubagent(messages), 120_000)
     const summarySystemPrompt = [
@@ -1831,23 +1999,29 @@ function createRinBuiltinTools({
       serialized,
       '</conversation>',
     ].join('\n')
-    const created = await createEphemeralSubagentSession({
+    const result = await runSubagentProcessLocal({
       cwd,
       model,
       thinking,
-      tools: [],
+      toolNames: [],
       systemPrompt: summarySystemPrompt,
+      prompt: summaryTask,
+      messages: [],
+      currentChatKey,
+      parentSessionDir,
+      parentSessionFile,
+      signal,
     })
-    try {
-      const result = await runEphemeralSubagentTurn({ session: created.session, prompt: summaryTask, signal })
-      const summary = safeString(result && result.text).trim()
-      if (!summary) throw new Error('subagent_summary_empty')
-      return {
-        summary,
-        usage: result && result.usage ? result.usage : emptyUsageLocal(),
-      }
-    } finally {
-      try { created.session.dispose() } catch {}
+    if (Boolean(result && result.aborted)) throw new Error('subagent_summary_aborted')
+    const errorMessage = safeString(result && result.errorMessage).trim() || safeString(result && result.text).trim()
+    if (safeString(result && result.stopReason).trim() === 'error' || errorMessage) {
+      throw new Error(errorMessage || 'subagent_summary_failed')
+    }
+    const summary = safeString(result && result.text).trim()
+    if (!summary) throw new Error('subagent_summary_empty')
+    return {
+      summary,
+      usage: result && result.usage ? result.usage : emptyUsageLocal(),
     }
   }
 
@@ -1901,21 +2075,184 @@ function createRinBuiltinTools({
     }
   }
 
+  function normalizeModelToolLimit(value: any) {
+    const n = Math.floor(Number(value))
+    if (!Number.isFinite(n) || n <= 0) return 100
+    return Math.max(1, Math.min(500, n))
+  }
+
+  function modelMatchesSearchLocal(model: any, rawSearch: any) {
+    const query = safeString(rawSearch).trim().toLowerCase()
+    if (!query) return true
+    const haystack = [
+      safeString(model && model.provider),
+      safeString(model && model.id),
+      safeString(model && model.name),
+      safeString(model && model.api),
+    ].join(' ').toLowerCase()
+    return query.split(/\s+/).every((part) => haystack.includes(part))
+  }
+
+  function collectModelsForTool(ctx: any, params: any) {
+    const registry = ctx && ctx.modelRegistry ? ctx.modelRegistry : modelRegistry
+    if (!registry || typeof registry.getAvailable !== 'function') throw new Error('missing_model_registry')
+
+    const scopeRaw = safeString(params && params.scope).trim().toLowerCase()
+    const scope = scopeRaw === 'all' ? 'all' : 'available'
+    const provider = safeString(params && params.provider).trim()
+    const search = safeString(params && params.search).trim()
+    const limit = normalizeModelToolLimit(params && params.limit)
+
+    const availableModels = Array.isArray(registry.getAvailable()) ? registry.getAvailable() : []
+    const availableKeys = new Set(
+      availableModels.map((entry: any) => `${safeString(entry && entry.provider).trim()}/${safeString(entry && entry.id).trim()}`),
+    )
+    const baseModels = scope === 'all' && typeof registry.getAll === 'function'
+      ? (Array.isArray(registry.getAll()) ? registry.getAll() : [])
+      : availableModels
+
+    const filtered = baseModels
+      .filter((entry: any) => !provider || safeString(entry && entry.provider).trim() === provider)
+      .filter((entry: any) => modelMatchesSearchLocal(entry, search))
+      .sort((a: any, b: any) => {
+        const providerCmp = safeString(a && a.provider).localeCompare(safeString(b && b.provider))
+        if (providerCmp !== 0) return providerCmp
+        return safeString(a && a.id).localeCompare(safeString(b && b.id))
+      })
+
+    const providerCounts = filtered.reduce((acc: Record<string, number>, entry: any) => {
+      const key = safeString(entry && entry.provider).trim() || '(unknown)'
+      acc[key] = Number(acc[key] || 0) + 1
+      return acc
+    }, {})
+
+    const models = filtered.slice(0, limit).map((entry: any) => {
+      const providerId = safeString(entry && entry.provider).trim()
+      const modelId = safeString(entry && entry.id).trim()
+      const key = `${providerId}/${modelId}`
+      return {
+        provider: providerId,
+        id: modelId,
+        name: safeString(entry && entry.name).trim() || undefined,
+        api: safeString(entry && entry.api).trim() || undefined,
+        reasoning: Boolean(entry && entry.reasoning),
+        input: Array.isArray(entry && entry.input) ? entry.input.map((item: any) => safeString(item).trim()).filter(Boolean) : [],
+        contextWindow: Number.isFinite(Number(entry && entry.contextWindow)) ? Number(entry && entry.contextWindow) : undefined,
+        maxTokens: Number.isFinite(Number(entry && entry.maxTokens)) ? Number(entry && entry.maxTokens) : undefined,
+        hasAuth: availableKeys.has(key),
+      }
+    })
+
+    return {
+      scope,
+      provider: provider || undefined,
+      search: search || undefined,
+      totalCount: filtered.length,
+      count: models.length,
+      truncated: filtered.length > models.length,
+      providers: providerCounts,
+      models,
+    }
+  }
+
+  function classifySubagentErrorKind(message: any) {
+    const text = safeString(message).trim().toLowerCase()
+    if (!text) return 'unknown'
+    if (text.startsWith('model_not_available:')) return 'model_not_available'
+    if (text.startsWith('model_not_found:')) return 'model_not_found'
+    if (text.startsWith('missing_provider')) return 'missing_provider'
+    if (text.startsWith('missing_model')) return 'missing_model'
+    if (text.startsWith('missing_task')) return 'missing_task'
+    if (text.includes('subagent_summary_aborted') || text.includes('request was aborted') || text.includes('operation aborted')) return 'aborted'
+    if (/quota|rate.?limit|too many requests|429|exhausted your capacity|capacity on this model/i.test(text)) return 'quota_or_rate_limit'
+    if (/unauthorized|forbidden|401|403|api key|credential|oauth|auth/i.test(text)) return 'auth'
+    if (/timed? out|timeout|network.?error|connection.?error|fetch failed|socket hang up|service.?unavailable|server.?error|502|503|504/i.test(text)) return 'upstream'
+    return 'unknown'
+  }
+
+  function formatSubagentErrorText(message: any, opts: { provider?: string, model?: string, phase?: string } = {}) {
+    const raw = safeString(message).trim() || 'Unknown subagent error'
+    const provider = safeString(opts && opts.provider).trim()
+    const model = safeString(opts && opts.model).trim()
+    const target = provider && model ? `${provider}/${model}` : provider || model
+    const phase = safeString(opts && opts.phase).trim().toLowerCase()
+    const phaseText = phase === 'prepare'
+      ? ' while summarizing parent context'
+      : phase === 'run'
+        ? ' while running the delegated task'
+        : ''
+    const kind = classifySubagentErrorKind(raw)
+
+    if (raw.startsWith('model_not_available:')) {
+      const targetText = raw.slice('model_not_available:'.length).trim() || target
+      return {
+        kind,
+        text: `Subagent model is not available with current auth: ${targetText || '(unknown model)'}`,
+      }
+    }
+    if (raw.startsWith('model_not_found:')) {
+      const targetText = raw.slice('model_not_found:'.length).trim() || target
+      return {
+        kind,
+        text: `Subagent model was not found: ${targetText || '(unknown model)'}`,
+      }
+    }
+    if (kind === 'quota_or_rate_limit') {
+      return {
+        kind,
+        text: `Subagent hit a quota or rate limit${target ? ` on ${target}` : ''}${phaseText}: ${raw}`,
+      }
+    }
+    if (kind === 'auth') {
+      return {
+        kind,
+        text: `Subagent authentication failed${target ? ` on ${target}` : ''}${phaseText}: ${raw}`,
+      }
+    }
+    if (kind === 'upstream') {
+      return {
+        kind,
+        text: `Subagent upstream request failed${target ? ` on ${target}` : ''}${phaseText}: ${raw}`,
+      }
+    }
+    if (kind === 'aborted') {
+      return {
+        kind,
+        text: `Subagent was aborted${phaseText}${target ? ` on ${target}` : ''}.`,
+      }
+    }
+    return {
+      kind,
+      text: `Subagent failed${target ? ` on ${target}` : ''}${phaseText}: ${raw}`,
+    }
+  }
+
   const subagentTool = {
     name: 'rin_subagent',
     label: 'Rin Subagent',
-    description: 'Delegate a task to a temporary worker session on a specific provider/model with full, summary, or empty context injection.',
-    promptSnippet: 'Run a temporary worker session on a specific provider/model, with full, summary, or empty parent-context injection.',
+    description: 'Delegate a task to a temporary worker session on a specific provider/model, or inspect valid target models before delegation.',
+    promptSnippet: 'Run a temporary worker session on a specific provider/model, or list valid subagent target models first.',
     promptGuidelines: [
       'Use this when the user explicitly wants a different provider/model to handle a subtask without changing the main session model.',
+      'If you are unsure which provider/model IDs are valid, call `rin_subagent` with `action: "list_models"` first and then pick from that result.',
       'Choose contextMode deliberately: `full` for work that depends on the current thread, `summary` for compressed carry-over, and `empty` for clean isolated exploration.',
       'Write the delegated task as a self-contained contract: desired outcome, important constraints, and expected output shape.',
       'Prefer direct delegated work over temporary main-model switching; the result comes back as tool output for the parent session to use.',
     ],
     parameters: Type.Object({
-      provider: Type.String({ description: 'Provider ID to use for the worker session.' }),
-      model: Type.String({ description: 'Model ID to use for the worker session.' }),
-      task: Type.String({ description: 'Task for the delegated worker.' }),
+      action: Type.Optional(Type.Union([
+        Type.Literal('run'),
+        Type.Literal('list_models'),
+      ])),
+      provider: Type.Optional(Type.String({ description: 'Provider ID to use for the worker session, or to filter model listing results.' })),
+      model: Type.Optional(Type.String({ description: 'Model ID to use for the worker session.' })),
+      task: Type.Optional(Type.String({ description: 'Task for the delegated worker.' })),
+      scope: Type.Optional(Type.Union([
+        Type.Literal('available'),
+        Type.Literal('all'),
+      ])),
+      search: Type.Optional(Type.String({ description: 'Case-insensitive search when action is `list_models`.' })),
+      limit: Type.Optional(Type.Number({ description: 'Maximum models to return when action is `list_models`. Default 100, max 500.' })),
       contextMode: Type.Optional(Type.Union([
         Type.Literal('full'),
         Type.Literal('summary'),
@@ -1931,8 +2268,17 @@ function createRinBuiltinTools({
       ])),
     }),
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) => {
-      let workerSession: any = null
+      let failurePhase = 'run'
+      const requestedProvider = safeString(params && params.provider).trim()
+      const requestedModel = safeString(params && params.model).trim()
       try {
+        const actionRaw = safeString(params && params.action).trim().toLowerCase()
+        const action = actionRaw === 'list_models' ? 'list_models' : 'run'
+        if (action === 'list_models') {
+          const result = collectModelsForTool(ctx, params)
+          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+        }
+
         const task = safeString(params && params.task).trim()
         if (!task) throw new Error('missing_task')
 
@@ -1944,7 +2290,9 @@ function createRinBuiltinTools({
 
         const currentSession = getActiveSessionForSubagent(ctx)
         const workerCwd = path.resolve((ctx && ctx.cwd) || process.cwd())
-        const inheritedTools = getSubagentToolSnapshot(ctx)
+        const runtimeSessionFile = safeString(ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionFile === 'function' ? ctx.sessionManager.getSessionFile() : '').trim() || safeString(sessionFile).trim()
+        const runtimeSessionDir = runtimeSessionFile ? path.dirname(runtimeSessionFile) : safeString(sessionDir).trim()
+        const inheritedToolNames = getSubagentToolNames(ctx)
         const inheritedBaseSystemPrompt = safeString(
           (ctx && typeof ctx.getSystemPrompt === 'function' ? ctx.getSystemPrompt() : '')
           || (currentSession && currentSession.agent && currentSession.agent.state && currentSession.agent.state.systemPrompt)
@@ -1957,6 +2305,7 @@ function createRinBuiltinTools({
         let preparationUsage = emptyUsageLocal()
 
         if (contextMode === 'summary' && contextSnapshot.messages.length > 0) {
+          failurePhase = 'prepare'
           if (typeof onUpdate === 'function') {
             try {
               onUpdate({
@@ -1971,24 +2320,15 @@ function createRinBuiltinTools({
             thinking: requestedThinking,
             messages: contextSnapshot.messages,
             signal,
+            currentChatKey,
+            parentSessionDir: runtimeSessionDir,
+            parentSessionFile: runtimeSessionFile,
           })
           summaryText = safeString(summaryResult && summaryResult.summary).trim()
           preparationUsage = summaryResult && summaryResult.usage ? summaryResult.usage : emptyUsageLocal()
         }
 
-        const created = await createEphemeralSubagentSession({
-          cwd: workerCwd,
-          model: targetModel,
-          thinking: requestedThinking,
-          tools: inheritedTools,
-          systemPrompt: inheritedSystemPrompt,
-        })
-        workerSession = created.session
-
-        if (contextMode === 'full' && contextSnapshot.messages.length > 0 && workerSession && workerSession.agent && typeof workerSession.agent.replaceMessages === 'function') {
-          workerSession.agent.replaceMessages(cloneJsonLocal(contextSnapshot.messages))
-        }
-
+        failurePhase = 'run'
         const workerPrompt = contextMode === 'summary' && summaryText
           ? [
               'Parent session summary:',
@@ -1999,9 +2339,17 @@ function createRinBuiltinTools({
             ].join('\n')
           : task
 
-        const runResult = await runEphemeralSubagentTurn({
-          session: workerSession,
+        const runResult = await runSubagentProcessLocal({
+          cwd: workerCwd,
+          model: targetModel,
+          thinking: requestedThinking,
+          toolNames: inheritedToolNames,
+          systemPrompt: inheritedSystemPrompt,
           prompt: workerPrompt,
+          messages: contextMode === 'full' ? contextSnapshot.messages : [],
+          currentChatKey,
+          parentSessionDir: runtimeSessionDir,
+          parentSessionFile: runtimeSessionFile,
           signal,
           onUpdate,
           updateDetails: {
@@ -2038,13 +2386,29 @@ function createRinBuiltinTools({
           runResult && (runResult.aborted || safeString(runResult.errorMessage).trim() || safeString(runResult.stopReason).trim() === 'error'),
         )
         const errorText = safeString(runResult && runResult.errorMessage).trim()
-        return toolResultFromText(isError ? errorText || resultText : resultText, details, isError)
-      } catch (e: any) {
-        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-      } finally {
-        if (workerSession && typeof workerSession.dispose === 'function') {
-          try { workerSession.dispose() } catch {}
+        if (isError) {
+          const formatted = formatSubagentErrorText(errorText || resultText, {
+            provider: safeString(targetModel && targetModel.provider).trim(),
+            model: safeString(targetModel && targetModel.id).trim(),
+            phase: 'run',
+          })
+          return toolResultFromText(formatted.text, {
+            ...details,
+            errorKind: formatted.kind,
+            rawError: errorText || resultText,
+          }, true)
         }
+        return toolResultFromText(resultText, details, false)
+      } catch (e: any) {
+        const formatted = formatSubagentErrorText(safeString(e && e.message ? e.message : e), {
+          provider: requestedProvider,
+          model: requestedModel,
+          phase: failurePhase,
+        })
+        return toolResultFromText(formatted.text, {
+          errorKind: formatted.kind,
+          rawError: safeString(e && e.message ? e.message : e),
+        }, true)
       }
     },
   }
@@ -2121,20 +2485,240 @@ function createRinBuiltinTools({
     },
   }
 
-  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, subagentTool, skillTool, contextTool]
+  return [koishiTool, historyTool, subagentTool, skillTool]
 }
 
 function createRinBuiltinExtensionFactory({
   repoRoot,
   stateRoot,
   brainChatKey = 'local:default',
+  getAdditionalTools = () => [],
+  enableBrainHooks = true,
 }: {
   repoRoot: string
   stateRoot: string
   brainChatKey?: string
+  getAdditionalTools?: () => Array<any>
+  enableBrainHooks?: boolean
 }) {
+  function collectContextFilesForExtension(targetPath: string) {
+    const raw = safeString(targetPath).trim()
+    const resolvedTarget = path.resolve(raw || process.cwd())
+    let currentDir = resolvedTarget
+    try {
+      const stat = fs.statSync(resolvedTarget)
+      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
+    } catch {
+      currentDir = path.dirname(resolvedTarget)
+    }
+
+    const agentsFiles: Array<any> = []
+    const seen = new Set<string>()
+    let cursor = currentDir
+    while (true) {
+      const agentsPath = path.join(cursor, 'AGENTS.md')
+      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
+        seen.add(agentsPath)
+        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
+      }
+      const parent = path.dirname(cursor)
+      if (!parent || parent === cursor) break
+      cursor = parent
+    }
+
+    const localRinDir = path.join(currentDir, '.rin')
+    let localRinEntries: Array<any> = []
+    if (fs.existsSync(localRinDir)) {
+      try {
+        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
+          const entryPath = path.join(localRinDir, name)
+          let kind = 'missing'
+          try {
+            const stat = fs.statSync(entryPath)
+            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
+          } catch {}
+          return { name, path: entryPath, kind }
+        })
+      } catch {}
+    }
+
+    return {
+      targetPath: resolvedTarget,
+      directory: currentDir,
+      agentsFiles,
+      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
+      localRinEntries,
+    }
+  }
+
   return (pi: any) => {
     try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
+
+    pi.registerTool({
+      name: 'rin_brain',
+      label: 'Rin Brain',
+      description: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge. Do not use this for verbatim transcript reads.',
+      promptSnippet: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge.',
+      promptGuidelines: [],
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal('show'),
+          Type.Literal('search'),
+          Type.Literal('recall'),
+          Type.Literal('history_recent'),
+          Type.Literal('history_search'),
+          Type.Literal('remember'),
+          Type.Literal('finalize'),
+          Type.Literal('knowledge_search'),
+          Type.Literal('knowledge_index'),
+        ]),
+        query: Type.Optional(Type.String()),
+        hours: Type.Optional(Type.Number({ minimum: 1 })),
+        limit: Type.Optional(Type.Number({ minimum: 1 })),
+        chatKey: Type.Optional(Type.String()),
+        scope: Type.Optional(Type.String()),
+        reason: Type.Optional(Type.String()),
+        mode: Type.Optional(Type.String()),
+      }),
+      async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
+        const action = safeString(params && params.action).trim()
+        const args: string[] = []
+        if (action === 'knowledge_search' || action === 'knowledge_index') args.push('knowledge')
+        else args.push('brain')
+        if (action === 'show') args.push('show')
+        if (action === 'search') args.push('search', safeString(params.query || ''))
+        if (action === 'recall') args.push('recall', safeString(params.query || ''))
+        if (action === 'history_recent') args.push('history', 'recent')
+        if (action === 'history_search') args.push('history', 'search', safeString(params.query || ''))
+        if (action === 'remember') args.push('remember', safeString(params.query || ''))
+        if (action === 'finalize') args.push('finalize')
+        if (action === 'knowledge_search') args.push('search', safeString(params.query || ''))
+        if (action === 'knowledge_index') args.push('index')
+        if (params && params.limit != null) args.push('--limit', String(params.limit))
+        if (params && params.hours != null && action === 'history_recent') args.push('--hours', String(params.hours))
+        if (params && params.chatKey) args.push('--chatKey', safeString(params.chatKey))
+        if (params && params.scope && action !== 'knowledge_search' && action !== 'knowledge_index' && action !== 'history_recent' && action !== 'history_search') args.push('--scope', safeString(params.scope))
+        if (params && params.reason && action === 'finalize') args.push('--reason', safeString(params.reason))
+        if (params && params.mode && action === 'knowledge_search') args.push('--mode', safeString(params.mode))
+        const result = await runRinBrainCommand({ repoRoot, stateRoot, args, signal })
+        return toolResultFromCommand(result)
+      },
+    })
+
+    pi.registerTool({
+      name: 'rin_schedule',
+      label: 'Rin Schedule',
+      description: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
+      promptSnippet: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
+      parameters: Type.Object({
+        kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
+        action: Type.Union([
+          Type.Literal('list'),
+          Type.Literal('create'),
+          Type.Literal('enable'),
+          Type.Literal('disable'),
+          Type.Literal('delete'),
+          Type.Literal('run'),
+        ]),
+        name: Type.Optional(Type.String()),
+        chatKey: Type.Optional(Type.String()),
+        routineFile: Type.Optional(Type.String()),
+        file: Type.Optional(Type.String()),
+        command: Type.Optional(Type.String()),
+        todoFile: Type.Optional(Type.String()),
+        start: Type.Optional(Type.String()),
+        every: Type.Optional(Type.String()),
+      }),
+      async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
+        try {
+          const result = await manageScheduleViaCtl({
+            stateRoot,
+            kind: safeString(params.kind),
+            action: safeString(params.action),
+            name: safeString(params.name || ''),
+            chatKey: safeString(params.chatKey || ''),
+            routineFile: safeString(params.routineFile || ''),
+            file: safeString(params.file || ''),
+            command: safeString(params.command || ''),
+            todoFile: safeString(params.todoFile || ''),
+            start: safeString(params.start || ''),
+            every: safeString(params.every || ''),
+            signal,
+          })
+          return toolResultFromText(result.text, result.details)
+        } catch (e: any) {
+          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'rin_web_search',
+      label: 'Web Search',
+      description: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
+      promptSnippet: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
+      parameters: Type.Object({
+        query: Type.String(),
+        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
+        freshness: Type.Optional(Type.Union([
+          Type.Literal('day'),
+          Type.Literal('week'),
+          Type.Literal('month'),
+          Type.Literal('year'),
+        ])),
+        safe: Type.Optional(Type.Union([
+          Type.Literal('off'),
+          Type.Literal('moderate'),
+          Type.Literal('strict'),
+        ])),
+        provider: Type.Optional(Type.String()),
+        providers: Type.Optional(Type.Array(Type.String())),
+        noCache: Type.Optional(Type.Boolean()),
+      }),
+      async execute(_toolCallId: string, params: any) {
+        try {
+          const result = await searchWeb({
+            stateRoot,
+            query: safeString(params && params.query || ''),
+            limit: params && params.limit != null ? Number(params.limit) : undefined,
+            freshness: safeString(params && params.freshness || ''),
+            safe: safeString(params && params.safe || ''),
+            provider: safeString(params && params.provider || ''),
+            providers: Array.isArray(params && params.providers) ? params.providers.map((item: any) => safeString(item)) : undefined,
+            noCache: Boolean(params && params.noCache),
+          })
+          return toolResultFromText(JSON.stringify(result, null, 2), result, !result.ok)
+        } catch (e: any) {
+          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'rin_context',
+      label: 'Rin Context',
+      description: 'Inspect the AGENTS.md chain and local .rin resources that apply to a target file or directory.',
+      promptSnippet: 'Inspect the AGENTS.md chain and local .rin resources for a target path.',
+      parameters: Type.Object({
+        path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
+      }),
+      async execute(_toolCallId: string, params: any) {
+        try {
+          const result = collectContextFilesForExtension(safeString(params && params.path))
+          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+        } catch (e: any) {
+          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+        }
+      },
+    })
+
+    const additionalTools = Array.isArray(getAdditionalTools()) ? getAdditionalTools() : []
+    for (const tool of additionalTools) {
+      if (!tool || typeof tool !== 'object' || !safeString(tool.name).trim()) continue
+      pi.registerTool(tool)
+    }
+
+    if (!enableBrainHooks) return
 
     pi.on('message_start', async (event: any) => {
       const message = event && event.message
@@ -2220,12 +2804,16 @@ type CreateRinPiSessionOptions = {
   sessionDir?: string
   sessionFile?: string
   sessionPolicy?: RinPiSessionPolicy
+  inMemorySession?: boolean
   brainChatKey?: string
   provider?: string
   model?: string
   thinking?: string
   currentChatKey?: string
+  toolSessionDir?: string
+  toolSessionFile?: string
   systemPromptExtra?: string
+  enableBrainHooks?: boolean
 }
 
 type CreateRinPiSessionResult = {
@@ -2561,7 +3149,6 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
   const docsBlock = [
     'Rin docs (read only for Rin, SDK, extensions, themes, skills, prompt templates, package docs, or TUI requests):',
     `- README: ${path.join(docsRoot, 'rin', 'README.md')}`,
-    `- Docs dir: ${path.join(docsRoot, 'rin', 'docs')}`,
     `- Examples dir: ${path.join(docsRoot, 'rin', 'examples')}`,
     '- For Rin work, read the relevant .md files fully and follow local markdown links before implementing.',
   ].join('\n')
@@ -2718,12 +3305,16 @@ async function createRinPiSession({
   sessionDir = '',
   sessionFile = '',
   sessionPolicy = 'continueRecent',
+  inMemorySession = false,
   brainChatKey = 'local:default',
   provider = '',
   model = '',
   thinking = '',
   currentChatKey = '',
+  toolSessionDir = '',
+  toolSessionFile = '',
   systemPromptExtra = '',
+  enableBrainHooks = false,
 }: CreateRinPiSessionOptions): Promise<CreateRinPiSessionResult> {
   const pi = await loadPiSdkModule()
   const stateRoot = path.resolve(workspaceRoot)
@@ -2737,6 +3328,19 @@ async function createRinPiSession({
   const resolvedResourceCwd = path.resolve(resourceCwd || stateRoot)
   const resolvedSettingsCwd = path.resolve(settingsCwd || stateRoot)
   const settingsManager = lockGlobalSettingsManager(pi.SettingsManager.create(resolvedSettingsCwd, agentDir))
+  const resolvedSessionDir = path.resolve(sessionDir || defaultSessionDirForAgent(agentDir, path.resolve(sessionCwd)))
+  ensureDir(resolvedSessionDir)
+  const resolvedSessionFile = safeString(sessionFile).trim()
+  const effectiveToolSessionDir = path.resolve(safeString(toolSessionDir).trim() || resolvedSessionDir)
+  const effectiveToolSessionFile = safeString(toolSessionFile).trim() || resolvedSessionFile
+  const sessionManager = inMemorySession
+    ? pi.SessionManager.inMemory(path.resolve(sessionCwd))
+    : resolvedSessionFile && fs.existsSync(resolvedSessionFile)
+      ? pi.SessionManager.open(resolvedSessionFile, resolvedSessionDir)
+      : sessionPolicy === 'new'
+        ? pi.SessionManager.create(path.resolve(sessionCwd), resolvedSessionDir)
+        : pi.SessionManager.continueRecent(path.resolve(sessionCwd), resolvedSessionDir)
+  const sessionRef = { current: null as any }
   const manualSkills = collectManualSkills([
     path.join(agentDir, 'skills'),
   ])
@@ -2792,7 +3396,26 @@ async function createRinPiSession({
       diagnostics: filterResourceDiagnostics(resourceLoader, current && current.diagnostics, agentDir),
     }),
     extensionFactories: [
-      createRinBuiltinExtensionFactory({ repoRoot, stateRoot, brainChatKey }),
+      createRinBuiltinExtensionFactory({
+        repoRoot,
+        stateRoot,
+        brainChatKey,
+        enableBrainHooks,
+        getAdditionalTools: () => createRinBuiltinTools({
+          repoRoot,
+          stateRoot,
+          currentChatKey,
+          sessionDir: effectiveToolSessionDir,
+          sessionFile: effectiveToolSessionFile,
+          pi,
+          agentDir,
+          authStorage,
+          modelRegistry,
+          resourceLoader,
+          sessionManager,
+          sessionRef,
+        }),
+      }),
     ],
     appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
   })
@@ -2803,17 +3426,6 @@ async function createRinPiSession({
   if (provider && model && !resolvedModel) {
     throw new Error(`pi_model_not_found:${provider}/${model}`)
   }
-
-  const resolvedSessionDir = path.resolve(sessionDir || defaultSessionDirForAgent(agentDir, path.resolve(sessionCwd)))
-  ensureDir(resolvedSessionDir)
-  const resolvedSessionFile = safeString(sessionFile).trim()
-  const sessionManager = resolvedSessionFile && fs.existsSync(resolvedSessionFile)
-    ? pi.SessionManager.open(resolvedSessionFile, resolvedSessionDir)
-    : sessionPolicy === 'new'
-      ? pi.SessionManager.create(path.resolve(sessionCwd), resolvedSessionDir)
-      : pi.SessionManager.continueRecent(path.resolve(sessionCwd), resolvedSessionDir)
-
-  const sessionRef = { current: null as any }
 
   const created = await pi.createAgentSession({
     cwd: path.resolve(sessionCwd),
@@ -2826,7 +3438,7 @@ async function createRinPiSession({
     model: resolvedModel,
     thinkingLevel: normalizeThinkingLevel(thinking),
     tools: pi.createCodingTools(path.resolve(sessionCwd)),
-    customTools: createRinBuiltinTools({ repoRoot, stateRoot, currentChatKey, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile, pi, agentDir, authStorage, modelRegistry, resourceLoader, sessionManager, sessionRef }),
+    customTools: [],
   })
 
   if (!created || !created.session) {
@@ -3013,6 +3625,7 @@ async function runPiSdkTurn({
       thinking,
       currentChatKey,
       systemPromptExtra,
+      enableBrainHooks: true,
     })
     session = created.session
     if (!session) throw new Error('pi_sdk_session_missing')
@@ -3189,6 +3802,7 @@ export {
   acquireExclusiveFileLock,
   resolveRinLayout,
   runRinBrainCommand,
+  manageSchedule,
   enqueueBrainJob,
   enqueueBrainTurn,
   enqueueBrainFinalize,

@@ -22,6 +22,7 @@ const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
 const readline = require('node:readline/promises')
+const dynamicImport = new Function('specifier', 'return import(specifier)')
 
 function repoRootFromEntry() {
   return path.resolve(__dirname, '..')
@@ -236,9 +237,14 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'anthropic',
     label: 'Claude / Anthropic API key',
     authKey: 'anthropic',
+    preferredModelIds: ['claude-sonnet-4-6', 'claude-opus-4-6'],
+    modelHints: {
+      'claude-sonnet-4-6': 'balanced default',
+      'claude-opus-4-6': 'stronger, pricier',
+    },
     models: [
-      { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4 — balanced default' },
-      { value: 'claude-opus-4-20250514', label: 'Claude Opus 4 — stronger, pricier' },
+      { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — balanced default' },
+      { value: 'claude-opus-4-6', label: 'Claude Opus 4.6 — stronger, pricier' },
       { value: 'custom', label: 'Custom model id' },
     ],
   },
@@ -246,6 +252,12 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'openai-codex',
     label: 'ChatGPT / Codex subscription',
     authKey: 'openai',
+    preferredModelIds: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex'],
+    modelHints: {
+      'gpt-5.4': 'recommended',
+      'gpt-5.3-codex': 'Codex-focused',
+      'gpt-5.2-codex': 'slightly older Codex fallback',
+    },
     models: [
       { value: 'gpt-5.4', label: 'GPT-5.4 — recommended' },
       { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
@@ -256,10 +268,16 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'openai',
     label: 'OpenAI API',
     authKey: 'openai',
+    preferredModelIds: ['gpt-5.2', 'gpt-5.1', 'gpt-4.1'],
+    modelHints: {
+      'gpt-5.2': 'newest default',
+      'gpt-5.1': 'strong stable option',
+      'gpt-4.1': 'older fallback',
+    },
     models: [
-      { value: 'gpt-5.4', label: 'GPT-5.4 — newest default' },
+      { value: 'gpt-5.2', label: 'GPT-5.2 — newest default' },
+      { value: 'gpt-5.1', label: 'GPT-5.1' },
       { value: 'gpt-4.1', label: 'GPT-4.1' },
-      { value: 'gpt-4o', label: 'GPT-4o' },
       { value: 'custom', label: 'Custom model id' },
     ],
   },
@@ -267,8 +285,17 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'google',
     label: 'Gemini / Google',
     authKey: 'google',
+    preferredModelIds: ['gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+    modelHints: {
+      'gemini-3.1-pro-preview': 'newer Gemini preview',
+      'gemini-3-pro-preview': 'Gemini 3 preview',
+      'gemini-2.5-pro': 'strong stable option',
+      'gemini-2.5-flash': 'faster / cheaper',
+    },
     models: [
-      { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — stronger reasoning' },
+      { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview — newer Gemini preview' },
+      { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview' },
+      { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — strong stable option' },
       { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — faster / cheaper' },
       { value: 'custom', label: 'Custom model id' },
     ],
@@ -277,10 +304,16 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'openrouter',
     label: 'OpenRouter',
     authKey: 'openrouter',
+    preferredModelIds: ['anthropic/claude-sonnet-4.6', 'openai/gpt-5.1-codex', 'google/gemini-3.1-pro-preview'],
+    modelHints: {
+      'anthropic/claude-sonnet-4.6': 'balanced default',
+      'openai/gpt-5.1-codex': 'coding-focused',
+      'google/gemini-3.1-pro-preview': 'Gemini via OpenRouter',
+    },
     models: [
-      { value: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4 via OpenRouter' },
-      { value: 'openai/gpt-4.1', label: 'GPT-4.1 via OpenRouter' },
-      { value: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro via OpenRouter' },
+      { value: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6 via OpenRouter — balanced default' },
+      { value: 'openai/gpt-5.1-codex', label: 'GPT-5.1 Codex via OpenRouter' },
+      { value: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview via OpenRouter' },
       { value: 'custom', label: 'Custom model id' },
     ],
   },
@@ -288,9 +321,16 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'groq',
     label: 'Groq',
     authKey: 'groq',
+    preferredModelIds: ['openai/gpt-oss-120b', 'qwen/qwen3-32b', 'llama-3.3-70b-versatile'],
+    modelHints: {
+      'openai/gpt-oss-120b': 'best general default',
+      'qwen/qwen3-32b': 'compact reasoning option',
+      'llama-3.3-70b-versatile': 'broad compatibility',
+    },
     models: [
-      { value: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B Versatile' },
+      { value: 'openai/gpt-oss-120b', label: 'GPT OSS 120B — best general default' },
       { value: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
+      { value: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B Versatile' },
       { value: 'custom', label: 'Custom model id' },
     ],
   },
@@ -298,6 +338,8 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'custom',
     label: 'Other / custom provider',
     authKey: '',
+    preferredModelIds: [],
+    modelHints: {},
     models: [
       { value: 'custom', label: 'Enter custom model id' },
     ],
@@ -317,6 +359,72 @@ const INSTALL_THINKING_OPTIONS = [
 function findInstallProviderPreset(value = '') {
   const key = safeString(value).trim()
   return INSTALL_PROVIDER_PRESETS.find((item) => item.value === key) || INSTALL_PROVIDER_PRESETS[0]
+}
+
+let cachedInstallModelsByProvider = null
+
+function formatInstallModelChoice(model, hint = '') {
+  const id = safeString(model && model.id).trim()
+  const name = safeString(model && model.name).trim() || id
+  const base = name && name !== id ? `${name} (${id})` : id
+  return hint ? `${base} — ${hint}` : base
+}
+
+async function loadInstallModelsByProvider() {
+  if (cachedInstallModelsByProvider) return cachedInstallModelsByProvider
+  try {
+    const pi = await dynamicImport('@mariozechner/pi-coding-agent')
+    const tempBase = path.join(os.tmpdir(), `rin-install-model-registry-${process.pid}`)
+    const authStorage = pi.AuthStorage.create(`${tempBase}-auth.json`)
+    const modelRegistry = new pi.ModelRegistry(authStorage, `${tempBase}-models.json`)
+    const grouped = new Map()
+    for (const model of modelRegistry.getAll()) {
+      const provider = safeString(model && model.provider).trim()
+      if (!provider) continue
+      if (!grouped.has(provider)) grouped.set(provider, [])
+      grouped.get(provider).push(model)
+    }
+    cachedInstallModelsByProvider = grouped
+  } catch {
+    cachedInstallModelsByProvider = new Map()
+  }
+  return cachedInstallModelsByProvider
+}
+
+async function getInstallProviderModelChoices(providerValue = '') {
+  const providerPreset = findInstallProviderPreset(providerValue)
+  const fallbackModels = Array.isArray(providerPreset && providerPreset.models) ? providerPreset.models : []
+  if (!providerPreset || safeString(providerPreset.value).trim() === 'custom') return fallbackModels
+
+  const grouped = await loadInstallModelsByProvider()
+  const providerModels = Array.isArray(grouped && grouped.get(providerPreset.value)) ? grouped.get(providerPreset.value) : []
+  if (!providerModels.length) return fallbackModels
+
+  const choices = []
+  const seen = new Set()
+  for (const id of Array.isArray(providerPreset.preferredModelIds) ? providerPreset.preferredModelIds : []) {
+    const match = providerModels.find((model) => safeString(model && model.id).trim() === safeString(id).trim())
+    if (!match) continue
+    const normalizedId = safeString(match && match.id).trim()
+    if (!normalizedId || seen.has(normalizedId)) continue
+    seen.add(normalizedId)
+    choices.push({
+      value: normalizedId,
+      label: formatInstallModelChoice(match, safeString(providerPreset.modelHints && providerPreset.modelHints[normalizedId]).trim()),
+    })
+  }
+
+  const fillTarget = Math.max(3, choices.length)
+  for (const model of providerModels) {
+    const id = safeString(model && model.id).trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    choices.push({ value: id, label: formatInstallModelChoice(model) })
+    if (choices.length >= fillTarget) break
+  }
+
+  choices.push({ value: 'custom', label: 'Custom model id' })
+  return choices.length > 1 ? choices : fallbackModels
 }
 
 function findChoiceIndex(options, value) {
@@ -461,12 +569,13 @@ async function collectInstallProviderConfig(rl, defaults = {}) {
   const provider = providerChoice === 'custom'
     ? await promptInstallText(rl, 'Custom provider id', '')
     : providerChoice
+  const modelChoices = await getInstallProviderModelChoices(providerChoice)
 
   const modelChoice = await promptInstallChoiceWithDefault(
     rl,
     'Choose the default model',
-    providerPreset.models,
-    safeString(defaults.model || providerPreset.models[0]?.value || 'custom').trim(),
+    modelChoices,
+    safeString(defaults.model || modelChoices[0]?.value || 'custom').trim(),
   )
   const model = modelChoice === 'custom'
     ? await promptInstallText(rl, 'Custom model id', '')
@@ -804,6 +913,8 @@ function ensurePiBootstrap() {
 }
 
 function rinAppDir() {
+  const installedAppDir = path.join(rootDir(), 'app', 'current')
+  if (fs.existsSync(path.join(installedAppDir, 'dist', 'index.js'))) return installedAppDir
   return repoDir()
 }
 
@@ -923,6 +1034,7 @@ function formatCliErrorMessage(error) {
   if (message === 'install_requires_root_to_create_user') return 'Creating a new user during install needs root on Linux. Re-run with sudo, or choose the current user.'
   if (message === 'install_existing_user_unsupported') return 'Installing for another user is only available on Linux root installs right now. Please choose the current user instead.'
   if (message === 'install_create_user_unsupported') return 'Creating a new user from the installer is only available on Linux root installs right now. Please create the user first, or install for the current user.'
+  if (message.startsWith('install_already_exists:')) return `Rin is already installed at ${message.slice('install_already_exists:'.length)}. Use \`rin update\`, uninstall first, or pass the internal upgrade path.`
   return message
 }
 
@@ -1010,21 +1122,30 @@ function installRuntimeBundle(stateRoot, { bundleRoot = '', releaseId = '' } = {
 }
 
 function installedLauncherText({ stateRoot }) {
-  const targetPath = path.join(stateRoot, 'app', 'current', 'dist', 'index.js')
+  const resolvedStateRoot = path.resolve(stateRoot)
+  const targetPath = path.join(resolvedStateRoot, 'app', 'current', 'dist', 'index.js')
   return [
     '#!/usr/bin/env sh',
-    `export RIN_HOME=${JSON.stringify(path.resolve(stateRoot))}`,
-    `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(targetPath)} "$@"`,
+    `export RIN_HOME=${JSON.stringify(resolvedStateRoot)}`,
+    `RIN_NODE=${JSON.stringify(process.execPath)}`,
+    `RIN_TARGET=${JSON.stringify(targetPath)}`,
+    '',
+    'if [ ! -f "$RIN_TARGET" ]; then',
+    '  echo "rin: installed runtime missing at $RIN_TARGET" >&2',
+    '  echo "rin: automatic self-repair is disabled. Please run `rin update` from a working source tree, or reinstall after uninstalling the broken runtime." >&2',
+    '  exit 1',
+    'fi',
+    'exec "$RIN_NODE" "$RIN_TARGET" "$@"',
     '',
   ].join('\n')
 }
 
-function createInstalledLauncher({ stateRoot, userHome }) {
+function createInstalledLauncher({ stateRoot, userHome, sourceRepo = '', sourceRef = '' }) {
   const localBinDir = path.join(userHome, '.local', 'bin')
   ensureDir(localBinDir)
   const launcherPath = path.join(localBinDir, 'rin')
   const targetPath = path.join(stateRoot, 'app', 'current', 'dist', 'index.js')
-  const launcherText = installedLauncherText({ stateRoot })
+  const launcherText = installedLauncherText({ stateRoot, sourceRepo, sourceRef })
   try { fs.rmSync(launcherPath, { force: true }) } catch {}
   fs.writeFileSync(launcherPath, launcherText, 'utf8')
   try { fs.chmodSync(targetPath, 0o755) } catch {}
@@ -1107,6 +1228,7 @@ function performInstall({
   stateRoot = '',
   serviceManager = 'auto',
   overwriteManaged = true,
+  allowExistingInstall = false,
   sourceRepo = '',
   sourceRef = '',
   bundleRoot = '',
@@ -1120,6 +1242,11 @@ function performInstall({
   const resolvedBundleRoot = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
   const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
   const metadataPath = path.join(resolvedStateRoot, 'install.json')
+  const currentAppEntry = path.join(resolvedStateRoot, 'app', 'current', 'dist', 'index.js')
+
+  if (!dryRun && !allowExistingInstall && fs.existsSync(currentAppEntry)) {
+    throw new Error(`install_already_exists:${resolvedStateRoot}`)
+  }
 
   if (dryRun) {
     const settings = installConfig && installConfig.settingsPatch && typeof installConfig.settingsPatch === 'object'
@@ -1133,7 +1260,11 @@ function performInstall({
       dryRun: true,
       stateRoot: resolvedStateRoot,
       launcherPath,
-      launcherText: installedLauncherText({ stateRoot: resolvedStateRoot }),
+      launcherText: installedLauncherText({
+        stateRoot: resolvedStateRoot,
+        sourceRepo: safeString(sourceRepo).trim(),
+        sourceRef: safeString(sourceRef).trim(),
+      }),
       metadataPath,
       preview: {
         targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
@@ -1165,7 +1296,12 @@ function performInstall({
   const appliedConfig = installConfig && typeof installConfig === 'object'
     ? applyInstallConfiguration({ stateRoot: resolvedStateRoot, ...installConfig })
     : null
-  const createdLauncherPath = createInstalledLauncher({ stateRoot: resolvedStateRoot, userHome })
+  const createdLauncherPath = createInstalledLauncher({
+    stateRoot: resolvedStateRoot,
+    userHome,
+    sourceRepo: safeString(sourceRepo).trim(),
+    sourceRef: safeString(sourceRef).trim(),
+  })
   const writtenMetadataPath = writeInstallMetadata(resolvedStateRoot, {
     installedAt: new Date().toISOString(),
     stateRoot: resolvedStateRoot,
@@ -1236,7 +1372,8 @@ function daemonSystemdUnitPath() {
 
 function daemonSystemdUnitText() {
   const stateRoot = rootDir().replace(/\\/g, '/')
-  const repoRoot = repoDir().replace(/\\/g, '/')
+  const appRoot = path.dirname(path.dirname(daemonDistPath())).replace(/\\/g, '/')
+  const repoRoot = appRoot
   const entry = daemonDistPath().replace(/\\/g, '/')
   return [
     '[Unit]',
@@ -1246,7 +1383,7 @@ function daemonSystemdUnitText() {
     '',
     '[Service]',
     'Type=simple',
-    `WorkingDirectory=${stateRoot}`,
+    `WorkingDirectory=${appRoot}`,
     `Environment=RIN_HOME=${stateRoot}`,
     `Environment=RIN_REPO_ROOT=${repoRoot}`,
     `ExecStart=${process.execPath} ${entry}`,
@@ -1441,7 +1578,7 @@ function usage(exitCode = 2) {
     '',
     'Notes:',
     '  - `rin` starts the daemon-backed Rin TUI frontend.',
-    '  - `rin pi` starts the old in-process Pi InteractiveMode for recovery/debugging.',
+    '  - `rin pi` starts the native Pi InteractiveMode fallback.',
     '  - `rin restart` restarts the Rin daemon service.',
     '  - install is handled by install.sh, not by a public CLI subcommand.',
     '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
@@ -1482,6 +1619,7 @@ async function cmdInstall(argv) {
   let serviceManager = safeString(process.env.RIN_SERVICE_MANAGER).trim() || 'auto'
   let sourceRepo = safeString(process.env.RIN_INSTALL_SOURCE_REPO).trim()
   let sourceRef = safeString(process.env.RIN_INSTALL_SOURCE_REF).trim()
+  let allowExistingInstall = false
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -1491,6 +1629,7 @@ async function cmdInstall(argv) {
     if (a === '--source-ref') { sourceRef = argv[i + 1] || ''; i++; continue }
     if (a === '--service-manager') { serviceManager = argv[i + 1] || ''; i++; continue }
     if (a === '--state-root' || a === '--home' || a === '--dir') { requestedStateRoot = argv[i + 1] || ''; i++; continue }
+    if (a === '--upgrade-existing') { allowExistingInstall = true; continue }
     if (a === '--current-user') { mode = 'current'; continue }
     if (a === '--user') { mode = 'existing'; targetUserName = argv[i + 1] || ''; i++; continue }
     if (a === '--create-user') { mode = 'create'; createUserName = argv[i + 1] || ''; i++; continue }
@@ -1573,6 +1712,7 @@ async function cmdInstall(argv) {
       stateRoot: requestedStateRoot,
       serviceManager,
       overwriteManaged: true,
+      allowExistingInstall,
       sourceRepo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
       sourceRef: safeString(sourceRef).trim() || detectInstallSourceRef(),
       installConfig,
@@ -1637,6 +1777,7 @@ async function cmdUpdate(argv) {
       '__install',
       '--current-user',
       '--yes',
+      '--upgrade-existing',
       '--service-manager', serviceManager,
       '--source-repo', repoUrl,
       '--source-ref', sourceRef,
@@ -1897,6 +2038,7 @@ async function cmdPi(argv) {
   const hostArgs = argv.slice(index)
   const hostPath = ensureRinTuiHost()
   if (!noBootstrap) ensurePiBootstrap()
+  await ensureDaemonStarted()
   await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
     cwd: sessionRoot,
     env: {
@@ -2139,7 +2281,8 @@ function daemonLaunchdPlistPath() {
 
 function daemonLaunchdPlistText() {
   const stateRoot = rootDir().replace(/\\/g, '/')
-  const repoRoot = repoDir().replace(/\\/g, '/')
+  const appRoot = path.dirname(path.dirname(daemonDistPath())).replace(/\\/g, '/')
+  const repoRoot = appRoot
   const entry = daemonDistPath().replace(/\\/g, '/')
   const stdoutPath = path.join(rootDir(), 'data', 'daemon.stdout.log').replace(/\\/g, '/')
   const stderrPath = path.join(rootDir(), 'data', 'daemon.stderr.log').replace(/\\/g, '/')
@@ -2154,7 +2297,7 @@ function daemonLaunchdPlistText() {
     `    <string>${process.execPath}</string>`,
     `    <string>${entry}</string>`,
     '  </array>',
-    `  <key>WorkingDirectory</key><string>${stateRoot}</string>`,
+    `  <key>WorkingDirectory</key><string>${appRoot}</string>`,
     '  <key>EnvironmentVariables</key>',
     '  <dict>',
     `    <key>RIN_HOME</key><string>${stateRoot}</string>`,
@@ -2237,7 +2380,7 @@ async function startDetachedDaemonRuntime() {
   const child = spawn(process.execPath, [daemonEntry], {
     detached: true,
     stdio: 'ignore',
-    cwd: rootDir(),
+    cwd: path.dirname(path.dirname(daemonEntry)),
     env: {
       ...process.env,
       RIN_HOME: rootDir(),

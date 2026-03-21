@@ -134,7 +134,7 @@ cp permission-gate.ts ~/.rin/extensions/
 
 ## Writing Extensions
 
-See [docs/extensions.md](../../docs/extensions.md) for full documentation.
+For the full extension API reference, use the upstream Pi extension documentation.
 
 ```typescript
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";

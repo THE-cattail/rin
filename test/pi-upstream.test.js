@@ -70,4 +70,5 @@ test('rin daemon mode keeps the patch surface minimal', () => {
   assert.match(source, /InteractiveMode/)
   assert.match(source, /'status'/)
   assert.match(source, /'restart'/)
+  assert.match(source, /model:\s*this\.model/)
 })

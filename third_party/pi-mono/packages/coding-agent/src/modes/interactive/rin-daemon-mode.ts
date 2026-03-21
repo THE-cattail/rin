@@ -250,7 +250,16 @@ class RinDaemonSessionAdapter {
 
   async refreshRemote({ reloadMessages = false, refreshCommands = false }: { reloadMessages?: boolean, refreshCommands?: boolean } = {}) {
     const nextState = await this.client.getState().catch(() => null)
-    if (nextState && typeof nextState === 'object') this.currentState = nextState
+    if (nextState && typeof nextState === 'object') {
+      this.currentState = nextState
+      this.client.setInitState?.({
+        sessionFile: safeString(nextState && nextState.sessionFile).trim() || undefined,
+        chatKey: safeString(nextState && nextState.bridgeChatKey).trim() || undefined,
+        provider: safeString(nextState && nextState.model && nextState.model.provider).trim() || undefined,
+        model: safeString(nextState && nextState.model && nextState.model.id).trim() || undefined,
+        thinking: safeString(nextState && nextState.thinkingLevel).trim() || undefined,
+      })
+    }
     if (refreshCommands) {
       const commands = await this.client.getCommands().catch(() => [])
       this.extensionRunner.setCommands(Array.isArray(commands) ? commands : [])
@@ -295,6 +304,15 @@ class RinDaemonSessionAdapter {
           })
         } catch {}
       }
+      return
+    }
+    if (type === 'client_reconnecting') {
+      this.emit({ type: 'status', text: 'Daemon restarting, reconnecting…' })
+      return
+    }
+    if (type === 'client_reconnected') {
+      await this.refreshRemote({ reloadMessages: true, refreshCommands: true })
+      this.emit({ type: 'status', text: 'Daemon reconnected' })
       return
     }
     if (type === 'client_close' || type === 'client_error') {
@@ -393,6 +411,17 @@ class RinDaemonSessionAdapter {
     return {
       messages: Array.isArray(this.messages) ? this.messages : [],
       systemPrompt: this.systemPrompt,
+      model: this.model,
+      thinkingLevel: this.thinkingLevel,
+      isStreaming: this.isStreaming,
+      isCompacting: this.isCompacting,
+      isRetrying: this.isRetrying,
+      isBashRunning: this.isBashRunning,
+      steeringMode: this.steeringMode,
+      followUpMode: this.followUpMode,
+      pendingMessageCount: this.pendingMessageCount,
+      autoCompactionEnabled: this.autoCompactionEnabled,
+      autoRetryEnabled: this.autoRetryEnabled,
     }
   }
 
@@ -750,6 +779,7 @@ export async function runRinDaemonTui(runtime: any = {}) {
     sessionCatalogProvider,
     customSlashCommands,
   })
+  try { bridgeMod.ensureCtrlJNewLine?.((mode as any).keybindings) } catch {}
 
   try {
     await mode.run()
