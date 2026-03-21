@@ -3216,6 +3216,70 @@ function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: st
 const RIN_CONTINUE_TOKEN = EXPORTED_RIN_CONTINUE_TOKEN
 const RIN_CONTINUE_FOLLOWUP = EXPORTED_RIN_CONTINUE_FOLLOWUP
 
+function normalizeAssistantDuplicateText(text: any): string {
+  return safeString(text)
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .trim()
+}
+
+function normalizeAssistantMessageContentForRin(content: any): any {
+  const blocks = Array.isArray(content) ? content : []
+  if (!blocks.length) return blocks
+  const seenText = new Set<string>()
+  const out: any[] = []
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue
+    if (safeString(block.type) === 'thinking') {
+      const thinking = safeString((block as any).thinking).trim()
+      const signature = safeString((block as any).thinkingSignature).trim()
+      if (!thinking && !signature) continue
+      out.push(block)
+      continue
+    }
+    if (safeString(block.type) === 'text') {
+      const rawText = safeString((block as any).text)
+      const normalized = normalizeAssistantDuplicateText(rawText)
+      if (normalized && normalized.length >= 32 && seenText.has(normalized)) continue
+      if (normalized) seenText.add(normalized)
+      out.push(block)
+      continue
+    }
+    out.push(block)
+  }
+  return out
+}
+
+function normalizeAssistantMessageForRin(message: any): any {
+  if (!message || typeof message !== 'object') return message
+  if (safeString(message && message.role) !== 'assistant') return message
+  if (!Array.isArray(message.content)) return message
+  message.content = normalizeAssistantMessageContentForRin(message.content)
+  return message
+}
+
+function patchSessionAssistantMessageNormalization(session: any) {
+  if (!session || typeof session !== 'object' || session.__rinAssistantMessageNormalizationPatched) return
+  const originalHandleAgentEvent = typeof session._handleAgentEvent === 'function'
+    ? session._handleAgentEvent.bind(session)
+    : null
+  if (!originalHandleAgentEvent) return
+  session.__rinAssistantMessageNormalizationPatched = true
+  session._handleAgentEvent = async (event: any) => {
+    try {
+      if (event && typeof event === 'object') {
+        if (event.message) normalizeAssistantMessageForRin(event.message)
+        if (Array.isArray(event.messages)) {
+          for (const message of event.messages) normalizeAssistantMessageForRin(message)
+        }
+      }
+    } catch {}
+    return await originalHandleAgentEvent(event)
+  }
+}
+
 function patchSessionPromptAutoContinue(session: any) {
   if (!session || typeof session !== 'object' || session.__rinPromptAutoContinuePatched) return
   if (typeof session.prompt !== 'function' || typeof session.subscribe !== 'function') return
@@ -3467,6 +3531,7 @@ async function createRinPiSession({
       created.session.agent.setSystemPrompt(nextPrompt)
     }
   }
+  patchSessionAssistantMessageNormalization(created.session)
   patchSessionPromptAutoContinue(created.session)
 
   return {
@@ -3484,10 +3549,10 @@ async function createRinPiSession({
   }
 }
 
-return { resolvePiAgentDir, loadPiSdkModule, createRinPiSession }
+return { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, normalizeAssistantMessageForRin }
 })()
 
-const { resolvePiAgentDir, loadPiSdkModule, createRinPiSession } = RinPiSdk
+const { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, normalizeAssistantMessageForRin } = RinPiSdk
 
 const RinPiTurnRuntime = (() => {
 // @ts-nocheck
@@ -3814,6 +3879,7 @@ export {
   createRinBuiltinTools,
   createRinBuiltinExtensionFactory,
   buildRinBuiltinPromptBlock,
+  normalizeAssistantMessageForRin,
   EXPORTED_RIN_CONTINUE_TOKEN as RIN_CONTINUE_TOKEN,
   EXPORTED_RIN_CONTINUE_FOLLOWUP as RIN_CONTINUE_FOLLOWUP,
   resolvePiAgentDir,

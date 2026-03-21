@@ -99,6 +99,113 @@ function syncTree(src, dst, { overwrite = false } = {}) {
   return true
 }
 
+function collectRelativeFiles(root, prefix = '') {
+  const absRoot = safeString(root).trim()
+  if (!absRoot || !fs.existsSync(absRoot)) return []
+  const out = []
+  const names = fs.readdirSync(absRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+  for (const entry of names) {
+    const rel = prefix ? path.join(prefix, entry.name) : entry.name
+    const abs = path.join(absRoot, entry.name)
+    if (entry.isDirectory()) {
+      out.push(...collectRelativeFiles(abs, rel))
+      continue
+    }
+    if (entry.isFile()) out.push(rel)
+  }
+  return out
+}
+
+function pruneEmptyDirs(root, stopAt = root) {
+  const absRoot = safeString(root).trim()
+  const absStop = safeString(stopAt).trim() || absRoot
+  if (!absRoot || !fs.existsSync(absRoot)) return
+  const visit = (dir) => {
+    let names = []
+    try { names = fs.readdirSync(dir) } catch { return false }
+    for (const name of names) {
+      const child = path.join(dir, name)
+      let stat = null
+      try { stat = fs.statSync(child) } catch {}
+      if (!stat || !stat.isDirectory()) continue
+      visit(child)
+    }
+    if (path.resolve(dir) === path.resolve(absStop)) return false
+    try {
+      if (fs.readdirSync(dir).length === 0) {
+        fs.rmdirSync(dir)
+        return true
+      }
+    } catch {}
+    return false
+  }
+  visit(absRoot)
+}
+
+function normalizeManagedTreeManifest(manifest) {
+  const base = manifest && typeof manifest === 'object' ? JSON.parse(JSON.stringify(manifest)) : {}
+  const next = {
+    version: 1,
+    trees: base.trees && typeof base.trees === 'object' ? base.trees : {},
+  }
+  for (const [key, value] of Object.entries(next.trees)) {
+    next.trees[key] = Array.isArray(value)
+      ? value.map((item) => safeString(item).trim()).filter(Boolean)
+      : []
+  }
+  return next
+}
+
+function syncManagedTree(src, dst, {
+  overwrite = false,
+  manifestPath = '',
+  manifestKey = '',
+  legacyDeleteRelPaths = [],
+} = {}) {
+  if (!fs.existsSync(src)) return false
+  ensureDir(dst)
+
+  const currentFiles = collectRelativeFiles(src)
+  const manifest = manifestPath
+    ? normalizeManagedTreeManifest(readJson(manifestPath, { version: 1, trees: {} }))
+    : { version: 1, trees: {} }
+  const key = safeString(manifestKey).trim()
+  const previousFiles = key && Array.isArray(manifest.trees[key]) ? manifest.trees[key] : []
+  const currentFileSet = new Set(currentFiles)
+  const staleRelPaths = overwrite
+    ? Array.from(new Set([
+        ...previousFiles,
+        ...((Array.isArray(legacyDeleteRelPaths) ? legacyDeleteRelPaths : []).map((item) => safeString(item).trim()).filter(Boolean)),
+      ])).filter((rel) => rel && !currentFileSet.has(rel))
+    : []
+
+  for (const rel of staleRelPaths) {
+    const targetPath = path.join(dst, rel)
+    if (!fs.existsSync(targetPath)) continue
+    try { fs.rmSync(targetPath, { recursive: true, force: true }) } catch {}
+  }
+
+  let changed = staleRelPaths.length > 0
+  for (const rel of currentFiles) {
+    const srcPath = path.join(src, rel)
+    const dstPath = path.join(dst, rel)
+    let dstStat = null
+    try { dstStat = fs.statSync(dstPath) } catch {}
+    if (dstStat && !dstStat.isFile()) {
+      try { fs.rmSync(dstPath, { recursive: true, force: true }) } catch {}
+    }
+    if (syncFile(srcPath, dstPath, { overwrite })) changed = true
+  }
+
+  if (key) {
+    manifest.trees[key] = currentFiles.slice()
+    writeJsonAtomic(manifestPath, manifest)
+  }
+
+  if (overwrite) pruneEmptyDirs(dst)
+  return changed || currentFiles.length > 0
+}
+
 function normalizeGitUrl(value) {
   const raw = safeString(value).trim()
   if (!raw) return ''
@@ -116,14 +223,22 @@ function gitOutput(args, cwd = repoRootFromEntry()) {
   }
 }
 
+function detectInstallSourceRepoAt(cwd, fallback = DEFAULT_INSTALL_SOURCE_REPO) {
+  return normalizeGitUrl(gitOutput(['remote', 'get-url', 'origin'], cwd) || fallback)
+}
+
 function detectInstallSourceRepo(fallback = DEFAULT_INSTALL_SOURCE_REPO) {
-  return normalizeGitUrl(gitOutput(['remote', 'get-url', 'origin']) || fallback)
+  return detectInstallSourceRepoAt(repoRootFromEntry(), fallback)
+}
+
+function detectInstallSourceRefAt(cwd, fallback = DEFAULT_INSTALL_SOURCE_REF) {
+  const branch = gitOutput(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)
+  if (branch && branch !== 'HEAD') return branch
+  return gitOutput(['rev-parse', 'HEAD'], cwd) || fallback
 }
 
 function detectInstallSourceRef(fallback = DEFAULT_INSTALL_SOURCE_REF) {
-  const branch = gitOutput(['rev-parse', '--abbrev-ref', 'HEAD'])
-  if (branch && branch !== 'HEAD') return branch
-  return gitOutput(['rev-parse', 'HEAD']) || fallback
+  return detectInstallSourceRefAt(repoRootFromEntry(), fallback)
 }
 
 function npmInstallArgsFor(dir) {
@@ -802,7 +917,15 @@ function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = 
 
   if (writeTextIfMissing(path.join(home, 'AGENTS.md'), DEFAULT_RUNTIME_AGENTS_MD)) written.push('AGENTS.md')
 
-  if (syncTree(path.join(assetRoot, 'docs', 'rin'), path.join(home, 'docs', 'rin'), { overwrite: overwriteManaged })) {
+  const managedManifestPath = path.join(home, 'data', '.managed', 'install-home.json')
+  if (syncManagedTree(path.join(assetRoot, 'docs', 'rin'), path.join(home, 'docs', 'rin'), {
+    overwrite: overwriteManaged,
+    manifestPath: managedManifestPath,
+    manifestKey: 'docs/rin',
+    legacyDeleteRelPaths: [
+      'examples',
+    ],
+  })) {
     copied.push('docs/rin')
   }
 
@@ -1034,6 +1157,8 @@ function formatCliErrorMessage(error) {
   if (message === 'install_requires_root_to_create_user') return 'Creating a new user during install needs root on Linux. Re-run with sudo, or choose the current user.'
   if (message === 'install_existing_user_unsupported') return 'Installing for another user is only available on Linux root installs right now. Please choose the current user instead.'
   if (message === 'install_create_user_unsupported') return 'Creating a new user from the installer is only available on Linux root installs right now. Please create the user first, or install for the current user.'
+  if (message === 'local_bundle_root_missing') return 'A local source tree is required. Pass `--path <repo>` or run the command from the Rin source checkout.'
+  if (message.startsWith('local_bundle_package_missing:')) return `No Rin package.json found under ${message.slice('local_bundle_package_missing:'.length)}.`
   if (message.startsWith('install_already_exists:')) return `Rin is already installed at ${message.slice('install_already_exists:'.length)}. Use \`rin update\`, uninstall first, or pass the internal upgrade path.`
   return message
 }
@@ -1053,6 +1178,31 @@ function chownRecursiveIfPossible(targetPath, uid, gid) {
     try { names = fs.readdirSync(current) } catch {}
     for (const name of names) entries.push(path.join(current, name))
   }
+}
+
+function isLocalBundlePath(value) {
+  const raw = safeString(value).trim()
+  if (!raw) return false
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw)) return false
+  if (/^[A-Za-z][A-Za-z0-9+.-]*@/.test(raw)) return false
+  const abs = path.resolve(expandHome(raw))
+  try { return fs.statSync(abs).isDirectory() } catch { return false }
+}
+
+function resolveLocalBundleRoot(value, fallback = '') {
+  const raw = safeString(value).trim() || safeString(fallback).trim()
+  if (!raw) return ''
+  return path.resolve(expandHome(raw))
+}
+
+async function prepareLocalInstallBundle(bundleRoot) {
+  const resolved = resolveLocalBundleRoot(bundleRoot)
+  if (!resolved) throw new Error('local_bundle_root_missing')
+  if (!fs.existsSync(path.join(resolved, 'package.json'))) throw new Error(`local_bundle_package_missing:${resolved}`)
+  await spawnChecked('npm', npmInstallArgsFor(resolved), { cwd: resolved })
+  await spawnChecked('npm', ['run', '-s', 'build'], { cwd: resolved })
+  ensureInstallableBundle(resolved)
+  return resolved
 }
 
 function ensureInstallableBundle(bundleRoot = '') {
@@ -1572,15 +1722,17 @@ function usage(exitCode = 2) {
     'Usage:',
     '  rin',
     '  rin pi',
+    '  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]]',
     '  rin restart',
-    '  rin update [--repo <git-url>] [--ref <branch|tag|commit>]',
+    '  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]',
     '  rin uninstall [--yes] [--keep-state | --purge]',
     '',
     'Notes:',
     '  - `rin` starts the daemon-backed Rin TUI frontend.',
     '  - `rin pi` starts the native Pi InteractiveMode fallback.',
+    '  - `rin install --local` installs from a local source tree using the standard installer flow.',
+    '  - `rin update --local` rebuilds and deploys from a local source tree instead of cloning.',
     '  - `rin restart` restarts the Rin daemon service.',
-    '  - install is handled by install.sh, not by a public CLI subcommand.',
     '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
   ].join('\n'))
   process.exit(exitCode)
@@ -1619,6 +1771,8 @@ async function cmdInstall(argv) {
   let serviceManager = safeString(process.env.RIN_SERVICE_MANAGER).trim() || 'auto'
   let sourceRepo = safeString(process.env.RIN_INSTALL_SOURCE_REPO).trim()
   let sourceRef = safeString(process.env.RIN_INSTALL_SOURCE_REF).trim()
+  let bundleRoot = ''
+  let localSource = false
   let allowExistingInstall = false
 
   for (let i = 0; i < argv.length; i++) {
@@ -1627,6 +1781,9 @@ async function cmdInstall(argv) {
     if (a === '--dry-run' || a === '-n') { dryRun = true; continue }
     if (a === '--source-repo') { sourceRepo = argv[i + 1] || ''; i++; continue }
     if (a === '--source-ref') { sourceRef = argv[i + 1] || ''; i++; continue }
+    if (a === '--bundle-root') { bundleRoot = argv[i + 1] || ''; i++; continue }
+    if (a === '--local') { localSource = true; continue }
+    if (a === '--path') { bundleRoot = argv[i + 1] || ''; localSource = true; i++; continue }
     if (a === '--service-manager') { serviceManager = argv[i + 1] || ''; i++; continue }
     if (a === '--state-root' || a === '--home' || a === '--dir') { requestedStateRoot = argv[i + 1] || ''; i++; continue }
     if (a === '--upgrade-existing') { allowExistingInstall = true; continue }
@@ -1634,7 +1791,7 @@ async function cmdInstall(argv) {
     if (a === '--user') { mode = 'existing'; targetUserName = argv[i + 1] || ''; i++; continue }
     if (a === '--create-user') { mode = 'create'; createUserName = argv[i + 1] || ''; i++; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--current-user | --user <name> | --create-user <name>]')
+      console.error('Usage:\n  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]] [--current-user | --user <name> | --create-user <name>]')
       process.exit(0)
     }
     console.error(`Unknown arg: ${a}`)
@@ -1706,6 +1863,17 @@ async function cmdInstall(argv) {
       if (!confirmed) process.exit(1)
     }
 
+    const resolvedBundleRoot = localSource ? resolveLocalBundleRoot(bundleRoot, process.cwd()) : safeString(bundleRoot).trim()
+    if (localSource && resolvedBundleRoot && !dryRun) {
+      await prepareLocalInstallBundle(resolvedBundleRoot)
+    }
+    const effectiveSourceRepo = localSource
+      ? path.resolve(resolvedBundleRoot || process.cwd())
+      : (safeString(sourceRepo).trim() || detectInstallSourceRepo())
+    const effectiveSourceRef = localSource
+      ? detectInstallSourceRefAt(path.resolve(resolvedBundleRoot || process.cwd()), 'local')
+      : (safeString(sourceRef).trim() || detectInstallSourceRef())
+
     const result = performInstall({
       targetUser,
       homeDir: targetUser.homeDir,
@@ -1713,8 +1881,9 @@ async function cmdInstall(argv) {
       serviceManager,
       overwriteManaged: true,
       allowExistingInstall,
-      sourceRepo: safeString(sourceRepo).trim() || detectInstallSourceRepo(),
-      sourceRef: safeString(sourceRef).trim() || detectInstallSourceRef(),
+      sourceRepo: effectiveSourceRepo,
+      sourceRef: effectiveSourceRef,
+      bundleRoot: resolvedBundleRoot,
       installConfig,
       dryRun,
     })
@@ -1730,13 +1899,17 @@ async function cmdInstall(argv) {
 async function cmdUpdate(argv) {
   let repo = ''
   let ref = ''
+  let localSource = false
+  let bundleRoot = ''
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--repo') { repo = argv[i + 1] || ''; i += 1; continue }
     if (a === '--ref') { ref = argv[i + 1] || ''; i += 1; continue }
+    if (a === '--local') { localSource = true; continue }
+    if (a === '--path') { bundleRoot = argv[i + 1] || ''; localSource = true; i += 1; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin update [--repo <git-url>] [--ref <branch|tag|commit>]')
+      console.error('Usage:\n  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]')
       process.exit(0)
     }
     console.error(`Unknown arg: ${a}`)
@@ -1748,9 +1921,40 @@ async function cmdUpdate(argv) {
   const installSource = installMeta && typeof installMeta === 'object' && installMeta.installSource && typeof installMeta.installSource === 'object'
     ? installMeta.installSource
     : {}
-  const repoUrl = normalizeGitUrl(safeString(repo).trim() || safeString(installSource.repo).trim() || detectInstallSourceRepo())
-  const sourceRef = safeString(ref).trim() || safeString(installSource.ref).trim() || detectInstallSourceRef()
+  const configuredSourceRepo = safeString(repo).trim() || safeString(installSource.repo).trim() || detectInstallSourceRepo()
   const serviceManager = safeString(installMeta && installMeta.serviceManager).trim() || 'auto'
+
+  const localBundleRoot = resolveLocalBundleRoot(bundleRoot, localSource
+    ? (configuredSourceRepo && isLocalBundlePath(configuredSourceRepo) ? configuredSourceRepo : process.cwd())
+    : '')
+  const shouldUseLocalSource = localSource || (configuredSourceRepo && isLocalBundlePath(configuredSourceRepo))
+
+  if (shouldUseLocalSource) {
+    const preparedBundleRoot = await prepareLocalInstallBundle(localBundleRoot || configuredSourceRepo)
+    const localRepoPath = path.resolve(preparedBundleRoot)
+    const localRef = safeString(ref).trim() || safeString(installSource.ref).trim() || detectInstallSourceRefAt(localRepoPath, 'local')
+    const installArgs = [
+      path.join(localRepoPath, 'dist', 'index.js'),
+      '__install',
+      '--current-user',
+      '--yes',
+      '--upgrade-existing',
+      '--service-manager', serviceManager,
+      '--bundle-root', localRepoPath,
+      '--source-repo', localRepoPath,
+      '--source-ref', localRef,
+    ]
+    await spawnChecked(process.execPath, installArgs, {
+      cwd: localRepoPath,
+    })
+    if (detectDaemonSystemdService()) {
+      await startDaemonRuntime('restart')
+    }
+    return
+  }
+
+  const repoUrl = normalizeGitUrl(configuredSourceRepo)
+  const sourceRef = safeString(ref).trim() || safeString(installSource.ref).trim() || detectInstallSourceRef()
   const git = findExecutableOnPath('git')
   if (!git) throw new Error('git_not_found')
 
@@ -2401,6 +2605,7 @@ async function main() {
   if (!cmd) return await cmdPi([])
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') usage(0)
 
+  if (cmd === 'install') return await cmdInstall(rest)
   if (cmd === 'restart') return await cmdRestart(rest)
   if (cmd === 'update') return await cmdUpdate(rest)
   if (cmd === 'uninstall') return await cmdUninstall(rest)

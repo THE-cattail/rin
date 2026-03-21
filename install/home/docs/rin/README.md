@@ -1,7 +1,7 @@
 # Rin Runtime Reference
 
 Authoritative execution-time reference for Rin local architecture. 
-Precedence: This file overrides upstream Pi documentation for Rin-specific behavior. Use Pi docs only for SDK or TUI API technical details.
+Precedence: This file overrides the bundled local Pi-derived docs whenever Rin-specific behavior differs. Prefer the bundled local docs under `docs/`.
 
 ## 1. Canonical Roots
 
@@ -95,8 +95,9 @@ Architecture:
 ## 9. Documentation Usage
 
 - **Rin Architecture/Behavior:** Reference this file.
-- **Bundled local examples:** Reference `examples/`.
-- **Upstream Pi/SDK/TUI details:** Use upstream Pi documentation when needed.
+- **Bundled local reference docs:** Reference `docs/`.
+- **Conflict rule:** If a bundled Pi-derived page disagrees with Rin runtime behavior, this file wins.
+- **Upstream Pi docs:** Optional cross-check only, not the primary local reference.
 
 ## 10. Execution Guidance
 

@@ -60,7 +60,13 @@ function makeBundleFixture(rootDir) {
   fs.writeFileSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist', 'index.js'), 'export {}\n')
   fs.writeFileSync(path.join(rootDir, 'third_party', 'pi-mono', 'packages', 'tui', 'dist', 'index.js'), 'export {}\n')
   fs.writeFileSync(path.join(rootDir, 'install', 'home', 'docs', 'rin', 'README.md'), '# fixture runtime docs\n')
-  fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({ name: 'rin-fixture', version: '0.0.0' }, null, 2))
+  fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({
+    name: 'rin-fixture',
+    version: '0.0.0',
+    scripts: {
+      build: 'node -e ""',
+    },
+  }, null, 2))
 }
 
 test('installTargetChoices hides unsupported user-management options', () => {
@@ -86,7 +92,49 @@ test('installTargetChoices hides unsupported user-management options', () => {
 test('formatCliErrorMessage turns installer capability errors into guidance', () => {
   assert.match(formatCliErrorMessage(new Error('install_requires_root_to_create_user')), /needs root on Linux/i)
   assert.match(formatCliErrorMessage(new Error('install_existing_user_unsupported')), /only available on Linux root installs/i)
+  assert.match(formatCliErrorMessage(new Error('local_bundle_root_missing')), /local source tree is required/i)
+  assert.match(formatCliErrorMessage(new Error('local_bundle_package_missing:/tmp/demo')), /No Rin package\.json found/i)
   assert.match(formatCliErrorMessage(new Error('install_already_exists:/tmp/rin-home')), /already installed/i)
+})
+
+test('install.sh supports local source installation via --local --path', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-sh-local-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  const stateRoot = path.join(homeDir, '.rin')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const installScript = path.join(__dirname, '..', 'install.sh')
+  const result = spawnSync('sh', [installScript, '--local', '--path', bundleRoot, '--current-user', '--state-root', stateRoot], {
+    encoding: 'utf8',
+    cwd: tempRoot,
+    env: { ...process.env, HOME: homeDir },
+  })
+
+  assert.equal(result.status, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`)
+  assert.equal(fs.existsSync(path.join(stateRoot, 'app', 'current', 'install', 'home', 'docs', 'rin', 'README.md')), true)
+  const installMeta = JSON.parse(fs.readFileSync(path.join(stateRoot, 'install.json'), 'utf8'))
+  assert.equal(path.resolve(installMeta.installSource.repo), path.resolve(bundleRoot))
+})
+
+test('install.sh refuses to act as update transport', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-sh-refuse-update-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const installScript = path.join(__dirname, '..', 'install.sh')
+  const result = spawnSync('sh', [installScript, '--local', '--path', bundleRoot, '--upgrade-existing'], {
+    encoding: 'utf8',
+    cwd: tempRoot,
+    env: { ...process.env, HOME: homeDir },
+  })
+
+  assert.equal(result.status, 1, `stdout=${result.stdout}\nstderr=${result.stderr}`)
+  assert.match(result.stderr, /install\.sh only handles installation/i)
+  assert.match(result.stderr, /rin update --local/i)
 })
 
 test('performInstall creates a portable runtime layout and launcher', () => {
@@ -268,6 +316,51 @@ test('performInstall supports dry-run previews without touching disk', () => {
   assert.equal(fs.existsSync(result.launcherPath), false)
   assert.match(result.launcherText, /RIN_HOME=/)
   assert.match(result.plannedChanges.join('\n'), /would create launcher/)
+})
+
+test('performInstall prunes retired managed docs while preserving user-owned runtime files', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-managed-prune-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  const stateRoot = path.join(homeDir, '.rin')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+  fs.mkdirSync(path.join(bundleRoot, 'install', 'home', 'docs', 'rin', 'examples'), { recursive: true })
+  fs.writeFileSync(path.join(bundleRoot, 'install', 'home', 'docs', 'rin', 'examples', 'README.md'), '# old examples\n')
+
+  performInstall({
+    homeDir,
+    stateRoot,
+    bundleRoot,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'main',
+    releaseId: '2026-03-19T00-00-00-000Z',
+    seedHomeDir: homeDir,
+  })
+
+  assert.equal(fs.existsSync(path.join(stateRoot, 'docs', 'rin', 'examples', 'README.md')), true)
+
+  fs.writeFileSync(path.join(stateRoot, 'settings.json'), JSON.stringify({ ownerSetting: true }, null, 2))
+  fs.writeFileSync(path.join(stateRoot, 'docs', 'rin', 'custom-note.md'), 'keep me\n')
+  fs.writeFileSync(path.join(stateRoot, 'data', 'custom.json'), JSON.stringify({ keep: true }, null, 2))
+
+  fs.rmSync(path.join(bundleRoot, 'install', 'home', 'docs', 'rin', 'examples'), { recursive: true, force: true })
+
+  performInstall({
+    homeDir,
+    stateRoot,
+    bundleRoot,
+    allowExistingInstall: true,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'stable',
+    releaseId: '2026-03-20T00-00-00-000Z',
+    seedHomeDir: homeDir,
+  })
+
+  assert.equal(fs.existsSync(path.join(stateRoot, 'docs', 'rin', 'examples')), false)
+  assert.equal(fs.existsSync(path.join(stateRoot, 'docs', 'rin', 'custom-note.md')), true)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateRoot, 'settings.json'), 'utf8')).ownerSetting, true)
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stateRoot, 'data', 'custom.json'), 'utf8')), { keep: true })
 })
 
 test('performUninstall supports keep-state and purge flows', () => {
