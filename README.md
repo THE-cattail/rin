@@ -107,9 +107,17 @@ curl -fsSL https://raw.githubusercontent.com/THE-cattail/rin/main/install.sh | R
 ```bash
 git clone https://github.com/THE-cattail/rin.git
 cd rin
-npm ci
-npm run build
-RIN_REPO_URL="$(pwd)" ./install.sh --current-user
+./install.sh --local
+```
+
+### Update from a Local Checkout
+
+```bash
+cd /path/to/rin
+rin update --local
+
+# or update an installed runtime from another checkout
+rin update --local --path /path/to/rin
 ```
 
 ### Launch Rin
@@ -165,7 +173,7 @@ Rin builds on that foundation in a different direction. Rather than centering a 
 ## Documentation
 
 - [Runtime reference](install/home/docs/rin/README.md)
-- [Examples](install/home/docs/rin/examples/README.md)
+- [Examples (source repo)](examples/pi/README.md)
 
 ## Development
 
@@ -184,4 +192,3 @@ For contribution details, see [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_STYLE
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-NSE) for details.
