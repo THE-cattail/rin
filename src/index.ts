@@ -1036,9 +1036,11 @@ function ensurePiBootstrap() {
 }
 
 function rinAppDir() {
+  const currentRepoDir = repoDir()
+  if (fs.existsSync(path.join(currentRepoDir, 'dist', 'index.js'))) return currentRepoDir
   const installedAppDir = path.join(rootDir(), 'app', 'current')
   if (fs.existsSync(path.join(installedAppDir, 'dist', 'index.js'))) return installedAppDir
-  return repoDir()
+  return currentRepoDir
 }
 
 function rinDistPath(rel = 'index.js') {
@@ -1721,7 +1723,7 @@ function usage(exitCode = 2) {
   console.error([
     'Usage:',
     '  rin',
-    '  rin pi',
+    '  rin offline',
     '  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]]',
     '  rin restart',
     '  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]',
@@ -1729,7 +1731,7 @@ function usage(exitCode = 2) {
     '',
     'Notes:',
     '  - `rin` starts the daemon-backed Rin TUI frontend.',
-    '  - `rin pi` starts the native Pi InteractiveMode fallback.',
+    '  - `rin offline` starts the local offline TUI using the native Pi InteractiveMode host.',
     '  - `rin install --local` installs from a local source tree using the standard installer flow.',
     '  - `rin update --local` rebuilds and deploys from a local source tree instead of cloning.',
     '  - `rin restart` restarts the Rin daemon service.',
@@ -2216,7 +2218,7 @@ async function withInspectWorkState(name, fn) {
   }
 }
 
-async function cmdPi(argv) {
+async function cmdTui(argv, { offline = false } = {}) {
   const sessionRoot = os.homedir()
   let noBootstrap = false
   let index = 0
@@ -2226,7 +2228,7 @@ async function cmdPi(argv) {
     if (a === '--') { index += 1; break }
     if (a === '--no-bootstrap') { noBootstrap = true; index += 1; continue }
     if (a === '-h' || a === '--help' || a === 'help') {
-      const hostPath = ensureRinTuiHost()
+      const hostPath = offline ? ensureRinTuiDebugHost() : ensureRinTuiHost()
       await spawnInherit(process.execPath, [hostPath, '--help'], {
         cwd: sessionRoot,
         env: {
@@ -2240,9 +2242,9 @@ async function cmdPi(argv) {
   }
 
   const hostArgs = argv.slice(index)
-  const hostPath = ensureRinTuiHost()
+  const hostPath = offline ? ensureRinTuiDebugHost() : ensureRinTuiHost()
   if (!noBootstrap) ensurePiBootstrap()
-  await ensureDaemonStarted()
+  if (!offline) await ensureDaemonStarted()
   await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
     cwd: sessionRoot,
     env: {
@@ -2252,39 +2254,12 @@ async function cmdPi(argv) {
   })
 }
 
-async function cmdNativePi(argv) {
-  const sessionRoot = os.homedir()
-  let noBootstrap = false
-  let index = 0
+async function cmdPi(argv) {
+  return await cmdTui(argv, { offline: false })
+}
 
-  while (index < argv.length) {
-    const a = argv[index]
-    if (a === '--') { index += 1; break }
-    if (a === '--no-bootstrap') { noBootstrap = true; index += 1; continue }
-    if (a === '-h' || a === '--help' || a === 'help') {
-      const hostPath = ensureRinTuiDebugHost()
-      await spawnInherit(process.execPath, [hostPath, '--help'], {
-        cwd: sessionRoot,
-        env: {
-          RIN_REPO_ROOT: repoDir(),
-          PI_SKIP_VERSION_CHECK: '1',
-        },
-      })
-      return
-    }
-    break
-  }
-
-  const hostArgs = argv.slice(index)
-  const hostPath = ensureRinTuiDebugHost()
-  if (!noBootstrap) ensurePiBootstrap()
-  await spawnInherit(process.execPath, [hostPath, ...hostArgs], {
-    cwd: sessionRoot,
-    env: {
-      RIN_REPO_ROOT: repoDir(),
-      PI_SKIP_VERSION_CHECK: '1',
-    },
-  })
+async function cmdOffline(argv) {
+  return await cmdTui(argv, { offline: true })
 }
 
 function daemonStatusSnapshot() {
@@ -2609,11 +2584,13 @@ async function main() {
   if (cmd === 'restart') return await cmdRestart(rest)
   if (cmd === 'update') return await cmdUpdate(rest)
   if (cmd === 'uninstall') return await cmdUninstall(rest)
-  if (cmd === 'pi') return await cmdNativePi(rest)
-
+  if (cmd === 'offline') return await cmdOffline(rest)
   if (cmd === '__install') return await cmdInstall(rest)
 
-  return await cmdPi(argv)
+  if (safeString(cmd).startsWith('-')) return await cmdPi(argv)
+
+  console.error(`Unknown arg: ${cmd}`)
+  usage(2)
 }
 
 export {

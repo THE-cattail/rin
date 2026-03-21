@@ -2227,16 +2227,307 @@ function createRinBuiltinTools({
     }
   }
 
+
+  const subagentContextModeSchema = Type.Union([
+    Type.Literal('full'),
+    Type.Literal('summary'),
+    Type.Literal('empty'),
+  ])
+  const subagentThinkingSchema = Type.Union([
+    Type.Literal('off'),
+    Type.Literal('minimal'),
+    Type.Literal('low'),
+    Type.Literal('medium'),
+    Type.Literal('high'),
+    Type.Literal('xhigh'),
+  ])
+  const subagentStepSchema = Type.Object({
+    provider: Type.Optional(Type.String({ description: 'Provider ID for this delegated step.' })),
+    model: Type.Optional(Type.String({ description: 'Model ID for this delegated step.' })),
+    task: Type.Optional(Type.String({ description: 'Task contract for this delegated step.' })),
+    contextMode: Type.Optional(subagentContextModeSchema),
+    thinking: Type.Optional(subagentThinkingSchema),
+  })
+
+  function buildSubagentStepSummary(results: Array<any>) {
+    return results.map((result: any, index: number) => {
+      const target = `${safeString(result && result.provider).trim()}/${safeString(result && result.model).trim()}`
+      const status = result && result.isError ? 'error' : 'ok'
+      return {
+        step: index + 1,
+        status,
+        provider: safeString(result && result.provider).trim(),
+        model: safeString(result && result.model).trim(),
+        task: safeString(result && result.task).trim(),
+        text: safeString(result && result.text).trim(),
+        target,
+        usage: result && result.totalUsage ? result.totalUsage : emptyUsageLocal(),
+        details: result && result.details ? result.details : {},
+      }
+    })
+  }
+
+  function aggregateSubagentUsage(results: Array<any>) {
+    return results.reduce((acc: any, result: any) => mergeUsageLocal(acc, result && result.totalUsage ? result.totalUsage : emptyUsageLocal()), emptyUsageLocal())
+  }
+
+  function renderParallelProgress(results: Array<any>) {
+    const lines = results.map((result: any, index: number) => {
+      const status = safeString(result && result.status).trim() || 'pending'
+      const icon = status === 'done' ? '✓' : status === 'error' ? '✗' : '…'
+      const target = `${safeString(result && result.provider).trim()}/${safeString(result && result.model).trim()}`
+      const preview = truncateMiddleTextLocal(safeString(result && result.preview).trim() || safeString(result && result.task).trim() || '(waiting)', 160)
+      return `${icon} [${index + 1}] ${target} — ${preview}`
+    })
+    return lines.join('\n')
+  }
+
+  function replacePreviousPlaceholder(task: string, previousText: string) {
+    return safeString(task).replace(/\{previous\}/g, previousText)
+  }
+
+  async function executeSingleSubagentRun({
+    params,
+    ctx,
+    signal,
+    onUpdate,
+    taskOverride,
+    runMeta,
+  }: {
+    params: any
+    ctx?: any
+    signal?: AbortSignal
+    onUpdate?: any
+    taskOverride?: string
+    runMeta?: any
+  }) {
+    let failurePhase = 'run'
+    const requestedProvider = safeString(params && params.provider).trim()
+    const requestedModel = safeString(params && params.model).trim()
+    const task = safeString(taskOverride != null ? taskOverride : params && params.task).trim()
+    if (!task) {
+      const formatted = formatSubagentErrorText('missing_task', {
+        provider: requestedProvider,
+        model: requestedModel,
+        phase: 'run',
+      })
+      return {
+        ok: false,
+        isError: true,
+        provider: requestedProvider,
+        model: requestedModel,
+        task,
+        contextMode: 'full',
+        thinking: undefined,
+        text: formatted.text,
+        rawError: 'missing_task',
+        errorKind: formatted.kind,
+        usage: emptyUsageLocal(),
+        preparationUsage: undefined,
+        totalUsage: emptyUsageLocal(),
+        details: { errorKind: formatted.kind, rawError: 'missing_task' },
+      }
+    }
+
+    try {
+      const contextModeRaw = safeString(params && params.contextMode).trim().toLowerCase()
+      const contextMode = contextModeRaw === 'summary' || contextModeRaw === 'empty' ? contextModeRaw : 'full'
+      const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
+      const targetModel = resolveSubagentTargetModel(ctx, params)
+      await assertSubagentModelAvailable(ctx, targetModel)
+
+      const currentSession = getActiveSessionForSubagent(ctx)
+      const workerCwd = path.resolve((ctx && ctx.cwd) || process.cwd())
+      const runtimeSessionFile = safeString(ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionFile === 'function' ? ctx.sessionManager.getSessionFile() : '').trim() || safeString(sessionFile).trim()
+      const runtimeSessionDir = runtimeSessionFile ? path.dirname(runtimeSessionFile) : safeString(sessionDir).trim()
+      const inheritedToolNames = getSubagentToolNames(ctx)
+      const inheritedBaseSystemPrompt = safeString(
+        (ctx && typeof ctx.getSystemPrompt === 'function' ? ctx.getSystemPrompt() : '')
+        || (currentSession && currentSession.agent && currentSession.agent.state && currentSession.agent.state.systemPrompt)
+        || '',
+      ).trim() || 'You are a helpful assistant.'
+      const inheritedSystemPrompt = buildSubagentSystemPromptLocal(inheritedBaseSystemPrompt, contextMode)
+
+      const contextSnapshot = contextMode === 'empty' ? { messages: [], trimmedToolCallTail: false } : getActiveSessionContextSnapshot(ctx)
+      let summaryText = ''
+      let preparationUsage = emptyUsageLocal()
+
+      if (contextMode === 'summary' && contextSnapshot.messages.length > 0) {
+        failurePhase = 'prepare'
+        if (typeof onUpdate === 'function') {
+          try {
+            onUpdate({
+              content: [{ type: 'text', text: 'Summarizing parent context...' }],
+              details: {
+                phase: 'prepare',
+                contextMode,
+                ...(runMeta || {}),
+              },
+            })
+          } catch {}
+        }
+        const summaryResult = await summarizeContextForSubagent({
+          cwd: workerCwd,
+          model: targetModel,
+          thinking: requestedThinking,
+          messages: contextSnapshot.messages,
+          signal,
+          currentChatKey,
+          parentSessionDir: runtimeSessionDir,
+          parentSessionFile: runtimeSessionFile,
+        })
+        summaryText = safeString(summaryResult && summaryResult.summary).trim()
+        preparationUsage = summaryResult && summaryResult.usage ? summaryResult.usage : emptyUsageLocal()
+      }
+
+      failurePhase = 'run'
+      const workerPrompt = contextMode === 'summary' && summaryText
+        ? [
+            'Parent session summary:',
+            summaryText,
+            '',
+            'Task:',
+            task,
+          ].join('\n')
+        : task
+
+      const runResult = await runSubagentProcessLocal({
+        cwd: workerCwd,
+        model: targetModel,
+        thinking: requestedThinking,
+        toolNames: inheritedToolNames,
+        systemPrompt: inheritedSystemPrompt,
+        prompt: workerPrompt,
+        messages: contextMode === 'full' ? contextSnapshot.messages : [],
+        currentChatKey,
+        parentSessionDir: runtimeSessionDir,
+        parentSessionFile: runtimeSessionFile,
+        signal,
+        onUpdate,
+        updateDetails: {
+          phase: 'run',
+          contextMode,
+          provider: safeString(targetModel && targetModel.provider).trim(),
+          model: safeString(targetModel && targetModel.id).trim(),
+          ...(runMeta || {}),
+        },
+      })
+
+      const usage = runResult && runResult.usage ? runResult.usage : emptyUsageLocal()
+      const totalUsage = mergeUsageLocal(preparationUsage, usage)
+      const resultText = safeString(runResult && runResult.text).trim() || '(no output)'
+      const details = {
+        current: {
+          provider: safeString(targetModel && targetModel.provider).trim(),
+          model: safeString(targetModel && targetModel.id).trim(),
+          thinking: requestedThinking || undefined,
+        },
+        contextMode,
+        task,
+        context: {
+          inheritedMessageCount: contextSnapshot.messages.length,
+          trimmedToolCallTail: Boolean(contextSnapshot.trimmedToolCallTail),
+          summaryPreview: summaryText ? truncateMiddleTextLocal(summaryText, 4_000) : undefined,
+        },
+        usage,
+        preparationUsage: preparationUsage.turns > 0 || preparationUsage.input > 0 || preparationUsage.output > 0
+          ? preparationUsage
+          : undefined,
+        totalUsage,
+        ...(runMeta || {}),
+      }
+
+      const isError = Boolean(
+        runResult && (runResult.aborted || safeString(runResult.errorMessage).trim() || safeString(runResult.stopReason).trim() === 'error'),
+      )
+      const errorText = safeString(runResult && runResult.errorMessage).trim()
+      if (isError) {
+        const formatted = formatSubagentErrorText(errorText || resultText, {
+          provider: safeString(targetModel && targetModel.provider).trim(),
+          model: safeString(targetModel && targetModel.id).trim(),
+          phase: 'run',
+        })
+        return {
+          ok: false,
+          isError: true,
+          provider: safeString(targetModel && targetModel.provider).trim(),
+          model: safeString(targetModel && targetModel.id).trim(),
+          task,
+          contextMode,
+          thinking: requestedThinking,
+          text: formatted.text,
+          rawError: errorText || resultText,
+          errorKind: formatted.kind,
+          usage,
+          preparationUsage: details.preparationUsage,
+          totalUsage,
+          details: {
+            ...details,
+            errorKind: formatted.kind,
+            rawError: errorText || resultText,
+          },
+        }
+      }
+
+      return {
+        ok: true,
+        isError: false,
+        provider: safeString(targetModel && targetModel.provider).trim(),
+        model: safeString(targetModel && targetModel.id).trim(),
+        task,
+        contextMode,
+        thinking: requestedThinking,
+        text: resultText,
+        rawError: '',
+        errorKind: '',
+        usage,
+        preparationUsage: details.preparationUsage,
+        totalUsage,
+        details,
+      }
+    } catch (e: any) {
+      const formatted = formatSubagentErrorText(safeString(e && e.message ? e.message : e), {
+        provider: requestedProvider,
+        model: requestedModel,
+        phase: failurePhase,
+      })
+      return {
+        ok: false,
+        isError: true,
+        provider: requestedProvider,
+        model: requestedModel,
+        task,
+        contextMode: safeString(params && params.contextMode).trim().toLowerCase() === 'summary' || safeString(params && params.contextMode).trim().toLowerCase() === 'empty'
+          ? safeString(params && params.contextMode).trim().toLowerCase()
+          : 'full',
+        thinking: normalizeToolThinkingLevel(params && params.thinking),
+        text: formatted.text,
+        rawError: safeString(e && e.message ? e.message : e),
+        errorKind: formatted.kind,
+        usage: emptyUsageLocal(),
+        preparationUsage: undefined,
+        totalUsage: emptyUsageLocal(),
+        details: {
+          errorKind: formatted.kind,
+          rawError: safeString(e && e.message ? e.message : e),
+          ...(runMeta || {}),
+        },
+      }
+    }
+  }
+
   const subagentTool = {
     name: 'rin_subagent',
     label: 'Rin Subagent',
-    description: 'Delegate a task to a temporary worker session on a specific provider/model, or inspect valid target models before delegation.',
+    description: 'Delegate one task, a sequential chain, or parallel sub-tasks to temporary worker sessions on specific provider/model pairs, or inspect valid target models first.',
     promptSnippet: 'Run a temporary worker session on a specific provider/model, or list valid subagent target models first.',
     promptGuidelines: [
       'Use this when the user explicitly wants a different provider/model to handle a subtask without changing the main session model.',
       'If you are unsure which provider/model IDs are valid, call `rin_subagent` with `action: "list_models"` first and then pick from that result.',
       'Choose contextMode deliberately: `full` for work that depends on the current thread, `summary` for compressed carry-over, and `empty` for clean isolated exploration.',
-      'Write the delegated task as a self-contained contract: desired outcome, important constraints, and expected output shape.',
+      'Use `chain` for sequential orchestration and `{previous}` placeholders to pass prior output into later steps.',
+      'Use `tasks` for parallel fan-out when the subtasks do not depend on one another.',
+      'Write each delegated task as a self-contained contract: desired outcome, important constraints, and expected output shape.',
       'Prefer direct delegated work over temporary main-model switching; the result comes back as tool output for the parent session to use.',
     ],
     parameters: Type.Object({
@@ -2247,30 +2538,18 @@ function createRinBuiltinTools({
       provider: Type.Optional(Type.String({ description: 'Provider ID to use for the worker session, or to filter model listing results.' })),
       model: Type.Optional(Type.String({ description: 'Model ID to use for the worker session.' })),
       task: Type.Optional(Type.String({ description: 'Task for the delegated worker.' })),
+      tasks: Type.Optional(Type.Array(subagentStepSchema, { description: 'Parallel subtasks. Each item can override provider/model/task/contextMode/thinking.' })),
+      chain: Type.Optional(Type.Array(subagentStepSchema, { description: 'Sequential subtasks. `{previous}` in task text is replaced with the previous step output.' })),
       scope: Type.Optional(Type.Union([
         Type.Literal('available'),
         Type.Literal('all'),
       ])),
       search: Type.Optional(Type.String({ description: 'Case-insensitive search when action is `list_models`.' })),
       limit: Type.Optional(Type.Number({ description: 'Maximum models to return when action is `list_models`. Default 100, max 500.' })),
-      contextMode: Type.Optional(Type.Union([
-        Type.Literal('full'),
-        Type.Literal('summary'),
-        Type.Literal('empty'),
-      ])),
-      thinking: Type.Optional(Type.Union([
-        Type.Literal('off'),
-        Type.Literal('minimal'),
-        Type.Literal('low'),
-        Type.Literal('medium'),
-        Type.Literal('high'),
-        Type.Literal('xhigh'),
-      ])),
+      contextMode: Type.Optional(subagentContextModeSchema),
+      thinking: Type.Optional(subagentThinkingSchema),
     }),
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) => {
-      let failurePhase = 'run'
-      const requestedProvider = safeString(params && params.provider).trim()
-      const requestedModel = safeString(params && params.model).trim()
       try {
         const actionRaw = safeString(params && params.action).trim().toLowerCase()
         const action = actionRaw === 'list_models' ? 'list_models' : 'run'
@@ -2279,132 +2558,123 @@ function createRinBuiltinTools({
           return toolResultFromText(JSON.stringify(result, null, 2), result, false)
         }
 
-        const task = safeString(params && params.task).trim()
-        if (!task) throw new Error('missing_task')
+        const chain = Array.isArray(params && params.chain) ? params.chain.filter(Boolean) : []
+        const tasks = Array.isArray(params && params.tasks) ? params.tasks.filter(Boolean) : []
+        const hasSingle = Boolean(safeString(params && params.task).trim())
+        const modeCount = Number(chain.length > 0) + Number(tasks.length > 0) + Number(hasSingle)
+        if (modeCount !== 1) throw new Error('invalid_subagent_mode')
 
-        const contextModeRaw = safeString(params && params.contextMode).trim().toLowerCase()
-        const contextMode = contextModeRaw === 'summary' || contextModeRaw === 'empty' ? contextModeRaw : 'full'
-        const requestedThinking = normalizeToolThinkingLevel(params && params.thinking)
-        const targetModel = resolveSubagentTargetModel(ctx, params)
-        await assertSubagentModelAvailable(ctx, targetModel)
+        if (chain.length > 0) {
+          const runs: Array<any> = []
+          let previousText = ''
+          for (let index = 0; index < chain.length; index += 1) {
+            const step = chain[index] || {}
+            const merged = {
+              ...params,
+              ...step,
+              task: replacePreviousPlaceholder(safeString(step && step.task), previousText),
+            }
+            const result = await executeSingleSubagentRun({
+              params: merged,
+              ctx,
+              signal,
+              onUpdate,
+              runMeta: { mode: 'chain', index, total: chain.length },
+            })
+            runs.push(result)
+            previousText = safeString(result && result.text).trim()
+            if (result && result.isError) {
+              const details = {
+                mode: 'chain',
+                results: buildSubagentStepSummary(runs),
+                totalUsage: aggregateSubagentUsage(runs),
+              }
+              return toolResultFromText(`Subagent chain stopped at step ${index + 1}: ${result.text}`, details, true)
+            }
+          }
+          const details = {
+            mode: 'chain',
+            results: buildSubagentStepSummary(runs),
+            totalUsage: aggregateSubagentUsage(runs),
+          }
+          const finalText = safeString(runs.length > 0 ? runs[runs.length - 1] && runs[runs.length - 1].text : '').trim() || '(no output)'
+          return toolResultFromText(finalText, details, false)
+        }
 
-        const currentSession = getActiveSessionForSubagent(ctx)
-        const workerCwd = path.resolve((ctx && ctx.cwd) || process.cwd())
-        const runtimeSessionFile = safeString(ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionFile === 'function' ? ctx.sessionManager.getSessionFile() : '').trim() || safeString(sessionFile).trim()
-        const runtimeSessionDir = runtimeSessionFile ? path.dirname(runtimeSessionFile) : safeString(sessionDir).trim()
-        const inheritedToolNames = getSubagentToolNames(ctx)
-        const inheritedBaseSystemPrompt = safeString(
-          (ctx && typeof ctx.getSystemPrompt === 'function' ? ctx.getSystemPrompt() : '')
-          || (currentSession && currentSession.agent && currentSession.agent.state && currentSession.agent.state.systemPrompt)
-          || '',
-        ).trim() || 'You are a helpful assistant.'
-        const inheritedSystemPrompt = buildSubagentSystemPromptLocal(inheritedBaseSystemPrompt, contextMode)
-
-        const contextSnapshot = contextMode === 'empty' ? { messages: [], trimmedToolCallTail: false } : getActiveSessionContextSnapshot(ctx)
-        let summaryText = ''
-        let preparationUsage = emptyUsageLocal()
-
-        if (contextMode === 'summary' && contextSnapshot.messages.length > 0) {
-          failurePhase = 'prepare'
-          if (typeof onUpdate === 'function') {
+        if (tasks.length > 0) {
+          const progress = tasks.map((task: any, index: number) => ({
+            status: 'pending',
+            provider: safeString(task && task.provider || params && params.provider).trim(),
+            model: safeString(task && task.model || params && params.model).trim(),
+            task: safeString(task && task.task).trim(),
+            preview: '',
+            index,
+          }))
+          const emitProgress = () => {
+            if (typeof onUpdate !== 'function') return
             try {
               onUpdate({
-                content: [{ type: 'text', text: 'Summarizing parent context...' }],
-                details: { phase: 'prepare', contextMode },
+                content: [{ type: 'text', text: renderParallelProgress(progress) }],
+                details: {
+                  mode: 'parallel',
+                  progress: cloneJsonLocal(progress),
+                },
               })
             } catch {}
           }
-          const summaryResult = await summarizeContextForSubagent({
-            cwd: workerCwd,
-            model: targetModel,
-            thinking: requestedThinking,
-            messages: contextSnapshot.messages,
-            signal,
-            currentChatKey,
-            parentSessionDir: runtimeSessionDir,
-            parentSessionFile: runtimeSessionFile,
-          })
-          summaryText = safeString(summaryResult && summaryResult.summary).trim()
-          preparationUsage = summaryResult && summaryResult.usage ? summaryResult.usage : emptyUsageLocal()
+          emitProgress()
+          const runs = await Promise.all(tasks.map(async (task: any, index: number) => {
+            progress[index].status = 'running'
+            emitProgress()
+            const result = await executeSingleSubagentRun({
+              params: { ...params, ...task },
+              ctx,
+              signal,
+              onUpdate: typeof onUpdate === 'function'
+                ? (partial: any) => {
+                    progress[index].status = 'running'
+                    progress[index].preview = safeString(partial && partial.content && partial.content[0] && partial.content[0].text).trim()
+                    emitProgress()
+                  }
+                : undefined,
+              runMeta: { mode: 'parallel', index, total: tasks.length },
+            })
+            progress[index].status = result && result.isError ? 'error' : 'done'
+            progress[index].preview = safeString(result && result.text).trim()
+            emitProgress()
+            return result
+          }))
+          const details = {
+            mode: 'parallel',
+            results: buildSubagentStepSummary(runs),
+            totalUsage: aggregateSubagentUsage(runs),
+          }
+          const hasError = runs.some((result: any) => result && result.isError)
+          const text = runs.map((result: any, index: number) => {
+            const target = `${safeString(result && result.provider).trim()}/${safeString(result && result.model).trim()}`
+            return `## Task ${index + 1} — ${target}\n\n${safeString(result && result.text).trim() || '(no output)'}`
+          }).join('\n\n')
+          return toolResultFromText(text || '(no output)', details, hasError)
         }
 
-        failurePhase = 'run'
-        const workerPrompt = contextMode === 'summary' && summaryText
-          ? [
-              'Parent session summary:',
-              summaryText,
-              '',
-              'Task:',
-              task,
-            ].join('\n')
-          : task
-
-        const runResult = await runSubagentProcessLocal({
-          cwd: workerCwd,
-          model: targetModel,
-          thinking: requestedThinking,
-          toolNames: inheritedToolNames,
-          systemPrompt: inheritedSystemPrompt,
-          prompt: workerPrompt,
-          messages: contextMode === 'full' ? contextSnapshot.messages : [],
-          currentChatKey,
-          parentSessionDir: runtimeSessionDir,
-          parentSessionFile: runtimeSessionFile,
+        const singleResult = await executeSingleSubagentRun({
+          params,
+          ctx,
           signal,
           onUpdate,
-          updateDetails: {
-            phase: 'run',
-            contextMode,
-            provider: safeString(targetModel && targetModel.provider).trim(),
-            model: safeString(targetModel && targetModel.id).trim(),
-          },
+          runMeta: { mode: 'single' },
         })
-
-        const usage = runResult && runResult.usage ? runResult.usage : emptyUsageLocal()
-        const totalUsage = mergeUsageLocal(preparationUsage, usage)
-        const resultText = safeString(runResult && runResult.text).trim() || '(no output)'
-        const details = {
-          current: {
-            provider: safeString(targetModel && targetModel.provider).trim(),
-            model: safeString(targetModel && targetModel.id).trim(),
-            thinking: requestedThinking || undefined,
+        return toolResultFromText(
+          safeString(singleResult && singleResult.text).trim() || '(no output)',
+          {
+            mode: 'single',
+            result: singleResult && singleResult.details ? singleResult.details : {},
+            totalUsage: singleResult && singleResult.totalUsage ? singleResult.totalUsage : emptyUsageLocal(),
           },
-          contextMode,
-          context: {
-            inheritedMessageCount: contextSnapshot.messages.length,
-            trimmedToolCallTail: Boolean(contextSnapshot.trimmedToolCallTail),
-            summaryPreview: summaryText ? truncateMiddleTextLocal(summaryText, 4_000) : undefined,
-          },
-          usage,
-          preparationUsage: preparationUsage.turns > 0 || preparationUsage.input > 0 || preparationUsage.output > 0
-            ? preparationUsage
-            : undefined,
-          totalUsage,
-        }
-
-        const isError = Boolean(
-          runResult && (runResult.aborted || safeString(runResult.errorMessage).trim() || safeString(runResult.stopReason).trim() === 'error'),
+          Boolean(singleResult && singleResult.isError),
         )
-        const errorText = safeString(runResult && runResult.errorMessage).trim()
-        if (isError) {
-          const formatted = formatSubagentErrorText(errorText || resultText, {
-            provider: safeString(targetModel && targetModel.provider).trim(),
-            model: safeString(targetModel && targetModel.id).trim(),
-            phase: 'run',
-          })
-          return toolResultFromText(formatted.text, {
-            ...details,
-            errorKind: formatted.kind,
-            rawError: errorText || resultText,
-          }, true)
-        }
-        return toolResultFromText(resultText, details, false)
       } catch (e: any) {
-        const formatted = formatSubagentErrorText(safeString(e && e.message ? e.message : e), {
-          provider: requestedProvider,
-          model: requestedModel,
-          phase: failurePhase,
-        })
+        const formatted = formatSubagentErrorText(safeString(e && e.message ? e.message : e))
         return toolResultFromText(formatted.text, {
           errorKind: formatted.kind,
           rawError: safeString(e && e.message ? e.message : e),

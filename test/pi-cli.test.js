@@ -14,32 +14,32 @@ function runCli(args, env = {}) {
   })
 }
 
-test('top-level help advertises rin pi instead of rin debug', () => {
+test('top-level help advertises rin offline as the local TUI entry', () => {
   const result = runCli(['--help'])
   const output = `${result.stdout || ''}\n${result.stderr || ''}`
 
   assert.equal(result.status, 0)
-  assert.match(output, /rin pi/)
+  assert.match(output, /rin offline/)
   assert.match(output, /`rin` starts the daemon-backed Rin TUI frontend\./)
-  assert.doesNotMatch(output, /rin debug/)
+  assert.match(output, /`rin offline` starts the local offline TUI/i)
+  assert.doesNotMatch(output, /rin pi/)
 })
 
-test('pi subcommand reaches the native interactive-mode host help', () => {
-  const result = runCli(['pi', '--help'])
+test('offline subcommand reaches the local interactive host help', () => {
+  const result = runCli(['offline', '--help'])
   const output = `${result.stdout || ''}\n${result.stderr || ''}`
 
   assert.equal(result.status, 0)
-  assert.match(output, /Usage:\s*\n\s*rin pi \[--session <path>\]/)
-  assert.match(output, /Pi's native InteractiveMode/i)
-  assert.doesNotMatch(output, /Unknown arg: pi/)
+  assert.match(output, /Usage:\s*\n\s*rin offline \[--session <path>\]/)
+  assert.match(output, /local offline TUI host/i)
+  assert.doesNotMatch(output, /Unknown arg: offline/)
 })
 
-test('pi subcommand help still works through the vendored upstream path', () => {
+test('legacy rin pi is rejected and no longer advertised', () => {
   const result = runCli(['pi', '--help'])
   const output = `${result.stdout || ''}\n${result.stderr || ''}`
 
-  assert.equal(result.status, 0)
-  assert.match(output, /Usage:\s*\n\s*rin pi \[--session <path>\]/)
-  assert.match(output, /Pi's native InteractiveMode/i)
-  assert.doesNotMatch(output, /Unknown arg: pi/)
+  assert.notEqual(result.status, 0)
+  assert.match(output, /Unknown arg: pi/)
+  assert.doesNotMatch(output, /rin pi \[--session <path>\]/)
 })

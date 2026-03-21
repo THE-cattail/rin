@@ -97,9 +97,9 @@ async function runRinInteractiveMode({
 function usage(exitCode = 0) {
   const text = [
     'Usage:',
-    '  rin pi [--session <path>] [--provider <id>] [--model <id>] [--thinking <level>]',
+    '  rin offline [--session <path>] [--provider <id>] [--model <id>] [--thinking <level>]',
     '',
-    'Runs Rin using Pi\'s native InteractiveMode via the SDK.',
+    'Runs Rin using the local offline TUI host backed by Pi\'s native InteractiveMode.',
   ].join('\n')
   if (exitCode === 0) console.log(text)
   else console.error(text)
