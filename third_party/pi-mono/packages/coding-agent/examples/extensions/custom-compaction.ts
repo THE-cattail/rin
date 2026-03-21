@@ -10,7 +10,7 @@
  * which can be cheaper/faster than the main conversation model.
  *
  * Usage:
- *   pi --extension examples/extensions/custom-compaction.ts
+ *   pi --extension examples/pi/extensions/custom-compaction.ts
  */
 
 import { complete } from "@mariozechner/pi-ai";

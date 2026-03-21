@@ -6,8 +6,8 @@
 
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@mariozechner/pi-coding-agent";
 
-// Default: AuthStorage uses ~/.pi/agent/auth.json
-// ModelRegistry loads built-in + custom models from ~/.pi/agent/models.json
+// Default: AuthStorage uses ~/.rin/auth.json
+// ModelRegistry loads built-in + custom models from ~/.rin/models.json
 const authStorage = AuthStorage.create();
 const modelRegistry = new ModelRegistry(authStorage);
 

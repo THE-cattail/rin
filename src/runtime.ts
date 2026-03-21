@@ -9,9 +9,6 @@ import nodeUtil from 'node:util'
 
 import { Type } from '@sinclair/typebox'
 
-const EXPORTED_RIN_CONTINUE_TOKEN = '#RIN_CONTINUE'
-const EXPORTED_RIN_CONTINUE_FOLLOWUP = 'Continue unfinished work. If still incomplete, reply exactly `#RIN_CONTINUE`.'
-
 import {
   acquireExclusiveFileLock,
   ensureDir,
@@ -25,11 +22,6 @@ import {
 } from './runtime-paths'
 import { importPiCodingAgentModule } from './pi-upstream'
 import { runBrainCli } from './brain'
-import {
-  createContinueEventFilter,
-  discardTrailingContinueAssistant,
-  extractAssistantTextFromMessage,
-} from './continue-control'
 import { promptSessionWithRetry } from './session-prompt'
 import { searchWeb } from './web-search'
 
@@ -1183,7 +1175,7 @@ function toolResultFromText(text: string, details: any = {}, isError = false) {
   }
 }
 
-function createRinBuiltinTools({
+function createRinBuiltinExtensionTools({
   repoRoot,
   stateRoot,
   currentChatKey = '',
@@ -1288,12 +1280,64 @@ function createRinBuiltinTools({
     return [...matches.values()]
   }
 
+  function collectContextFilesForTool(targetPath: string) {
+    const raw = safeString(targetPath).trim()
+    const resolvedTarget = path.resolve(raw || process.cwd())
+    let currentDir = resolvedTarget
+    try {
+      const stat = fs.statSync(resolvedTarget)
+      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
+    } catch {
+      currentDir = path.dirname(resolvedTarget)
+    }
+
+    const agentsFiles: Array<any> = []
+    const seen = new Set<string>()
+    let cursor = currentDir
+    while (true) {
+      const agentsPath = path.join(cursor, 'AGENTS.md')
+      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
+        seen.add(agentsPath)
+        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
+      }
+      const parent = path.dirname(cursor)
+      if (!parent || parent === cursor) break
+      cursor = parent
+    }
+
+    const localRinDir = path.join(currentDir, '.rin')
+    let localRinEntries: Array<any> = []
+    if (fs.existsSync(localRinDir)) {
+      try {
+        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
+          const entryPath = path.join(localRinDir, name)
+          let kind = 'missing'
+          try {
+            const stat = fs.statSync(entryPath)
+            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
+          } catch {}
+          return { name, path: entryPath, kind }
+        })
+      } catch {}
+    }
+
+    return {
+      targetPath: resolvedTarget,
+      directory: currentDir,
+      agentsFiles,
+      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
+      localRinEntries,
+    }
+  }
+
   const brainTool = {
     name: 'rin_brain',
     label: 'Rin Brain',
     description: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge. Do not use this for verbatim transcript reads.',
     promptSnippet: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge.',
-    promptGuidelines: [],
+    promptGuidelines: [
+      'Use this for long-term memory, summarized past events, and indexed knowledge, not for verbatim transcript reads.',
+    ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('show'),
@@ -1344,6 +1388,9 @@ function createRinBuiltinTools({
     label: 'Rin Koishi',
     description: 'Send bridge messages, fetch one bridged message by chatKey and messageId, or manage trusted platform identities.',
     promptSnippet: 'Send bridge messages, fetch one bridged message, or manage trusted platform identities.',
+    promptGuidelines: [
+      'Use this when the user explicitly wants to send a bridge message, inspect one bridged message, or manage trusted identities.',
+    ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('send'),
@@ -1416,6 +1463,9 @@ function createRinBuiltinTools({
     label: 'Rin History',
     description: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
     promptSnippet: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
+    promptGuidelines: [
+      'Use this when exact recent wording or raw transcript/log inspection matters.',
+    ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('recent'),
@@ -1472,6 +1522,9 @@ function createRinBuiltinTools({
     label: 'Rin Schedule',
     description: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
     promptSnippet: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
+    promptGuidelines: [
+      'Use this when the user asks to inspect or manage timers, routines, or scheduled inspect jobs.',
+    ],
     parameters: Type.Object({
       kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
       action: Type.Union([
@@ -1493,7 +1546,7 @@ function createRinBuiltinTools({
     }),
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
       try {
-        const result = await manageSchedule({
+        const result = await manageScheduleViaCtl({
           stateRoot,
           kind: safeString(params.kind),
           action: safeString(params.action),
@@ -1519,6 +1572,9 @@ function createRinBuiltinTools({
     label: 'Web Search',
     description: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
     promptSnippet: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
+    promptGuidelines: [
+      'Use this for current or source-backed public-web facts instead of guessing.',
+    ],
     parameters: Type.Object({
       query: Type.String(),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
@@ -2688,6 +2744,9 @@ function createRinBuiltinTools({
     label: 'Rin Skills',
     description: 'List available skills or load one skill body, optionally with resolved local markdown references.',
     promptSnippet: 'List available skills or load one skill body when needed.',
+    promptGuidelines: [
+      'Use this when you need to inspect available skills or read one skill body instead of guessing its contents.',
+    ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal('list'),
@@ -2742,12 +2801,15 @@ function createRinBuiltinTools({
     label: 'Rin Context',
     description: 'Inspect the AGENTS.md chain and local .rin resources that apply to a target file or directory.',
     promptSnippet: 'Inspect the AGENTS.md chain and local .rin resources for a target path.',
+    promptGuidelines: [
+      'Use this when a task depends on AGENTS.md or local .rin resources for a target path.',
+    ],
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
       try {
-        const result = collectContextFiles(safeString(params && params.path))
+        const result = collectContextFilesForTool(safeString(params && params.path))
         return toolResultFromText(JSON.stringify(result, null, 2), result, false)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
@@ -2755,235 +2817,41 @@ function createRinBuiltinTools({
     },
   }
 
-  return [koishiTool, historyTool, subagentTool, skillTool]
+  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, subagentTool, skillTool, contextTool]
 }
 
 function createRinBuiltinExtensionFactory({
   repoRoot,
   stateRoot,
   brainChatKey = 'local:default',
-  getAdditionalTools = () => [],
+  getTools = () => [],
   enableBrainHooks = true,
 }: {
   repoRoot: string
   stateRoot: string
   brainChatKey?: string
-  getAdditionalTools?: () => Array<any>
+  getTools?: () => Array<any>
   enableBrainHooks?: boolean
 }) {
-  function collectContextFilesForExtension(targetPath: string) {
-    const raw = safeString(targetPath).trim()
-    const resolvedTarget = path.resolve(raw || process.cwd())
-    let currentDir = resolvedTarget
-    try {
-      const stat = fs.statSync(resolvedTarget)
-      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
-    } catch {
-      currentDir = path.dirname(resolvedTarget)
-    }
-
-    const agentsFiles: Array<any> = []
-    const seen = new Set<string>()
-    let cursor = currentDir
-    while (true) {
-      const agentsPath = path.join(cursor, 'AGENTS.md')
-      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
-        seen.add(agentsPath)
-        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
-      }
-      const parent = path.dirname(cursor)
-      if (!parent || parent === cursor) break
-      cursor = parent
-    }
-
-    const localRinDir = path.join(currentDir, '.rin')
-    let localRinEntries: Array<any> = []
-    if (fs.existsSync(localRinDir)) {
-      try {
-        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
-          const entryPath = path.join(localRinDir, name)
-          let kind = 'missing'
-          try {
-            const stat = fs.statSync(entryPath)
-            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
-          } catch {}
-          return { name, path: entryPath, kind }
-        })
-      } catch {}
-    }
-
-    return {
-      targetPath: resolvedTarget,
-      directory: currentDir,
-      agentsFiles,
-      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
-      localRinEntries,
-    }
-  }
-
   return (pi: any) => {
     try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
 
-    pi.registerTool({
-      name: 'rin_brain',
-      label: 'Rin Brain',
-      description: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge. Do not use this for verbatim transcript reads.',
-      promptSnippet: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge.',
-      promptGuidelines: [],
-      parameters: Type.Object({
-        action: Type.Union([
-          Type.Literal('show'),
-          Type.Literal('search'),
-          Type.Literal('recall'),
-          Type.Literal('history_recent'),
-          Type.Literal('history_search'),
-          Type.Literal('remember'),
-          Type.Literal('finalize'),
-          Type.Literal('knowledge_search'),
-          Type.Literal('knowledge_index'),
-        ]),
-        query: Type.Optional(Type.String()),
-        hours: Type.Optional(Type.Number({ minimum: 1 })),
-        limit: Type.Optional(Type.Number({ minimum: 1 })),
-        chatKey: Type.Optional(Type.String()),
-        scope: Type.Optional(Type.String()),
-        reason: Type.Optional(Type.String()),
-        mode: Type.Optional(Type.String()),
-      }),
-      async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
-        const action = safeString(params && params.action).trim()
-        const args: string[] = []
-        if (action === 'knowledge_search' || action === 'knowledge_index') args.push('knowledge')
-        else args.push('brain')
-        if (action === 'show') args.push('show')
-        if (action === 'search') args.push('search', safeString(params.query || ''))
-        if (action === 'recall') args.push('recall', safeString(params.query || ''))
-        if (action === 'history_recent') args.push('history', 'recent')
-        if (action === 'history_search') args.push('history', 'search', safeString(params.query || ''))
-        if (action === 'remember') args.push('remember', safeString(params.query || ''))
-        if (action === 'finalize') args.push('finalize')
-        if (action === 'knowledge_search') args.push('search', safeString(params.query || ''))
-        if (action === 'knowledge_index') args.push('index')
-        if (params && params.limit != null) args.push('--limit', String(params.limit))
-        if (params && params.hours != null && action === 'history_recent') args.push('--hours', String(params.hours))
-        if (params && params.chatKey) args.push('--chatKey', safeString(params.chatKey))
-        if (params && params.scope && action !== 'knowledge_search' && action !== 'knowledge_index' && action !== 'history_recent' && action !== 'history_search') args.push('--scope', safeString(params.scope))
-        if (params && params.reason && action === 'finalize') args.push('--reason', safeString(params.reason))
-        if (params && params.mode && action === 'knowledge_search') args.push('--mode', safeString(params.mode))
-        const result = await runRinBrainCommand({ repoRoot, stateRoot, args, signal })
-        return toolResultFromCommand(result)
-      },
-    })
-
-    pi.registerTool({
-      name: 'rin_schedule',
-      label: 'Rin Schedule',
-      description: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
-      promptSnippet: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
-      parameters: Type.Object({
-        kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
-        action: Type.Union([
-          Type.Literal('list'),
-          Type.Literal('create'),
-          Type.Literal('enable'),
-          Type.Literal('disable'),
-          Type.Literal('delete'),
-          Type.Literal('run'),
-        ]),
-        name: Type.Optional(Type.String()),
-        chatKey: Type.Optional(Type.String()),
-        routineFile: Type.Optional(Type.String()),
-        file: Type.Optional(Type.String()),
-        command: Type.Optional(Type.String()),
-        todoFile: Type.Optional(Type.String()),
-        start: Type.Optional(Type.String()),
-        every: Type.Optional(Type.String()),
-      }),
-      async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
-        try {
-          const result = await manageScheduleViaCtl({
-            stateRoot,
-            kind: safeString(params.kind),
-            action: safeString(params.action),
-            name: safeString(params.name || ''),
-            chatKey: safeString(params.chatKey || ''),
-            routineFile: safeString(params.routineFile || ''),
-            file: safeString(params.file || ''),
-            command: safeString(params.command || ''),
-            todoFile: safeString(params.todoFile || ''),
-            start: safeString(params.start || ''),
-            every: safeString(params.every || ''),
-            signal,
-          })
-          return toolResultFromText(result.text, result.details)
-        } catch (e: any) {
-          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-        }
-      },
-    })
-
-    pi.registerTool({
-      name: 'rin_web_search',
-      label: 'Web Search',
-      description: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
-      promptSnippet: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
-      parameters: Type.Object({
-        query: Type.String(),
-        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
-        freshness: Type.Optional(Type.Union([
-          Type.Literal('day'),
-          Type.Literal('week'),
-          Type.Literal('month'),
-          Type.Literal('year'),
-        ])),
-        safe: Type.Optional(Type.Union([
-          Type.Literal('off'),
-          Type.Literal('moderate'),
-          Type.Literal('strict'),
-        ])),
-        provider: Type.Optional(Type.String()),
-        providers: Type.Optional(Type.Array(Type.String())),
-        noCache: Type.Optional(Type.Boolean()),
-      }),
-      async execute(_toolCallId: string, params: any) {
-        try {
-          const result = await searchWeb({
-            stateRoot,
-            query: safeString(params && params.query || ''),
-            limit: params && params.limit != null ? Number(params.limit) : undefined,
-            freshness: safeString(params && params.freshness || ''),
-            safe: safeString(params && params.safe || ''),
-            provider: safeString(params && params.provider || ''),
-            providers: Array.isArray(params && params.providers) ? params.providers.map((item: any) => safeString(item)) : undefined,
-            noCache: Boolean(params && params.noCache),
-          })
-          return toolResultFromText(JSON.stringify(result, null, 2), result, !result.ok)
-        } catch (e: any) {
-          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-        }
-      },
-    })
-
-    pi.registerTool({
-      name: 'rin_context',
-      label: 'Rin Context',
-      description: 'Inspect the AGENTS.md chain and local .rin resources that apply to a target file or directory.',
-      promptSnippet: 'Inspect the AGENTS.md chain and local .rin resources for a target path.',
-      parameters: Type.Object({
-        path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
-      }),
-      async execute(_toolCallId: string, params: any) {
-        try {
-          const result = collectContextFilesForExtension(safeString(params && params.path))
-          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
-        } catch (e: any) {
-          return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
-        }
-      },
-    })
-
-    const additionalTools = Array.isArray(getAdditionalTools()) ? getAdditionalTools() : []
-    for (const tool of additionalTools) {
+    const rawTools = getTools()
+    const providedTools = Array.isArray(rawTools) ? rawTools : []
+    const tools = providedTools.length > 0
+      ? providedTools
+      : createRinBuiltinExtensionTools({
+        repoRoot,
+        stateRoot,
+        pi,
+        agentDir: '',
+        authStorage: {},
+        modelRegistry: {},
+        resourceLoader: { getSkills: () => ({ skills: [] }) },
+        sessionManager: {},
+        sessionRef: { current: null },
+      })
+    for (const tool of tools) {
       if (!tool || typeof tool !== 'object' || !safeString(tool.name).trim()) continue
       pi.registerTool(tool)
     }
@@ -3012,22 +2880,6 @@ function createRinBuiltinExtensionFactory({
   }
 }
 
-function buildRinBuiltinPromptBlock({
-  stateRoot,
-  docsRoot: _docsRoot,
-}: {
-  stateRoot: string
-  docsRoot: string
-}) {
-  return [
-    '',
-    'Rin runtime:',
-    `- Runtime root: ${stateRoot}`,
-    '- Runtime-owned config, docs, skills, and state live under this root.',
-    '',
-  ].join('\n')
-}
-
 return {
   runRinBrainCommand,
   enqueueBrainJob,
@@ -3038,9 +2890,8 @@ return {
   queueBrainFinalizeAsync,
   flushBrainQueue,
   INTERNALIZED_SKILL_NAMES,
-  createRinBuiltinTools,
+  createRinBuiltinExtensionTools,
   createRinBuiltinExtensionFactory,
-  buildRinBuiltinPromptBlock,
 }
 })()
 
@@ -3054,9 +2905,8 @@ const {
   queueBrainFinalizeAsync,
   flushBrainQueue,
   INTERNALIZED_SKILL_NAMES,
-  createRinBuiltinTools,
+  createRinBuiltinExtensionTools,
   createRinBuiltinExtensionFactory,
-  buildRinBuiltinPromptBlock,
 } = RinBuiltins
 
 const RinPiSdk = (() => {
@@ -3191,16 +3041,22 @@ function resourceMetadataForPath(resourceLoader: any, filePath: string): any {
   }
 }
 
-function allowRuntimeRootResource(resourceLoader: any, filePath: string, runtimeRoot: string): boolean {
+function isAllowedRuntimeResourcePath(filePath: string, runtimeRoot: string, metadata: any = null): boolean {
   const raw = safeString(filePath).trim()
   if (!raw) return true
   if (!path.isAbsolute(raw)) return true
   const abs = path.resolve(raw)
   if (!isUnderPath(abs, runtimeRoot)) return false
   if (isUnderPath(abs, path.join(runtimeRoot, '.pi'))) return false
-  const meta = resourceMetadataForPath(resourceLoader, abs)
-  if (safeString(meta && meta.scope).trim() === 'project') return false
+  if (safeString(metadata && metadata.scope).trim() === 'project') return false
   return true
+}
+
+function allowRuntimeRootResource(resourceLoader: any, filePath: string, runtimeRoot: string): boolean {
+  const raw = safeString(filePath).trim()
+  if (!raw) return true
+  const abs = path.resolve(raw)
+  return isAllowedRuntimeResourcePath(abs, runtimeRoot, resourceMetadataForPath(resourceLoader, abs))
 }
 
 function filterResourceDiagnostics(resourceLoader: any, diagnostics: any, runtimeRoot: string): Array<any> {
@@ -3212,32 +3068,31 @@ function filterResourceDiagnostics(resourceLoader: any, diagnostics: any, runtim
   })
 }
 
-function lockGlobalSettingsManager(settingsManager: any) {
-  if (!settingsManager || typeof settingsManager !== 'object') return settingsManager
-  const syncGlobalOnly = () => {
-    try {
-      settingsManager.projectSettings = {}
-      settingsManager.settings = settingsManager.globalSettings && typeof settingsManager.globalSettings === 'object'
-        ? JSON.parse(JSON.stringify(settingsManager.globalSettings))
-        : {}
-    } catch {
-      settingsManager.projectSettings = {}
-      settingsManager.settings = {}
-    }
+function createRinGlobalSettingsStorage(agentDir: string) {
+  const settingsPath = path.join(agentDir, 'settings.json')
+  return {
+    withLock(scope: 'global' | 'project', fn: (current: string | undefined) => string | undefined) {
+      if (scope === 'project') {
+        fn(undefined)
+        return
+      }
+      const current = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, 'utf8') : undefined
+      const next = fn(current)
+      if (next === undefined) return
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+      fs.writeFileSync(settingsPath, next, 'utf8')
+    },
   }
-  const originalReload = typeof settingsManager.reload === 'function' ? settingsManager.reload.bind(settingsManager) : null
-  settingsManager.getProjectSettings = () => ({})
-  settingsManager.saveProjectSettings = () => {
-    syncGlobalOnly()
+}
+
+function createRinSettingsManager(pi: any, _settingsCwd: string, agentDir: string) {
+  if (pi && pi.SettingsManager && typeof pi.SettingsManager.fromStorage === 'function') {
+    return pi.SettingsManager.fromStorage(createRinGlobalSettingsStorage(agentDir))
   }
-  if (originalReload) {
-    settingsManager.reload = () => {
-      originalReload()
-      syncGlobalOnly()
-    }
+  if (pi && pi.SettingsManager && typeof pi.SettingsManager.create === 'function') {
+    return pi.SettingsManager.create(agentDir, agentDir)
   }
-  syncGlobalOnly()
-  return settingsManager
+  return null
 }
 
 function restrictPackageManagerToRuntimeRoot(packageManager: any, runtimeRoot: string) {
@@ -3250,12 +3105,7 @@ function restrictPackageManagerToRuntimeRoot(packageManager: any, runtimeRoot: s
       return list.filter((entry: any) => {
         const filePath = safeString(entry && entry.path).trim()
         if (!filePath) return true
-        const meta = entry && entry.metadata
-        if (safeString(meta && meta.scope).trim() === 'project') return false
-        if (!path.isAbsolute(filePath)) return true
-        if (!isUnderPath(filePath, runtimeRoot)) return false
-        if (isUnderPath(filePath, path.join(runtimeRoot, '.pi'))) return false
-        return true
+        return isAllowedRuntimeResourcePath(filePath, runtimeRoot, entry && entry.metadata)
       })
     }
     return {
@@ -3265,6 +3115,214 @@ function restrictPackageManagerToRuntimeRoot(packageManager: any, runtimeRoot: s
       themes: filterEntries(resolved && resolved.themes),
     }
   }
+}
+
+function createRinSessionManager(pi: any, {
+  agentDir,
+  sessionCwd,
+  sessionDir = '',
+  sessionFile = '',
+  sessionPolicy = 'continueRecent',
+  inMemorySession = false,
+}: {
+  agentDir: string
+  sessionCwd: string
+  sessionDir?: string
+  sessionFile?: string
+  sessionPolicy?: RinPiSessionPolicy
+  inMemorySession?: boolean
+}) {
+  const resolvedSessionDir = path.resolve(sessionDir || defaultSessionDirForAgent(agentDir, path.resolve(sessionCwd)))
+  ensureDir(resolvedSessionDir)
+  const resolvedSessionFile = safeString(sessionFile).trim()
+  const resolvedSessionCwd = path.resolve(sessionCwd)
+  const sessionManager = inMemorySession
+    ? pi.SessionManager.inMemory(resolvedSessionCwd)
+    : resolvedSessionFile && fs.existsSync(resolvedSessionFile)
+      ? pi.SessionManager.open(resolvedSessionFile, resolvedSessionDir)
+      : sessionPolicy === 'new'
+        ? pi.SessionManager.create(resolvedSessionCwd, resolvedSessionDir)
+        : pi.SessionManager.continueRecent(resolvedSessionCwd, resolvedSessionDir)
+  return { sessionManager, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile }
+}
+
+function createRinResourceLoader({
+  pi,
+  repoRoot,
+  stateRoot,
+  agentDir,
+  cwd,
+  settingsManager,
+  brainChatKey,
+  enableBrainHooks,
+  currentChatKey,
+  effectiveToolSessionDir,
+  effectiveToolSessionFile,
+  authStorage,
+  modelRegistry,
+  sessionManager,
+  sessionRef,
+}: {
+  pi: any
+  repoRoot: string
+  stateRoot: string
+  agentDir: string
+  cwd: string
+  settingsManager: any
+  brainChatKey: string
+  enableBrainHooks: boolean
+  currentChatKey: string
+  effectiveToolSessionDir: string
+  effectiveToolSessionFile: string
+  authStorage: any
+  modelRegistry: any
+  sessionManager: any
+  sessionRef: { current: any }
+}) {
+  const manualSkills = collectManualSkills([path.join(agentDir, 'skills')])
+  const baseResourceLoader = new pi.DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    additionalSkillPaths: [path.join(agentDir, 'skills')],
+    extensionFactories: [
+      createRinBuiltinExtensionFactory({
+        repoRoot,
+        stateRoot,
+        brainChatKey,
+        enableBrainHooks,
+        getTools: () => createRinBuiltinExtensionTools({
+          repoRoot,
+          stateRoot,
+          currentChatKey,
+          sessionDir: effectiveToolSessionDir,
+          sessionFile: effectiveToolSessionFile,
+          pi,
+          agentDir,
+          authStorage,
+          modelRegistry,
+          resourceLoader,
+          sessionManager,
+          sessionRef,
+        }),
+      }),
+    ],
+    appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
+  })
+  restrictPackageManagerToRuntimeRoot(baseResourceLoader && baseResourceLoader.packageManager, agentDir)
+
+  let resourceLoader: any = null
+  let extensionsResult = { extensions: [], errors: [], runtime: pi.createExtensionRuntime ? pi.createExtensionRuntime() : undefined }
+  let skillsResult = { skills: [], diagnostics: [] }
+  let promptsResult = { prompts: [], diagnostics: [] }
+  let themesResult = { themes: [], diagnostics: [] }
+  let agentsFilesResult = { agentsFiles: runtimeAgentsFiles(agentDir) }
+  let filteredPathMetadata = new Map<string, any>()
+
+  const filterItems = (items: any, pickPath: (item: any) => any) => {
+    const list = Array.isArray(items) ? items : []
+    return list.filter((item: any) => isAllowedRuntimeResourcePath(safeString(pickPath(item)), agentDir, resourceMetadataForPath(baseResourceLoader, safeString(pickPath(item)))))
+  }
+
+  const refresh = () => {
+    const nextExtensions = baseResourceLoader.getExtensions()
+    const nextSkills = baseResourceLoader.getSkills()
+    const nextPrompts = baseResourceLoader.getPrompts()
+    const nextThemes = baseResourceLoader.getThemes()
+
+    extensionsResult = {
+      ...nextExtensions,
+      extensions: filterItems(nextExtensions && nextExtensions.extensions, (entry: any) => entry && entry.path),
+      errors: filterResourceDiagnostics(baseResourceLoader, nextExtensions && nextExtensions.errors, agentDir),
+    }
+
+    const seenSkills = new Set<string>()
+    const mergedSkills: Array<any> = []
+    for (const skill of filterItems(nextSkills && nextSkills.skills, (entry: any) => entry && entry.filePath)) {
+      const normalized = normalizeSkillRecord(skill)
+      const name = safeString(normalized && normalized.name).trim()
+      if (!normalized || !name || INTERNALIZED_SKILL_NAMES.has(name) || seenSkills.has(name)) continue
+      seenSkills.add(name)
+      mergedSkills.push(normalized)
+    }
+    for (const skill of manualSkills) {
+      const normalized = normalizeSkillRecord(skill)
+      const name = safeString(normalized && normalized.name).trim()
+      if (!normalized || !name || seenSkills.has(name)) continue
+      seenSkills.add(name)
+      mergedSkills.push(normalized)
+    }
+    skillsResult = {
+      skills: mergedSkills,
+      diagnostics: filterResourceDiagnostics(baseResourceLoader, nextSkills && nextSkills.diagnostics, agentDir),
+    }
+
+    promptsResult = {
+      prompts: filterItems(nextPrompts && nextPrompts.prompts, (entry: any) => entry && entry.filePath),
+      diagnostics: filterResourceDiagnostics(baseResourceLoader, nextPrompts && nextPrompts.diagnostics, agentDir),
+    }
+
+    themesResult = {
+      themes: filterItems(nextThemes && nextThemes.themes, (entry: any) => entry && entry.sourcePath),
+      diagnostics: filterResourceDiagnostics(baseResourceLoader, nextThemes && nextThemes.diagnostics, agentDir),
+    }
+
+    agentsFilesResult = { agentsFiles: runtimeAgentsFiles(agentDir) }
+
+    filteredPathMetadata = new Map<string, any>()
+    const basePathMetadata = baseResourceLoader && typeof baseResourceLoader.getPathMetadata === 'function'
+      ? baseResourceLoader.getPathMetadata()
+      : null
+    if (basePathMetadata instanceof Map) {
+      for (const [filePath, metadata] of basePathMetadata.entries()) {
+        const normalizedPath = safeString(filePath).trim()
+        if (!normalizedPath || !isAllowedRuntimeResourcePath(normalizedPath, agentDir, metadata)) continue
+        filteredPathMetadata.set(path.resolve(normalizedPath), metadata)
+      }
+    }
+    for (const skill of manualSkills) {
+      const skillPath = safeString(skill && skill.filePath).trim()
+      if (!skillPath) continue
+      const normalizedPath = path.resolve(skillPath)
+      if (filteredPathMetadata.has(normalizedPath)) continue
+      filteredPathMetadata.set(normalizedPath, { source: 'local', scope: 'user', origin: 'top-level' })
+    }
+  }
+
+  resourceLoader = {
+    getExtensions: () => extensionsResult,
+    getSkills: () => skillsResult,
+    getPrompts: () => promptsResult,
+    getThemes: () => themesResult,
+    getAgentsFiles: () => agentsFilesResult,
+    getSystemPrompt: () => baseResourceLoader.getSystemPrompt(),
+    getAppendSystemPrompt: () => {
+      const append = baseResourceLoader.getAppendSystemPrompt()
+      return Array.isArray(append) ? append.slice() : []
+    },
+    getPathMetadata: () => filteredPathMetadata,
+    extendResources: (paths: any) => {
+      baseResourceLoader.extendResources(paths)
+      refresh()
+    },
+    reload: async () => {
+      await baseResourceLoader.reload()
+      refresh()
+    },
+  }
+
+  return { resourceLoader }
+}
+
+function decorateRinSession(session: any, {
+  repoRoot,
+  systemPromptExtra = '',
+}: {
+  repoRoot: string
+  systemPromptExtra?: string
+}) {
+  applyRinSystemPromptPatch(session, repoRoot, systemPromptExtra)
+  patchSessionAssistantMessageNormalization(session)
 }
 
 const HIDDEN_SKILL_DIR = '.hidden'
@@ -3406,40 +3464,13 @@ function collectManualSkills(skillDirs: string[]): Array<any> {
   return out
 }
 
-function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string, manualSkillBlock = '', systemPromptExtra = ''): string | undefined {
+function rewriteRinSystemPrompt(base: any, _repoRoot: string, systemPromptExtra = ''): string | undefined {
   const text = safeString(base)
   if (!text) return undefined
 
   let next = text
   if (next.includes(PI_DEFAULT_OPENING)) {
     next = next.replace(PI_DEFAULT_OPENING, RIN_OPENING)
-  }
-
-  const docsRoot = path.join(stateRoot, 'docs')
-  const docsBlock = [
-    'Rin docs (read only for Rin, SDK, extensions, themes, skills, prompt templates, package docs, or TUI requests):',
-    `- README: ${path.join(docsRoot, 'rin', 'README.md')}`,
-    `- Examples dir: ${path.join(docsRoot, 'rin', 'examples')}`,
-    '- For Rin work, read the relevant .md files fully and follow local markdown links before implementing.',
-  ].join('\n')
-  next = next.replace(/Pi documentation \(read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI\):[\s\S]*?(?=\n\n<!-- synced|\n\n# Project Context|\n\nThe following skills|\nCurrent date:|\nCurrent working directory:|$)/, docsBlock)
-
-  next = next.replace(/\nCurrent date:.*$/gm, '')
-  next = next.replace(/\nCurrent working directory:.*$/gm, '')
-
-  const continueGuideline = '- `#RIN_CONTINUE` is the control token for autonomous multi-turn continuation. Use it when work should continue immediately in the next inference turn, but only after pushing the task as far as possible in the current turn; never emit it as a no-op progress reply or before doing the work you can already do now.'
-  if (!next.includes(continueGuideline)) {
-    next = next.replace('Show file paths clearly when working with files', `Show file paths clearly when working with files\n${continueGuideline}`)
-  }
-
-  const builtinBlock = buildRinBuiltinPromptBlock({ stateRoot, docsRoot })
-  const skillBlock = safeString(manualSkillBlock).trim()
-  if (!next.includes('Rin runtime:')) {
-    next = next.replace(docsBlock, [docsBlock, builtinBlock.trim()].filter(Boolean).join('\n\n'))
-  }
-  if (skillBlock && !next.includes('<available_skills>')) {
-    if (next.includes('\n\n# Project Context')) next = next.replace('\n\n# Project Context', `\n\n${skillBlock}\n\n# Project Context`)
-    else next = `${next}\n\n${skillBlock}`
   }
 
   const extraBlock = safeString(systemPromptExtra).trim()
@@ -3450,14 +3481,14 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
   return next.trimEnd()
 }
 
-function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: string, manualSkillBlock = '', systemPromptExtra = '') {
+function applyRinSystemPromptPatch(session: any, repoRoot: string, systemPromptExtra = '') {
   if (!session || typeof session !== 'object') return
   const originalRebuild = typeof session._rebuildSystemPrompt === 'function'
     ? session._rebuildSystemPrompt.bind(session)
     : null
   if (!originalRebuild) return
 
-  session._rebuildSystemPrompt = (...args: any[]) => rewriteRinSystemPrompt(originalRebuild(...args), repoRoot, stateRoot, manualSkillBlock, systemPromptExtra) || originalRebuild(...args)
+  session._rebuildSystemPrompt = (...args: any[]) => rewriteRinSystemPrompt(originalRebuild(...args), repoRoot, systemPromptExtra) || originalRebuild(...args)
 
   let activeToolNames: string[] = []
   try {
@@ -3482,9 +3513,6 @@ function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: st
     }
   } catch {}
 }
-
-const RIN_CONTINUE_TOKEN = EXPORTED_RIN_CONTINUE_TOKEN
-const RIN_CONTINUE_FOLLOWUP = EXPORTED_RIN_CONTINUE_FOLLOWUP
 
 function normalizeAssistantDuplicateText(text: any): string {
   return safeString(text)
@@ -3550,62 +3578,6 @@ function patchSessionAssistantMessageNormalization(session: any) {
   }
 }
 
-function patchSessionPromptAutoContinue(session: any) {
-  if (!session || typeof session !== 'object' || session.__rinPromptAutoContinuePatched) return
-  if (typeof session.prompt !== 'function' || typeof session.subscribe !== 'function') return
-  const originalPrompt = session.prompt.bind(session)
-  const originalSubscribe = session.subscribe.bind(session)
-  session.__rinPromptAutoContinuePatched = true
-  session.__rinPromptAutoContinueOriginalSubscribe = originalSubscribe
-  session.subscribe = (listener: any) => originalSubscribe(createContinueEventFilter(session, listener, RIN_CONTINUE_TOKEN))
-  session.prompt = async (text: string, options: any = {}) => {
-    if (session.__rinPromptAutoContinueInternal) {
-      return await originalPrompt(text, options)
-    }
-    session.__rinPromptAutoContinueInternal = true
-    try {
-      let nextText = text
-      let nextOptions = options
-      for (let pass = 0; pass < 24; pass += 1) {
-        let lastAssistantText = ''
-        const unsubscribe = originalSubscribe((event: any) => {
-          const eventType = safeString(event && event.type)
-          if (eventType === 'message_end' || eventType === 'turn_end') {
-            const message = event && event.message
-            if (safeString(message && message.role) !== 'assistant') return
-            const extracted = extractAssistantTextFromMessage(message)
-            if (extracted) lastAssistantText = extracted
-            return
-          }
-          if (eventType === 'agent_end') {
-            const messages = Array.isArray(event && event.messages) ? event.messages : []
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              const message = messages[i]
-              if (safeString(message && message.role) !== 'assistant') continue
-              const extracted = extractAssistantTextFromMessage(message)
-              if (!extracted) continue
-              lastAssistantText = extracted
-              break
-            }
-          }
-        })
-        try {
-          await promptSessionWithRetry(session, originalPrompt, nextText, nextOptions)
-        } finally {
-          try { unsubscribe() } catch {}
-        }
-        if (safeString(lastAssistantText).trim() !== RIN_CONTINUE_TOKEN) return
-        try { discardTrailingContinueAssistant(session, RIN_CONTINUE_TOKEN) } catch {}
-        nextText = RIN_CONTINUE_FOLLOWUP
-        nextOptions = {}
-      }
-      throw new Error('rin_continue_limit_exceeded')
-    } finally {
-      session.__rinPromptAutoContinueInternal = false
-    }
-  }
-}
-
 function defaultSessionDirForAgent(agentDir: string, _cwd: string): string {
   return path.join(agentDir, 'sessions', 'default')
 }
@@ -3661,99 +3633,35 @@ async function createRinPiSession({
   const modelRegistry = new pi.ModelRegistry(authStorage, path.join(agentDir, 'models.json'))
   const resolvedResourceCwd = path.resolve(resourceCwd || stateRoot)
   const resolvedSettingsCwd = path.resolve(settingsCwd || stateRoot)
-  const settingsManager = lockGlobalSettingsManager(pi.SettingsManager.create(resolvedSettingsCwd, agentDir))
-  const resolvedSessionDir = path.resolve(sessionDir || defaultSessionDirForAgent(agentDir, path.resolve(sessionCwd)))
-  ensureDir(resolvedSessionDir)
-  const resolvedSessionFile = safeString(sessionFile).trim()
+  const settingsManager = createRinSettingsManager(pi, resolvedSettingsCwd, agentDir)
+  const { sessionManager, sessionDir: resolvedSessionDir, sessionFile: resolvedSessionFile } = createRinSessionManager(pi, {
+    agentDir,
+    sessionCwd,
+    sessionDir,
+    sessionFile,
+    sessionPolicy,
+    inMemorySession,
+  })
   const effectiveToolSessionDir = path.resolve(safeString(toolSessionDir).trim() || resolvedSessionDir)
   const effectiveToolSessionFile = safeString(toolSessionFile).trim() || resolvedSessionFile
-  const sessionManager = inMemorySession
-    ? pi.SessionManager.inMemory(path.resolve(sessionCwd))
-    : resolvedSessionFile && fs.existsSync(resolvedSessionFile)
-      ? pi.SessionManager.open(resolvedSessionFile, resolvedSessionDir)
-      : sessionPolicy === 'new'
-        ? pi.SessionManager.create(path.resolve(sessionCwd), resolvedSessionDir)
-        : pi.SessionManager.continueRecent(path.resolve(sessionCwd), resolvedSessionDir)
   const sessionRef = { current: null as any }
-  const manualSkills = collectManualSkills([
-    path.join(agentDir, 'skills'),
-  ])
-  const manualSkillBlock = formatSkillsForPrompt(manualSkills).trim()
-  let resourceLoader: any = null
-  const keepRuntimeResource = (filePath: any) => allowRuntimeRootResource(resourceLoader, safeString(filePath), agentDir)
-  const filterRuntimeResources = (items: any, pickPath: (item: any) => any) => {
-    const list = Array.isArray(items) ? items : []
-    return list.filter((item: any) => keepRuntimeResource(pickPath(item)))
-  }
-  resourceLoader = new pi.DefaultResourceLoader({
-    cwd: resolvedResourceCwd,
+  const { resourceLoader } = createRinResourceLoader({
+    pi,
+    repoRoot,
+    stateRoot,
     agentDir,
+    cwd: resolvedResourceCwd,
     settingsManager,
-    additionalSkillPaths: [
-      path.join(agentDir, 'skills'),
-    ],
-    agentsFilesOverride: () => ({ agentsFiles: runtimeAgentsFiles(agentDir) }),
-    systemPromptOverride: (base: any) => rewriteRinSystemPrompt(base, repoRoot, stateRoot, manualSkillBlock, systemPromptExtra),
-    extensionsOverride: (current: any) => ({
-      ...current,
-      extensions: filterRuntimeResources(current && current.extensions, (extension: any) => extension && extension.path),
-      errors: filterResourceDiagnostics(resourceLoader, current && current.errors, agentDir),
-    }),
-    skillsOverride: (current: any) => {
-      const seen = new Set<string>()
-      const mergedSkills: Array<any> = []
-      for (const skill of filterRuntimeResources(current && current.skills, (entry: any) => entry && entry.filePath)) {
-        const normalized = normalizeSkillRecord(skill)
-        const name = safeString(normalized && normalized.name).trim()
-        if (!normalized || !name || INTERNALIZED_SKILL_NAMES.has(name) || seen.has(name)) continue
-        seen.add(name)
-        mergedSkills.push(normalized)
-      }
-      for (const skill of manualSkills) {
-        const normalized = normalizeSkillRecord(skill)
-        const name = safeString(normalized && normalized.name).trim()
-        if (!normalized || !name || seen.has(name)) continue
-        seen.add(name)
-        mergedSkills.push(normalized)
-      }
-      return {
-        skills: mergedSkills,
-        diagnostics: filterResourceDiagnostics(resourceLoader, current && current.diagnostics, agentDir),
-      }
-    },
-    promptsOverride: (current: any) => ({
-      prompts: filterRuntimeResources(current && current.prompts, (prompt: any) => prompt && prompt.filePath),
-      diagnostics: filterResourceDiagnostics(resourceLoader, current && current.diagnostics, agentDir),
-    }),
-    themesOverride: (current: any) => ({
-      themes: filterRuntimeResources(current && current.themes, (theme: any) => theme && theme.sourcePath),
-      diagnostics: filterResourceDiagnostics(resourceLoader, current && current.diagnostics, agentDir),
-    }),
-    extensionFactories: [
-      createRinBuiltinExtensionFactory({
-        repoRoot,
-        stateRoot,
-        brainChatKey,
-        enableBrainHooks,
-        getAdditionalTools: () => createRinBuiltinTools({
-          repoRoot,
-          stateRoot,
-          currentChatKey,
-          sessionDir: effectiveToolSessionDir,
-          sessionFile: effectiveToolSessionFile,
-          pi,
-          agentDir,
-          authStorage,
-          modelRegistry,
-          resourceLoader,
-          sessionManager,
-          sessionRef,
-        }),
-      }),
-    ],
-    appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
+    brainChatKey,
+    enableBrainHooks,
+    currentChatKey,
+    effectiveToolSessionDir,
+    effectiveToolSessionFile,
+    authStorage,
+    modelRegistry,
+    sessionManager,
+    sessionRef,
   })
-  restrictPackageManagerToRuntimeRoot(resourceLoader && resourceLoader.packageManager, agentDir)
   await resourceLoader.reload()
 
   const resolvedModel = provider && model ? modelRegistry.find(provider, model) : undefined
@@ -3782,27 +3690,10 @@ async function createRinPiSession({
 
   const brainQueueRuntime = ensureBrainQueueRuntime({ repoRoot, stateRoot })
 
-  applyRinSystemPromptPatch(created.session, repoRoot, stateRoot, manualSkillBlock, systemPromptExtra)
-  const extraPromptBlocks: string[] = []
-  if (manualSkillBlock && !safeString(created.session && created.session._baseSystemPrompt).includes('<available_skills>')) {
-    extraPromptBlocks.push(manualSkillBlock)
-  }
-  const extraSystemPrompt = safeString(systemPromptExtra).trim()
-  if (extraSystemPrompt && !safeString(created.session && created.session._baseSystemPrompt).includes(extraSystemPrompt)) {
-    extraPromptBlocks.push(extraSystemPrompt)
-  }
-  if (extraPromptBlocks.length) {
-    const nextPrompt = `${safeString(created.session && created.session._baseSystemPrompt).trimEnd()}\n\n${extraPromptBlocks.join('\n\n')}`
-    created.session._baseSystemPrompt = nextPrompt
-    if (created.session.agent && created.session.agent.state && typeof created.session.agent.state === 'object') {
-      created.session.agent.state.systemPrompt = nextPrompt
-    }
-    if (created.session.agent && typeof created.session.agent.setSystemPrompt === 'function') {
-      created.session.agent.setSystemPrompt(nextPrompt)
-    }
-  }
-  patchSessionAssistantMessageNormalization(created.session)
-  patchSessionPromptAutoContinue(created.session)
+  decorateRinSession(created.session, {
+    repoRoot,
+    systemPromptExtra,
+  })
 
   return {
     pi,
@@ -4146,12 +4037,9 @@ export {
   queueBrainFinalizeAsync,
   flushBrainQueue,
   INTERNALIZED_SKILL_NAMES,
-  createRinBuiltinTools,
+  createRinBuiltinExtensionTools,
   createRinBuiltinExtensionFactory,
-  buildRinBuiltinPromptBlock,
   normalizeAssistantMessageForRin,
-  EXPORTED_RIN_CONTINUE_TOKEN as RIN_CONTINUE_TOKEN,
-  EXPORTED_RIN_CONTINUE_FOLLOWUP as RIN_CONTINUE_FOLLOWUP,
   resolvePiAgentDir,
   loadPiSdkModule,
   createRinPiSession,

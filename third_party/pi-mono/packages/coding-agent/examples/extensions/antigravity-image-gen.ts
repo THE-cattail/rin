@@ -11,8 +11,8 @@
  *
  * Save modes (tool param, env var, or config file):
  *   save=none     - Don't save to disk (default)
- *   save=project  - Save to <repo>/.pi/generated-images/
- *   save=global   - Save to ~/.pi/agent/generated-images/
+ *   save=project  - Save to <repo>/.rin/generated-images/
+ *   save=global   - Save to ~/.rin/generated-images/
  *   save=custom   - Save to saveDir param or PI_IMAGE_SAVE_DIR
  *
  * Environment variables:
@@ -20,8 +20,8 @@
  *   PI_IMAGE_SAVE_DIR   - Directory for custom save mode
  *
  * Config files (project overrides global):
- *   ~/.pi/agent/extensions/antigravity-image-gen.json
- *   <repo>/.pi/extensions/antigravity-image-gen.json
+ *   ~/.rin/extensions/antigravity-image-gen.json
+ *   <repo>/.rin/extensions/antigravity-image-gen.json
  *   Example: { "save": "global" }
  */
 
@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
 
 const PROVIDER = "google-antigravity";
@@ -228,14 +228,12 @@ function imageExtension(mimeType: string): string {
 }
 
 async function saveImage(base64Data: string, mimeType: string, outputDir: string): Promise<string> {
+	await mkdir(outputDir, { recursive: true });
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 	const ext = imageExtension(mimeType);
 	const filename = `image-${timestamp}-${randomUUID().slice(0, 8)}.${ext}`;
 	const filePath = join(outputDir, filename);
-	await withFileMutationQueue(filePath, async () => {
-		await mkdir(outputDir, { recursive: true });
-		await writeFile(filePath, Buffer.from(base64Data, "base64"));
-	});
+	await writeFile(filePath, Buffer.from(base64Data, "base64"));
 	return filePath;
 }
 

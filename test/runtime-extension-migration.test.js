@@ -6,7 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const {
-  createRinBuiltinTools,
+  createRinBuiltinExtensionTools,
   createRinBuiltinExtensionFactory,
 } = require('../dist/runtime.js')
 
@@ -55,11 +55,20 @@ async function withCtlServer(handler, run) {
   }
 }
 
-test('builtin Rin extension tool definitions cover the remaining Pi-facing tools', () => {
-  const tools = createRinBuiltinTools(baseArgs())
+test('builtin Rin extension tool definitions cover all builtin Rin extension tools', () => {
+  const tools = createRinBuiltinExtensionTools(baseArgs())
   const names = tools.map((tool) => tool.name)
 
-  assert.deepEqual(names.sort(), ['rin_history', 'rin_koishi', 'rin_skills', 'rin_subagent'].sort())
+  assert.deepEqual(names.sort(), [
+    'rin_brain',
+    'rin_context',
+    'rin_history',
+    'rin_koishi',
+    'rin_schedule',
+    'rin_skills',
+    'rin_subagent',
+    'rin_web_search',
+  ].sort())
 })
 
 test('builtin extension factory registers migrated Rin tools and memory hooks', () => {
@@ -69,7 +78,7 @@ test('builtin extension factory registers migrated Rin tools and memory hooks', 
     repoRoot: '/tmp/rin-repo',
     stateRoot: '/tmp/rin-state',
     brainChatKey: 'local:test',
-    getAdditionalTools: () => createRinBuiltinTools(baseArgs()),
+    getTools: () => createRinBuiltinExtensionTools(baseArgs()),
   })
 
   factory({

@@ -151,7 +151,10 @@ rin
 
 Rin は、表に見えるコマンドを小さく保っています。
 
-- `rin`: ローカルの対話画面を開きます。
+- `rin`: 現在のユーザー自身の runtime に対してローカルの対話画面を開きます。
+- `rin -u <user>`: 権限がある場合、別ユーザーの Rin をそのまま開きます。
+- `rin --tmux [<name>]`: Rin 専用の tmux socket 上で起動します。既定の `tmux list-sessions` には出ません。
+- `rin --tmux-list`: その Rin 専用 tmux socket にある session name を一覧します。
 - `rin restart`: バックグラウンドサービスを再起動します。
 - `rin update`: 設定された取得元から再インストールまたは更新します。
 - `rin uninstall --keep-state --yes`: アプリ本体を外し、保存された状態は残します。

@@ -149,7 +149,10 @@ rin
 
 Rin keeps the public command set intentionally small:
 
-- `rin`: Opens the local interactive interface.
+- `rin`: Opens the local interactive interface for the current user's own runtime.
+- `rin -u <user>`: Opens another user's Rin install when you have permission to switch.
+- `rin --tmux [<name>]`: Runs Rin inside a dedicated tmux socket, outside the default `tmux list-sessions` server.
+- `rin --tmux-list`: Lists tmux session names saved under that dedicated Rin socket.
 - `rin restart`: Restarts the background service.
 - `rin update`: Reinstalls or updates Rin from the configured source.
 - `rin uninstall --keep-state --yes`: Removes the app but keeps your saved state.

@@ -149,7 +149,10 @@ rin
 
 Rin 有意把公开命令收得很小：
 
-- `rin`：打开本地交互界面。
+- `rin`：打开“当前用户自己”这套运行环境下的本地交互界面。
+- `rin -u <user>`：在有权限切换用户时，直接打开另一个用户的 Rin。
+- `rin --tmux [<name>]`：放进 Rin 自己独占的 tmux socket 里运行，不会出现在默认的 `tmux list-sessions` 结果中。
+- `rin --tmux-list`：列出这个 Rin 专用 tmux socket 下面已有的 session name。
 - `rin restart`：重启后台服务。
 - `rin update`：从配置好的来源重新安装或更新 Rin。
 - `rin uninstall --keep-state --yes`：移除程序，但保留已经存下来的状态。

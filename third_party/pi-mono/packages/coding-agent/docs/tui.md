@@ -1,10 +1,13 @@
-> pi can create TUI components. Ask it to build one for your use case.
+> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
+> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
+
+> rin can create TUI components. Ask it to build one for your use case.
 
 # TUI Components
 
 Extensions and custom tools can render custom TUI components for interactive user interfaces. This page covers the component system and available building blocks.
 
-**Source:** [`@mariozechner/pi-tui`](https://github.com/badlogic/pi-mono/tree/main/packages/tui)
+**Source:** [`@mariozechner/rin-tui`](https://github.com/badlogic/pi-mono/tree/main/packages/tui)
 
 ## Component Interface
 
@@ -96,7 +99,7 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-**In custom tools** via `pi.ui.custom()`:
+**In custom tools** via `rin.ui.custom()`:
 
 ```typescript
 async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -179,7 +182,7 @@ See [overlay-qa-tests.ts](../examples/extensions/overlay-qa-tests.ts) for compre
 
 ## Built-in Components
 
-Import from `@mariozechner/pi-tui`:
+Import from `@mariozechner/rin-tui`:
 
 ```typescript
 import { Text, Box, Container, Spacer, Markdown } from "@mariozechner/pi-tui";
@@ -587,7 +590,7 @@ These patterns cover the most common UI needs in extensions. **Copy these patter
 
 ### Pattern 1: Selection Dialog (SelectList)
 
-For letting users pick from a list of options. Use `SelectList` from `@mariozechner/pi-tui` with `DynamicBorder` for framing.
+For letting users pick from a list of options. Use `SelectList` from `@mariozechner/rin-tui` with `DynamicBorder` for framing.
 
 ```typescript
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -679,7 +682,7 @@ pi.registerCommand("fetch", {
 
 ### Pattern 3: Settings/Toggles (SettingsList)
 
-For toggling multiple settings. Use `SettingsList` from `@mariozechner/pi-tui` with `getSettingsListTheme()`.
+For toggling multiple settings. Use `SettingsList` from `@mariozechner/rin-tui` with `getSettingsListTheme()`.
 
 ```typescript
 import { getSettingsListTheme } from "@mariozechner/pi-coding-agent";

@@ -67,8 +67,17 @@ test('rin daemon mode keeps the patch surface minimal', () => {
   assert.doesNotMatch(source, /重试成功/)
   assert.doesNotMatch(source, /'\/help'/)
   assert.doesNotMatch(source, /'\/commands'/)
+  assert.doesNotMatch(source, /clearQueue\(\)\s*\{\s*return this\.client\.clearQueue\(\)\.then/)
   assert.match(source, /InteractiveMode/)
   assert.match(source, /'status'/)
   assert.match(source, /'restart'/)
   assert.match(source, /model:\s*this\.model/)
+  assert.match(source, /clearQueue\(\)\s*\{\s*const steering = this\.steeringMessages\.slice\(\)/)
+})
+
+test('interactive mode still relies on a synchronous clearQueue contract', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist', 'modes', 'interactive', 'interactive-mode.js'), 'utf8')
+
+  assert.match(source, /const \{ steering, followUp \} = this\.session\.clearQueue\(\);/)
+  assert.doesNotMatch(source, /Array\.isArray\(cleared\?\.steering\)/)
 })

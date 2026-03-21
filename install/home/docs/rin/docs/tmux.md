@@ -5,6 +5,8 @@
 
 Rin works inside tmux, but tmux strips modifier information from certain keys by default. Without configuration, `Shift+Enter` and `Ctrl+Enter` are usually indistinguishable from plain `Enter`.
 
+Rin also supports `rin --tmux`, which launches the TUI inside a dedicated tmux socket stored under the runtime root. That socket is separate from your default tmux server, so those Rin sessions do not appear in the usual `tmux list-sessions` output unless you point tmux at Rin's socket explicitly.
+
 ## Recommended Configuration
 
 Add to `~/.tmux.conf`:

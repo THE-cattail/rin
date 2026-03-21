@@ -461,11 +461,16 @@ class RinDaemonSessionAdapter {
   }
 
   clearQueue() {
-    return this.client.clearQueue().then((result: any) => {
-      this.steeringMessages = []
-      this.followUpMessages = []
-      return result
-    })
+    const steering = this.steeringMessages.slice()
+    const followUp = this.followUpMessages.slice()
+    this.steeringMessages = []
+    this.followUpMessages = []
+    this.currentState = {
+      ...this.currentState,
+      pendingMessageCount: 0,
+    }
+    void this.client.clearQueue().then(() => this.refreshRemote()).catch(() => {})
+    return { steering, followUp }
   }
 
   getSteeringMessages() { return this.steeringMessages.slice() }

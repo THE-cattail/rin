@@ -93,6 +93,9 @@ test('formatCliErrorMessage turns installer capability errors into guidance', ()
   assert.match(formatCliErrorMessage(new Error('install_requires_root_to_create_user')), /needs root on Linux/i)
   assert.match(formatCliErrorMessage(new Error('install_existing_user_unsupported')), /only available on Linux root installs/i)
   assert.match(formatCliErrorMessage(new Error('local_bundle_root_missing')), /local source tree is required/i)
+  assert.match(formatCliErrorMessage(new Error('rin_not_installed_for_current_user')), /not installed for the current user/i)
+  assert.match(formatCliErrorMessage(new Error('tmux_not_found')), /tmux is required/i)
+  assert.match(formatCliErrorMessage(new Error('user_switch_requires_root_or_sudo:rin')), /root or passwordless sudo/i)
   assert.match(formatCliErrorMessage(new Error('local_bundle_package_missing:/tmp/demo')), /No Rin package\.json found/i)
   assert.match(formatCliErrorMessage(new Error('install_already_exists:/tmp/rin-home')), /already installed/i)
 })
@@ -255,9 +258,41 @@ test('performInstall supports custom runtime roots and launcher export', () => {
 
   assert.equal(result.stateRoot, customStateRoot)
   const launcherText = fs.readFileSync(result.launcherPath, 'utf8')
-  assert.match(launcherText, new RegExp(`RIN_HOME=${JSON.stringify(customStateRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.match(launcherText, new RegExp(`RIN_TARGET=${JSON.stringify(path.join(customStateRoot, 'app', 'current', 'dist', 'index.js')).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.doesNotMatch(launcherText, /RIN_HOME=/)
   assert.match(launcherText, /automatic self-repair is disabled/)
   assert.doesNotMatch(launcherText, /__install --current-user/)
+})
+
+test('performInstall can register launchers for both the runtime user and the invoking user', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-dual-launcher-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const runtimeHome = path.join(tempRoot, 'runtime-home')
+  const invokingHome = path.join(tempRoot, 'invoking-home')
+  const stateRoot = path.join(runtimeHome, '.rin')
+  fs.mkdirSync(runtimeHome, { recursive: true })
+  fs.mkdirSync(invokingHome, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const result = performInstall({
+    homeDir: runtimeHome,
+    stateRoot,
+    bundleRoot,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'main',
+    releaseId: '2026-03-21T00-00-01-000Z',
+    additionalLauncherHomes: [invokingHome],
+    seedHomeDir: runtimeHome,
+  })
+
+  const runtimeLauncher = path.join(runtimeHome, '.local', 'bin', 'rin')
+  const invokingLauncher = path.join(invokingHome, '.local', 'bin', 'rin')
+  assert.deepEqual(result.launcherPaths.sort(), [runtimeLauncher, invokingLauncher].sort())
+  assert.equal(fs.existsSync(runtimeLauncher), true)
+  assert.equal(fs.existsSync(invokingLauncher), true)
+
+  const installMeta = JSON.parse(fs.readFileSync(path.join(stateRoot, 'install.json'), 'utf8'))
+  assert.deepEqual(installMeta.launcherPaths.sort(), [runtimeLauncher, invokingLauncher].sort())
 })
 
 test('performInstall refuses to overwrite an active install without the upgrade path', () => {
@@ -314,7 +349,8 @@ test('performInstall supports dry-run previews without touching disk', () => {
   assert.equal(result.stateRoot, stateRoot)
   assert.equal(fs.existsSync(stateRoot), false)
   assert.equal(fs.existsSync(result.launcherPath), false)
-  assert.match(result.launcherText, /RIN_HOME=/)
+  assert.match(result.launcherText, /RIN_TARGET=/)
+  assert.doesNotMatch(result.launcherText, /RIN_HOME=/)
   assert.match(result.plannedChanges.join('\n'), /would create launcher/)
 })
 
@@ -398,4 +434,37 @@ test('performUninstall supports keep-state and purge flows', () => {
   const purge = performUninstall({ homeDir, stateRoot, mode: 'purge' })
   assert.equal(purge.ok, true)
   assert.equal(fs.existsSync(installed.stateRoot), false)
+})
+
+test('performUninstall removes companion launchers recorded in install metadata', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-uninstall-companion-launcher-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const runtimeHome = path.join(tempRoot, 'runtime-home')
+  const invokingHome = path.join(tempRoot, 'invoking-home')
+  const stateRoot = path.join(runtimeHome, '.rin')
+  fs.mkdirSync(runtimeHome, { recursive: true })
+  fs.mkdirSync(invokingHome, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  performInstall({
+    homeDir: runtimeHome,
+    stateRoot,
+    bundleRoot,
+    sourceRepo: 'https://example.com/rin.git',
+    sourceRef: 'main',
+    releaseId: '2026-03-21T00-00-02-000Z',
+    additionalLauncherHomes: [invokingHome],
+    seedHomeDir: runtimeHome,
+  })
+
+  const runtimeLauncher = path.join(runtimeHome, '.local', 'bin', 'rin')
+  const invokingLauncher = path.join(invokingHome, '.local', 'bin', 'rin')
+  assert.equal(fs.existsSync(runtimeLauncher), true)
+  assert.equal(fs.existsSync(invokingLauncher), true)
+
+  const result = performUninstall({ homeDir: runtimeHome, stateRoot, mode: 'keep' })
+  assert.equal(result.ok, true)
+  assert.equal(result.launcherRemoved, true)
+  assert.equal(fs.existsSync(runtimeLauncher), false)
+  assert.equal(fs.existsSync(invokingLauncher), false)
 })

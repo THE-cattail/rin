@@ -1102,6 +1102,12 @@ function currentUserRecord() {
   }
 }
 
+function invokingUserRecord(fallback = currentUserRecord()) {
+  const sudoUser = safeString(process.env.SUDO_USER).trim()
+  if (!sudoUser) return fallback
+  return lookupUserRecord(sudoUser) || fallback
+}
+
 function installCanManageExistingUsers(capabilities: any = {}) {
   const platform = safeString(capabilities.platform || process.platform).trim() || process.platform
   const isRoot = typeof capabilities.isRoot === 'boolean'
@@ -1160,8 +1166,14 @@ function formatCliErrorMessage(error) {
   if (message === 'install_existing_user_unsupported') return 'Installing for another user is only available on Linux root installs right now. Please choose the current user instead.'
   if (message === 'install_create_user_unsupported') return 'Creating a new user from the installer is only available on Linux root installs right now. Please create the user first, or install for the current user.'
   if (message === 'local_bundle_root_missing') return 'A local source tree is required. Pass `--path <repo>` or run the command from the Rin source checkout.'
+  if (message === 'rin_not_installed_for_current_user') return 'Rin is not installed for the current user. Use `rin install` to create a local runtime, or `rin -u <user>` to enter another user\'s install.'
+  if (message === 'tmux_not_found') return 'tmux is required for `rin --tmux`, but it is not installed or not on PATH.'
+  if (message === 'tmux_mode_only_for_tui') return '`--tmux` only applies to the interactive Rin TUI (`rin` or `rin offline`).'
+  if (message === 'tmux_session_name_required') return 'A tmux session name is required. Pass `--session-name <name>` or choose one interactively.'
   if (message.startsWith('local_bundle_package_missing:')) return `No Rin package.json found under ${message.slice('local_bundle_package_missing:'.length)}.`
   if (message.startsWith('install_already_exists:')) return `Rin is already installed at ${message.slice('install_already_exists:'.length)}. Use \`rin update\`, uninstall first, or pass the internal upgrade path.`
+  if (message.startsWith('rin_not_installed_for_user:')) return `Rin is not installed for user ${message.slice('rin_not_installed_for_user:'.length)}.`
+  if (message.startsWith('user_switch_requires_root_or_sudo:')) return `Switching to user ${message.slice('user_switch_requires_root_or_sudo:'.length)} needs root or passwordless sudo.`
   return message
 }
 
@@ -1278,7 +1290,6 @@ function installedLauncherText({ stateRoot }) {
   const targetPath = path.join(resolvedStateRoot, 'app', 'current', 'dist', 'index.js')
   return [
     '#!/usr/bin/env sh',
-    `export RIN_HOME=${JSON.stringify(resolvedStateRoot)}`,
     `RIN_NODE=${JSON.stringify(process.execPath)}`,
     `RIN_TARGET=${JSON.stringify(targetPath)}`,
     '',
@@ -1292,7 +1303,8 @@ function installedLauncherText({ stateRoot }) {
   ].join('\n')
 }
 
-function createInstalledLauncher({ stateRoot, userHome, sourceRepo = '', sourceRef = '' }) {
+function createInstalledLauncher({ stateRoot, launcherHome, sourceRepo = '', sourceRef = '' }) {
+  const userHome = path.resolve(launcherHome)
   const localBinDir = path.join(userHome, '.local', 'bin')
   ensureDir(localBinDir)
   const launcherPath = path.join(localBinDir, 'rin')
@@ -1303,6 +1315,34 @@ function createInstalledLauncher({ stateRoot, userHome, sourceRepo = '', sourceR
   try { fs.chmodSync(targetPath, 0o755) } catch {}
   try { fs.chmodSync(launcherPath, 0o755) } catch {}
   return launcherPath
+}
+
+function parseLauncherAssignedValue(text, key) {
+  const pattern = new RegExp(`^(?:export\\s+)?${key}=(.+)$`, 'm')
+  const match = safeString(text).match(pattern)
+  if (!match) return ''
+  const raw = safeString(match[1]).trim()
+  if (!raw) return ''
+  try { return safeString(JSON.parse(raw)).trim() } catch {}
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+    return raw.slice(1, -1)
+  }
+  return raw
+}
+
+function readInstalledLauncherInfo(launcherPath) {
+  const resolvedLauncherPath = safeString(launcherPath).trim()
+  if (!resolvedLauncherPath || !fs.existsSync(resolvedLauncherPath)) return null
+  const text = fs.readFileSync(resolvedLauncherPath, 'utf8')
+  const stateRoot = parseLauncherAssignedValue(text, 'RIN_HOME')
+  const targetPath = parseLauncherAssignedValue(text, 'RIN_TARGET')
+  const appRoot = targetPath ? path.dirname(path.dirname(targetPath)) : (stateRoot ? path.join(stateRoot, 'app', 'current') : '')
+  return {
+    launcherPath: resolvedLauncherPath,
+    stateRoot: stateRoot ? path.resolve(stateRoot) : '',
+    targetPath: targetPath ? path.resolve(targetPath) : '',
+    appRoot: appRoot ? path.resolve(appRoot) : '',
+  }
 }
 
 function writeInstallMetadata(stateRoot, data) {
@@ -1387,12 +1427,18 @@ function performInstall({
   releaseId = '',
   seedHomeDir = '',
   installConfig = null,
+  additionalLauncherHomes = [],
   dryRun = false,
 } = {}) {
   const userHome = path.resolve(homeDir)
   const resolvedStateRoot = installStateRootForHome(userHome, stateRoot)
   const resolvedBundleRoot = safeString(bundleRoot).trim() ? path.resolve(bundleRoot) : repoDir()
-  const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
+  const launcherHomes = Array.from(new Set([
+    userHome,
+    ...(Array.isArray(additionalLauncherHomes) ? additionalLauncherHomes : []).map((value) => safeString(value).trim()).filter(Boolean).map((value) => path.resolve(value)),
+  ]))
+  const launcherPaths = launcherHomes.map((launcherHome) => path.join(launcherHome, '.local', 'bin', 'rin'))
+  const launcherPath = launcherPaths[0]
   const metadataPath = path.join(resolvedStateRoot, 'install.json')
   const currentAppEntry = path.join(resolvedStateRoot, 'app', 'current', 'dist', 'index.js')
 
@@ -1412,6 +1458,7 @@ function performInstall({
       dryRun: true,
       stateRoot: resolvedStateRoot,
       launcherPath,
+      launcherPaths,
       launcherText: installedLauncherText({
         stateRoot: resolvedStateRoot,
         sourceRepo: safeString(sourceRepo).trim(),
@@ -1435,7 +1482,7 @@ function performInstall({
       plannedChanges: [
         `would prepare runtime root: ${resolvedStateRoot}`,
         `would write runtime docs and managed assets under: ${resolvedStateRoot}`,
-        `would create launcher: ${launcherPath}`,
+        ...launcherPaths.map((item) => `would create launcher: ${item}`),
         `would write install metadata: ${metadataPath}`,
       ],
     }
@@ -1448,17 +1495,19 @@ function performInstall({
   const appliedConfig = installConfig && typeof installConfig === 'object'
     ? applyInstallConfiguration({ stateRoot: resolvedStateRoot, ...installConfig })
     : null
-  const createdLauncherPath = createInstalledLauncher({
+  const createdLauncherPaths = launcherHomes.map((launcherHome) => createInstalledLauncher({
     stateRoot: resolvedStateRoot,
-    userHome,
+    launcherHome,
     sourceRepo: safeString(sourceRepo).trim(),
     sourceRef: safeString(sourceRef).trim(),
-  })
+  }))
+  const createdLauncherPath = createdLauncherPaths[0]
   const writtenMetadataPath = writeInstallMetadata(resolvedStateRoot, {
     installedAt: new Date().toISOString(),
     stateRoot: resolvedStateRoot,
     appRoot: path.join(resolvedStateRoot, 'app', 'current'),
     launcherPath: createdLauncherPath,
+    launcherPaths: createdLauncherPaths,
     targetUser: targetUser && targetUser.username ? targetUser.username : safeString(process.env.USER || ''),
     installSource: {
       repo: safeString(sourceRepo).trim(),
@@ -1474,6 +1523,7 @@ function performInstall({
     ok: true,
     stateRoot: resolvedStateRoot,
     launcherPath: createdLauncherPath,
+    launcherPaths: createdLauncherPaths,
     baseline,
     bundle,
     bootstrap,
@@ -1485,9 +1535,16 @@ function performInstall({
 function performUninstall({ homeDir = os.homedir(), stateRoot = '', mode = 'keep' } = {}) {
   const userHome = path.resolve(homeDir)
   const resolvedStateRoot = installStateRootForHome(userHome, stateRoot)
+  const metadata = readJson(path.join(resolvedStateRoot, 'install.json'), {})
+  const metadataLauncherPaths = Array.isArray(metadata && metadata.launcherPaths)
+    ? metadata.launcherPaths.map((value) => safeString(value).trim()).filter(Boolean)
+    : []
   const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
+  const launcherPaths = Array.from(new Set([launcherPath, ...metadataLauncherPaths]))
 
-  try { fs.rmSync(launcherPath, { force: true }) } catch {}
+  for (const item of launcherPaths) {
+    try { fs.rmSync(item, { force: true }) } catch {}
+  }
 
   const removed = []
   if (mode === 'purge') {
@@ -1509,7 +1566,8 @@ function performUninstall({ homeDir = os.homedir(), stateRoot = '', mode = 'keep
     mode,
     stateRoot: resolvedStateRoot,
     launcherPath,
-    launcherRemoved: !fs.existsSync(launcherPath),
+    launcherPaths,
+    launcherRemoved: launcherPaths.every((item) => !fs.existsSync(item)),
     removed,
   }
 }
@@ -1683,12 +1741,14 @@ async function cleanupStrayDaemonProcesses({ keepPid = 0 } = {}) {
   return { daemonPids }
 }
 
-async function spawnInherit(cmd, args, { cwd, env } = {}) {
+async function spawnInherit(cmd, args, { cwd, env, uid, gid } = {}) {
   return await new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       stdio: 'inherit',
       cwd: cwd || rootDir(),
       env: env ? { ...process.env, ...env } : process.env,
+      ...(Number.isFinite(uid) ? { uid: Number(uid) } : {}),
+      ...(Number.isFinite(gid) ? { gid: Number(gid) } : {}),
     })
     child.on('error', reject)
     child.on('exit', (code, signal) => {
@@ -1719,20 +1779,276 @@ async function spawnChecked(cmd, args, options = {}) {
   })
 }
 
+function runtimeEnvForUser(userRecord, installInfo = {}, { clearTmux = false } = {}) {
+  const env = {
+    ...process.env,
+    HOME: safeString(userRecord && userRecord.homeDir).trim() || process.env.HOME || os.homedir(),
+    USER: safeString(userRecord && userRecord.username).trim() || safeString(process.env.USER).trim(),
+    LOGNAME: safeString(userRecord && userRecord.username).trim() || safeString(process.env.LOGNAME).trim(),
+    SHELL: safeString(userRecord && userRecord.shell).trim() || safeString(process.env.SHELL).trim() || '/bin/bash',
+  }
+  const stateRoot = safeString(installInfo && installInfo.stateRoot).trim()
+  const appRoot = safeString(installInfo && installInfo.appRoot).trim()
+  if (stateRoot) env.RIN_HOME = stateRoot
+  if (appRoot) env.RIN_REPO_ROOT = appRoot
+  if (clearTmux) env.TMUX = ''
+  return env
+}
+
+function userSwitchEnvAssignments(env) {
+  const out = []
+  for (const key of ['RIN_HOME', 'RIN_REPO_ROOT', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMUX']) {
+    if (!Object.prototype.hasOwnProperty.call(env || {}, key)) continue
+    out.push(`${key}=${safeString(env[key])}`)
+  }
+  return out
+}
+
+async function spawnInheritForUser(cmd, args, { user, env, cwd } = {}) {
+  const targetUser = user && typeof user === 'object' ? user : null
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : -1
+  const targetUid = Number(targetUser && targetUser.uid)
+  const targetGid = Number(targetUser && targetUser.gid)
+  const targetCwd = cwd || safeString(targetUser && targetUser.homeDir).trim() || rootDir()
+  const finalEnv = env && typeof env === 'object' ? env : process.env
+
+  if (targetUser && Number.isFinite(targetUid) && targetUid >= 0 && currentUid >= 0 && targetUid !== currentUid && currentUid !== 0) {
+    const sudo = findExecutableOnPath('sudo')
+    if (!sudo) throw new Error(`user_switch_requires_root_or_sudo:${safeString(targetUser.username)}`)
+    return await spawnInherit(sudo, ['-u', safeString(targetUser.username), '-H', 'env', ...userSwitchEnvAssignments(finalEnv), cmd, ...args], { cwd: targetCwd })
+  }
+
+  return await spawnInherit(cmd, args, {
+    cwd: targetCwd,
+    env: finalEnv,
+    uid: targetUser && currentUid === 0 && Number.isFinite(targetUid) && targetUid >= 0 ? targetUid : undefined,
+    gid: targetUser && currentUid === 0 && Number.isFinite(targetGid) && targetGid >= 0 ? targetGid : undefined,
+  })
+}
+
+function spawnSyncForUser(cmd, args, { user, env, cwd, stdio = ['ignore', 'pipe', 'pipe'], encoding = 'utf8' } = {}) {
+  const targetUser = user && typeof user === 'object' ? user : null
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : -1
+  const targetUid = Number(targetUser && targetUser.uid)
+  const targetGid = Number(targetUser && targetUser.gid)
+  const targetCwd = cwd || safeString(targetUser && targetUser.homeDir).trim() || rootDir()
+  const finalEnv = env && typeof env === 'object' ? env : process.env
+
+  if (targetUser && Number.isFinite(targetUid) && targetUid >= 0 && currentUid >= 0 && targetUid !== currentUid && currentUid !== 0) {
+    const sudo = findExecutableOnPath('sudo')
+    if (!sudo) throw new Error(`user_switch_requires_root_or_sudo:${safeString(targetUser.username)}`)
+    return spawnSync(sudo, ['-u', safeString(targetUser.username), '-H', 'env', ...userSwitchEnvAssignments(finalEnv), cmd, ...args], {
+      cwd: targetCwd,
+      encoding,
+      stdio,
+    })
+  }
+
+  return spawnSync(cmd, args, {
+    cwd: targetCwd,
+    env: finalEnv,
+    encoding,
+    stdio,
+    ...(targetUser && currentUid === 0 && Number.isFinite(targetUid) && targetUid >= 0 ? { uid: targetUid } : {}),
+    ...(targetUser && currentUid === 0 && Number.isFinite(targetGid) && targetGid >= 0 ? { gid: targetGid } : {}),
+  })
+}
+
+function resolveInstalledRuntimeForUser(userRecord) {
+  const userHome = path.resolve(safeString(userRecord && userRecord.homeDir).trim() || os.homedir())
+  const launcherPath = path.join(userHome, '.local', 'bin', 'rin')
+  const launcherInfo = readInstalledLauncherInfo(launcherPath) || {}
+  const stateRoot = safeString(launcherInfo && launcherInfo.stateRoot).trim() || installStateRootForHome(userHome)
+  const targetPath = safeString(launcherInfo && launcherInfo.targetPath).trim() || path.join(stateRoot, 'app', 'current', 'dist', 'index.js')
+  const appRoot = safeString(launcherInfo && launcherInfo.appRoot).trim() || path.join(stateRoot, 'app', 'current')
+
+  return {
+    launcherPath,
+    stateRoot: stateRoot ? path.resolve(stateRoot) : '',
+    targetPath: targetPath ? path.resolve(targetPath) : '',
+    appRoot: appRoot ? path.resolve(appRoot) : '',
+  }
+}
+
+function parseTopLevelCliOptions(argv) {
+  const forwarded = []
+  let targetUserName = ''
+  let tmuxMode = false
+  let tmuxSessionName = ''
+  let tmuxListSessions = false
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    const next = argv[i + 1] || ''
+    if (arg === '-u') {
+      targetUserName = next
+      i += 1
+      continue
+    }
+    if (arg === '--tmux') {
+      tmuxMode = true
+      if (!tmuxSessionName && next && !safeString(next).startsWith('-')) {
+        tmuxSessionName = next
+        i += 1
+      }
+      continue
+    }
+    if (arg === '--session-name' || arg === '--tmux-session') {
+      tmuxSessionName = next
+      i += 1
+      continue
+    }
+    if (arg === '--tmux-list' || arg === '--list-sessions' || arg === '--tmux-list-sessions') {
+      tmuxListSessions = true
+      continue
+    }
+    forwarded.push(arg)
+  }
+
+  return { argv: forwarded, targetUserName, tmuxMode, tmuxSessionName, tmuxListSessions }
+}
+
+function isRuntimeInstalledForUser(userRecord) {
+  const userHome = path.resolve(safeString(userRecord && userRecord.homeDir).trim() || os.homedir())
+  const stateRoot = installStateRootForHome(userHome)
+  return fs.existsSync(path.join(stateRoot, 'app', 'current', 'dist', 'index.js'))
+}
+
+function topLevelCommandMode(argv) {
+  const cmd = safeString(argv && argv[0]).trim()
+  if (!cmd || cmd === 'offline' || cmd.startsWith('-')) return 'tui'
+  if (cmd === 'install' || cmd === 'restart' || cmd === 'update' || cmd === 'uninstall' || cmd === '__install') return cmd
+  return 'unknown'
+}
+
+function shellQuoteArg(value) {
+  return `'${safeString(value).replace(/'/g, `'\\''`)}'`
+}
+
+function tmuxSocketPathForState(stateRoot) {
+  return path.join(stateRoot, 'data', 'tmux', 'server.sock')
+}
+
+function tmuxSessionCommandString({ installInfo, argv }) {
+  const forwardedArgs = Array.isArray(argv) ? argv.map((item) => safeString(item)).filter((item) => item.length > 0) : []
+  const launcherPath = safeString(installInfo && installInfo.launcherPath).trim()
+  if (launcherPath && fs.existsSync(launcherPath)) {
+    return [launcherPath, ...forwardedArgs].map(shellQuoteArg).join(' ')
+  }
+  const targetPath = safeString(installInfo && installInfo.targetPath).trim()
+  const stateRoot = safeString(installInfo && installInfo.stateRoot).trim()
+  const appRoot = safeString(installInfo && installInfo.appRoot).trim()
+  return [
+    'env',
+    `RIN_HOME=${stateRoot}`,
+    `RIN_REPO_ROOT=${appRoot}`,
+    process.execPath,
+    targetPath,
+    ...forwardedArgs,
+  ].map(shellQuoteArg).join(' ')
+}
+
+function listTmuxSessionsForUser(targetUser, installInfo) {
+  if (!findExecutableOnPath('tmux')) throw new Error('tmux_not_found')
+  const socketPath = tmuxSocketPathForState(installInfo.stateRoot)
+  const result = spawnSyncForUser('tmux', ['-S', socketPath, 'list-sessions', '-F', '#S'], {
+    user: targetUser,
+    env: runtimeEnvForUser(targetUser, installInfo, { clearTmux: true }),
+    cwd: safeString(targetUser && targetUser.homeDir).trim() || rootDir(),
+  })
+  if (Number(result.status || 0) !== 0) {
+    const text = `${safeString(result.stdout)}\n${safeString(result.stderr)}`.toLowerCase()
+    if (text.includes('failed to connect') || text.includes('no server running') || text.includes('no such file')) return []
+    throw new Error(safeString(result.stderr || result.stdout).trim() || 'tmux_list_failed')
+  }
+  return safeString(result.stdout)
+    .split(/\r?\n/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function autoTmuxSessionName() {
+  return `rin-${Date.now().toString(36)}-${nodeCrypto.randomBytes(3).toString('hex')}`
+}
+
+function ensureTmuxSocketDirForUser(targetUser, installInfo) {
+  const socketDir = path.dirname(tmuxSocketPathForState(installInfo.stateRoot))
+  const result = spawnSyncForUser('mkdir', ['-p', socketDir], {
+    user: targetUser,
+    env: runtimeEnvForUser(targetUser, installInfo, { clearTmux: true }),
+    cwd: safeString(targetUser && targetUser.homeDir).trim() || rootDir(),
+  })
+  if (Number(result.status || 0) !== 0) {
+    throw new Error(safeString(result.stderr || result.stdout).trim() || 'tmux_socket_dir_create_failed')
+  }
+}
+
+async function runTmuxSessionForUser({ argv, targetUser, installInfo, sessionName = '', listSessions = false }) {
+  const targetPath = safeString(installInfo && installInfo.targetPath).trim()
+  const stateRuntimePath = path.join(safeString(installInfo && installInfo.stateRoot).trim(), 'app', 'current', 'dist', 'index.js')
+  if (!targetPath || !fs.existsSync(targetPath) || !fs.existsSync(stateRuntimePath)) throw new Error(`rin_not_installed_for_user:${safeString(targetUser && targetUser.username)}`)
+  const existingNames = listTmuxSessionsForUser(targetUser, installInfo)
+  if (listSessions) {
+    if (existingNames.length) console.log(existingNames.join('\n'))
+    return
+  }
+
+  const nextSessionName = safeString(sessionName).trim() || autoTmuxSessionName()
+  if (!nextSessionName) throw new Error('tmux_session_name_required')
+
+  const socketPath = tmuxSocketPathForState(installInfo.stateRoot)
+  const tmuxEnv = runtimeEnvForUser(targetUser, installInfo, { clearTmux: true })
+  ensureTmuxSocketDirForUser(targetUser, installInfo)
+
+  if (!existingNames.includes(nextSessionName)) {
+    const createResult = spawnSyncForUser('tmux', ['-S', socketPath, 'new-session', '-Ad', '-s', nextSessionName, tmuxSessionCommandString({ installInfo, argv })], {
+      user: targetUser,
+      env: tmuxEnv,
+      cwd: safeString(targetUser && targetUser.homeDir).trim() || rootDir(),
+      stdio: 'inherit',
+      encoding: 'utf8',
+    })
+    if (Number(createResult.status || 0) !== 0) {
+      throw new Error(safeString(createResult.stderr || createResult.stdout).trim() || 'tmux_create_failed')
+    }
+  }
+
+  await spawnInheritForUser('tmux', ['-S', socketPath, 'attach-session', '-t', nextSessionName], {
+    user: targetUser,
+    env: tmuxEnv,
+    cwd: safeString(targetUser && targetUser.homeDir).trim() || rootDir(),
+  })
+}
+
+async function runForwardedCliForUser({ argv, targetUser, installInfo }) {
+  const targetPath = safeString(installInfo && installInfo.targetPath).trim()
+  const stateRuntimePath = path.join(safeString(installInfo && installInfo.stateRoot).trim(), 'app', 'current', 'dist', 'index.js')
+  if (!targetPath || !fs.existsSync(targetPath) || !fs.existsSync(stateRuntimePath)) throw new Error(`rin_not_installed_for_user:${safeString(targetUser && targetUser.username)}`)
+  await spawnInheritForUser(process.execPath, [targetPath, ...argv], {
+    user: targetUser,
+    env: runtimeEnvForUser(targetUser, installInfo),
+    cwd: safeString(targetUser && targetUser.homeDir).trim() || rootDir(),
+  })
+}
+
 function usage(exitCode = 2) {
   console.error([
     'Usage:',
-    '  rin',
-    '  rin offline',
+    '  rin [-u <user>] [--tmux [<session-name>] | --tmux-list]',
+    '  rin offline [-u <user>] [--tmux [<session-name>] | --tmux-list]',
     '  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]]',
     '  rin restart',
     '  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]',
     '  rin uninstall [--yes] [--keep-state | --purge]',
     '',
     'Notes:',
-    '  - `rin` starts the daemon-backed Rin TUI frontend.',
+    '  - `rin` starts the daemon-backed Rin TUI frontend for the current user\'s own runtime.',
     '  - `rin offline` starts the local offline TUI using the native Pi InteractiveMode host.',
+    '  - `rin -u <user>` forwards the command into another user\'s Rin install.',
+    '  - `rin --tmux [name]` uses a dedicated tmux socket file, so these sessions stay out of the default `tmux list-sessions` output.',
+    '  - `rin --tmux-list` lists saved tmux session names for the selected Rin install.',
     '  - `rin install --local` installs from a local source tree using the standard installer flow.',
+    '  - `rin install` registers the launcher for the runtime user, and also for the invoking user when those differ; without `-u`, each launcher still resolves the current user\'s own runtime.',
     '  - `rin update --local` rebuilds and deploys from a local source tree instead of cloning.',
     '  - `rin restart` restarts the Rin daemon service.',
     '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
@@ -1801,6 +2117,7 @@ async function cmdInstall(argv) {
   }
 
   const currentUser = currentUserRecord()
+  const invokingUser = invokingUserRecord(currentUser)
   const promptSession = !yes ? openInstallPromptInterface() : null
   const rl = promptSession ? promptSession.rl : null
 
@@ -1887,6 +2204,9 @@ async function cmdInstall(argv) {
       sourceRef: effectiveSourceRef,
       bundleRoot: resolvedBundleRoot,
       installConfig,
+      additionalLauncherHomes: targetUser && invokingUser && targetUser.username !== invokingUser.username
+        ? [invokingUser.homeDir]
+        : [],
       dryRun,
     })
     if (!dryRun && targetUser && targetUser.username === currentUser.username) {
@@ -2574,9 +2894,44 @@ async function startDetachedDaemonRuntime() {
 }
 
 async function main() {
-  const argv = process.argv.slice(2)
+  const rawArgv = process.argv.slice(2)
+  const parsed = parseTopLevelCliOptions(rawArgv)
+  const argv = parsed.argv
   const cmd = argv[0]
   const rest = argv.slice(1)
+
+  if (!parsed.tmuxMode && !parsed.targetUserName && (cmd === '-h' || cmd === '--help' || cmd === 'help')) usage(0)
+
+  if (parsed.tmuxMode || parsed.targetUserName) {
+    const mode = topLevelCommandMode(argv)
+    if (parsed.tmuxMode && mode !== 'tui') throw new Error('tmux_mode_only_for_tui')
+    if (mode === 'install' || mode === '__install') throw new Error('tmux_mode_only_for_tui')
+
+    const targetUser = parsed.targetUserName
+      ? lookupUserRecord(parsed.targetUserName)
+      : currentUserRecord()
+    if (!targetUser) throw new Error(`user_not_found:${parsed.targetUserName}`)
+    const installInfo = resolveInstalledRuntimeForUser(targetUser)
+
+    if (parsed.tmuxMode) {
+      return await runTmuxSessionForUser({
+        argv,
+        targetUser,
+        installInfo,
+        sessionName: parsed.tmuxSessionName,
+        listSessions: parsed.tmuxListSessions,
+      })
+    }
+
+    return await runForwardedCliForUser({ argv, targetUser, installInfo })
+  }
+
+  const mode = topLevelCommandMode(argv)
+  const currentUser = currentUserRecord()
+  if (!isRuntimeInstalledForUser(currentUser) && (mode === 'tui' || mode === 'restart' || mode === 'update')) {
+    throw new Error('rin_not_installed_for_current_user')
+  }
+
   if (!cmd) return await cmdPi([])
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') usage(0)
 

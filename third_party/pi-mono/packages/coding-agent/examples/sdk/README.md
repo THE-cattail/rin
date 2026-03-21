@@ -1,6 +1,9 @@
+> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
+> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
+
 # SDK Examples
 
-Programmatic usage of pi-coding-agent via `createAgentSession()`.
+Programmatic usage of rin-coding-agent via `createAgentSession()`.
 
 ## Examples
 
@@ -22,8 +25,8 @@ Programmatic usage of pi-coding-agent via `createAgentSession()`.
 ## Running
 
 ```bash
-cd packages/coding-agent
-npx tsx examples/sdk/01-minimal.ts
+cd /path/to/rin-repo
+npx tsx examples/pi/sdk/01-minimal.ts
 ```
 
 ## Quick Reference
@@ -111,7 +114,7 @@ await session.prompt("Hello");
 | `authStorage` | `AuthStorage.create()` | Credential storage |
 | `modelRegistry` | `new ModelRegistry(authStorage)` | Model registry |
 | `cwd` | `process.cwd()` | Working directory |
-| `agentDir` | `~/.pi/agent` | Config directory |
+| `agentDir` | `~/.rin` | Config directory |
 | `model` | From settings/first available | Model to use |
 | `thinkingLevel` | From settings/"off" | off, low, medium, high |
 | `tools` | `codingTools` | Built-in tools |

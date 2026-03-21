@@ -14,7 +14,10 @@ Operational Rule: Treat the runtime root as one explicit path. Use `~/.rin` only
 
 ## 2. Runtime Surfaces
 
-- `rin`: Local TUI (`InteractiveMode`).
+- `rin`: Local TUI (`InteractiveMode`) for the current user's own runtime.
+- `rin -u <user>`: Re-enter another user's installed Rin runtime when permission allows switching.
+- `rin --tmux [<name>]`: Start the TUI under a dedicated tmux socket stored inside the runtime root.
+- `rin --tmux-list`: List the tmux session names tracked under that dedicated Rin socket.
 - `rin restart`: Restart the background daemon service.
 - `rin update`: Reinstalls from source and refreshes runtime.
 - `rin uninstall`: Interactive uninstallation.

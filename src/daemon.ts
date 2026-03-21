@@ -1010,7 +1010,6 @@ const rinBridge = (() => {
   }
 
   const BRIDGE_AGENT_SEND_PREFIX = '#RIN_SEND'
-  const BRIDGE_AGENT_CONTINUE_TOKEN = '#RIN_CONTINUE'
   const BRIDGE_AGENT_INTERIM_MARKER = '··· '
   const activeProcessingTurns = new Map<string, any>()
   const shadowTurnQueues = new Map<string, Promise<any>>()
@@ -1099,9 +1098,6 @@ const rinBridge = (() => {
         : { kind: 'empty', raw: trimmed, text: '' }
     }
     if (!trimmed) return { kind: 'empty', raw: '', text: '' }
-    if (trimmed === BRIDGE_AGENT_CONTINUE_TOKEN || trimmed === 'CONTINUE') {
-      return { kind: 'continue', raw: trimmed, text: '' }
-    }
     if (trimmed === 'OK') return { kind: 'ok', raw: trimmed, text: '' }
     return { kind: 'reply', raw: trimmed, text: trimmed }
   }
@@ -1114,9 +1110,6 @@ const rinBridge = (() => {
     const normalized = normalizeFinalAgentMessage(value)
     const hasOutbound = Array.isArray(outbound) && outbound.length > 0
     const sentFinalReply = normalized.kind === 'reply' ? outboundHasText(outbound, normalized.text) : false
-    if (normalized.kind === 'continue') {
-      return { normalized, hasOutbound, sentFinalReply, kind: allowContinue ? 'continue' : 'protocol_violation' }
-    }
     if (normalized.kind === 'reply') {
       const acceptedReply = sentFinalReply || (!hasOutbound && allowReplyWithoutDelivery)
       return { normalized, hasOutbound, sentFinalReply, kind: acceptedReply ? 'ok' : 'protocol_violation' }
@@ -3281,7 +3274,6 @@ const rinBridge = (() => {
         const finalMessage = normalizeFinalAgentMessage(normalized.lastMessage)
         return `${prefix}${finalMessage.kind === 'reply' ? 'reply' : 'completed'}`
       }
-      if (normalized.kind === 'continue') return `${prefix}${BRIDGE_AGENT_CONTINUE_TOKEN}`
       if (normalized.kind === 'interrupted') return `${prefix}INTERRUPTED`
       if (normalized.kind === 'protocol_violation') {
         return normalized.lastMessage ? `${prefix}PROTOCOL_VIOLATION (${normalized.lastMessage})` : `${prefix}PROTOCOL_VIOLATION`
@@ -3716,11 +3708,7 @@ const rinBridge = (() => {
           const shadowResultRecord = {
             runtime: shadowRuntime,
             kind: Number(result && result.code || 0) === 0
-              ? (shadowCompletion.kind === 'continue'
-                  ? 'continue'
-                  : shadowCompletion.kind === 'ok'
-                    ? 'ok'
-                    : 'protocol_violation')
+              ? (shadowCompletion.kind === 'ok' ? 'ok' : 'protocol_violation')
               : 'failed',
             finishedAt: nowMs(),
             forInboundSeq: Number(uptoSeq || 0) || 0,
@@ -4303,7 +4291,7 @@ const rinBridge = (() => {
             return { shouldWake: false, interrupted: false, stale: true }
           }
           const interrupted = Boolean(state.interruptRequested)
-          if (!interrupted && result.code === 0 && (completion.kind === 'ok' || completion.kind === 'continue')) {
+          if (!interrupted && result.code === 0 && completion.kind === 'ok') {
             state.lastSystemAckAt = nowMs()
           } else if (interrupted) {
             logger.info(`scheduled run interrupted chatKey=${chatKey} kind=${safeString(kind)} name=${safeString(name)}`)
@@ -4341,7 +4329,7 @@ const rinBridge = (() => {
 
         if (post && post.interrupted) throw new Error('interrupted')
         if (result.code !== 0) throw new Error(`${runtimeKind}_failed`)
-        if (completion.kind !== 'ok' && completion.kind !== 'continue') {
+        if (completion.kind !== 'ok') {
           throw new Error(`${runtimeKind}_bad_last_message:${trimmed || '(empty)'}`)
         }
         return { ok: true }
@@ -4488,10 +4476,10 @@ const rinBridge = (() => {
         allowReplyWithoutDelivery: !safeString(chatKey || '').trim(),
       })
       if (result.code !== 0) throw new Error(`${runtimeKind}_failed:code=${String(result.code)}`)
-      if (completion.kind !== 'ok' && completion.kind !== 'continue') {
+      if (completion.kind !== 'ok') {
         throw new Error(`${runtimeKind}_bad_last_message:${trimmed || '(empty)'}`)
       }
-      return { ok: true, continue: completion.kind === 'continue' }
+      return { ok: true, continue: false }
     }
 
     function scheduleEnqueue(fn) {
@@ -4808,13 +4796,11 @@ const rinBridge = (() => {
           const finishedAt = nowMs()
           const resultKind = !interrupted && result.code === 0 && completion.kind === 'ok'
             ? 'ok'
-            : !interrupted && result.code === 0 && completion.kind === 'continue'
-              ? 'continue'
-              : !interrupted && protocolViolation
-                ? 'protocol_violation'
-                : interrupted
-                  ? 'interrupted'
-                  : 'failed'
+            : !interrupted && protocolViolation
+              ? 'protocol_violation'
+              : interrupted
+                ? 'interrupted'
+                : 'failed'
           const lastAgentResultRecord = {
             runtime: primaryRuntime,
             kind: resultKind,
@@ -4830,15 +4816,12 @@ const rinBridge = (() => {
             && Number(fromSeq || 0) <= resetCommandSeq
             && Number(toSeq || state.batchEndSeq || 0) >= resetCommandSeq
           if (coversResetCommand) state.lastResetResult = { ...lastAgentResultRecord }
-          if (!interrupted && result.code === 0 && (completion.kind === 'ok' || completion.kind === 'continue')) {
+          if (!interrupted && result.code === 0 && completion.kind === 'ok') {
             state.lastProcessedSeq = state.batchEndSeq
-            state.forceContinue = completion.kind === 'continue'
+            state.forceContinue = false
             state.inboundUnprocessed = 0
             state.bridgeProtocolRetryCount = 0
-            const completionLabel = completion.kind === 'continue'
-              ? BRIDGE_AGENT_CONTINUE_TOKEN
-              : 'reply'
-            logger.info(`${runnerName} ${completionLabel} chatKey=${chatKey} processedTo=${state.lastProcessedSeq}`)
+            logger.info(`${runnerName} reply chatKey=${chatKey} processedTo=${state.lastProcessedSeq}`)
           } else if (!interrupted && protocolViolation && Number(state.bridgeProtocolRetryCount || 0) < 2) {
             state.forceContinue = false
             state.bridgeProtocolRetryCount = Number(state.bridgeProtocolRetryCount || 0) + 1

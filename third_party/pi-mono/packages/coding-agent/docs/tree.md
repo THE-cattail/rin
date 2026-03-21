@@ -1,3 +1,6 @@
+> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
+> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
+
 # Session Tree Navigation
 
 The `/tree` command provides tree-based navigation of the session history.

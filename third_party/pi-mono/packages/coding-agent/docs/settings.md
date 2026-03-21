@@ -1,11 +1,14 @@
+> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
+> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
+
 # Settings
 
-Pi uses JSON settings files with project settings overriding global settings.
+Rin uses JSON settings files with project settings overriding global settings.
 
 | Location | Scope |
 |----------|-------|
-| `~/.pi/agent/settings.json` | Global (all projects) |
-| `.pi/settings.json` | Project (current directory) |
+| `~/.rin/settings.json` | Global (all projects) |
+| `.rin/settings.json` | Project (current directory) |
 
 Edit directly or use `/settings` for common options.
 
@@ -149,7 +152,7 @@ When a provider requests a retry delay longer than `maxDelayMs` (e.g., Google's 
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.pi/agent/settings.json` resolve relative to `~/.pi/agent`. Paths in `.pi/settings.json` resolve relative to `.pi`. Absolute paths and `~` are supported.
+Paths in `~/.rin/settings.json` resolve relative to `~/.rin`. Paths in `.rin/settings.json` resolve relative to `.rin`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -212,16 +215,16 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.pi/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.rin/settings.json`) override global settings. Nested objects are merged:
 
 ```json
-// ~/.pi/agent/settings.json (global)
+// ~/.rin/settings.json (global)
 {
   "theme": "dark",
   "compaction": { "enabled": true, "reserveTokens": 16384 }
 }
 
-// .pi/settings.json (project)
+// .rin/settings.json (project)
 {
   "compaction": { "reserveTokens": 8192 }
 }
