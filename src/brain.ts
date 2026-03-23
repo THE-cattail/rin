@@ -436,7 +436,7 @@ class MemoryRuntime {
       settings = JSON.parse(fssync.readFileSync(path.join(this.paths.root, 'settings.json'), 'utf8'));
     } catch {}
     const memory = settings && typeof settings.memory === 'object' ? settings.memory : {};
-    const provider = safeString(process.env.RIN_MEMORY_MODEL_PROVIDER || memory.provider || settings.memoryProvider || settings.defaultProvider || 'openai-codex').trim() || 'openai-codex';
+    const provider = safeString(process.env.RIN_MEMORY_MODEL_PROVIDER || memory.provider || settings.memoryProvider || settings.defaultProvider || 'openai').trim() || 'openai';
     const model = safeString(process.env.RIN_MEMORY_MODEL || memory.model || settings.memoryModel || settings.defaultModel || 'gpt-5.4').trim() || 'gpt-5.4';
     const thinking = safeString(process.env.RIN_MEMORY_MODEL_THINKING || memory.thinking || settings.memoryThinking || 'minimal').trim() || 'minimal';
     return { provider, model, thinking };

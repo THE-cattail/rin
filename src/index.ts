@@ -22,6 +22,7 @@ const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
 const readline = require('node:readline/promises')
+const { Command, Option } = require('commander')
 const dynamicImport = new Function('specifier', 'return import(specifier)')
 
 function repoRootFromEntry() {
@@ -275,7 +276,6 @@ const DEFAULT_RUNTIME_AGENTS_MD = [
 const AUTH_KEY_BY_PROVIDER = {
   anthropic: 'anthropic',
   openai: 'openai',
-  'openai-codex': 'openai',
   google: 'google',
   gemini: 'google',
   mistral: 'mistral',
@@ -364,22 +364,6 @@ const INSTALL_PROVIDER_PRESETS = [
     ],
   },
   {
-    value: 'openai-codex',
-    label: 'ChatGPT / Codex subscription',
-    authKey: 'openai',
-    preferredModelIds: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex'],
-    modelHints: {
-      'gpt-5.4': 'recommended',
-      'gpt-5.3-codex': 'Codex-focused',
-      'gpt-5.2-codex': 'slightly older Codex fallback',
-    },
-    models: [
-      { value: 'gpt-5.4', label: 'GPT-5.4 — recommended' },
-      { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-      { value: 'custom', label: 'Custom model id' },
-    ],
-  },
-  {
     value: 'openai',
     label: 'OpenAI API',
     authKey: 'openai',
@@ -419,15 +403,15 @@ const INSTALL_PROVIDER_PRESETS = [
     value: 'openrouter',
     label: 'OpenRouter',
     authKey: 'openrouter',
-    preferredModelIds: ['anthropic/claude-sonnet-4.6', 'openai/gpt-5.1-codex', 'google/gemini-3.1-pro-preview'],
+    preferredModelIds: ['anthropic/claude-sonnet-4.6', 'openai/gpt-5.1', 'google/gemini-3.1-pro-preview'],
     modelHints: {
       'anthropic/claude-sonnet-4.6': 'balanced default',
-      'openai/gpt-5.1-codex': 'coding-focused',
+      'openai/gpt-5.1': 'strong OpenAI option',
       'google/gemini-3.1-pro-preview': 'Gemini via OpenRouter',
     },
     models: [
       { value: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6 via OpenRouter — balanced default' },
-      { value: 'openai/gpt-5.1-codex', label: 'GPT-5.1 Codex via OpenRouter' },
+      { value: 'openai/gpt-5.1', label: 'GPT-5.1 via OpenRouter' },
       { value: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview via OpenRouter' },
       { value: 'custom', label: 'Custom model id' },
     ],
@@ -993,6 +977,23 @@ function piAgentDir() {
   return rootDir()
 }
 
+function pruneLegacyTodoExtension(agentDir) {
+  const filePath = path.join(agentDir, 'extensions', 'todo.ts')
+  if (!fs.existsSync(filePath)) return { ok: false, reason: 'missing' }
+  let content = ''
+  try { content = fs.readFileSync(filePath, 'utf8') } catch { return { ok: false, reason: 'read_failed' } }
+  const looksLegacy = content.includes('Todo Extension - Demonstrates state management via session entries')
+    && content.includes('pi.registerCommand("todos"')
+    && content.includes('name: "todo"')
+  if (!looksLegacy) return { ok: false, reason: 'not_legacy' }
+  try {
+    fs.rmSync(filePath, { force: true })
+    return { ok: true, filePath }
+  } catch {
+    return { ok: false, reason: 'remove_failed' }
+  }
+}
+
 function syncPiSettings(agentDir) {
   ensureDir(agentDir)
   const settingsPath = path.join(agentDir, 'settings.json')
@@ -1007,6 +1008,7 @@ function syncPiSettings(agentDir) {
   if (filteredExtensions.length > 0) next.extensions = filteredExtensions
   else delete next.extensions
 
+  pruneLegacyTodoExtension(agentDir)
   writeJsonAtomic(settingsPath, next)
   return { ok: true, settingsPath }
 }
@@ -1168,7 +1170,7 @@ function formatCliErrorMessage(error) {
   if (message === 'local_bundle_root_missing') return 'A local source tree is required. Pass `--path <repo>` or run the command from the Rin source checkout.'
   if (message === 'rin_not_installed_for_current_user') return 'Rin is not installed for the current user. Use `rin install` to create a local runtime, or `rin -u <user>` to enter another user\'s install.'
   if (message === 'tmux_not_found') return 'tmux is required for `rin --tmux`, but it is not installed or not on PATH.'
-  if (message === 'tmux_mode_only_for_tui') return '`--tmux` only applies to the interactive Rin TUI (`rin` or `rin offline`).'
+  if (message === 'tmux_mode_only_for_tui') return '`--tmux` and `--tmux-list` only apply to the interactive Rin TUI (`rin` or `rin offline`).'
   if (message === 'tmux_session_name_required') return 'A tmux session name is required. Pass `--session-name <name>` or choose one interactively.'
   if (message.startsWith('local_bundle_package_missing:')) return `No Rin package.json found under ${message.slice('local_bundle_package_missing:'.length)}.`
   if (message.startsWith('install_already_exists:')) return `Rin is already installed at ${message.slice('install_already_exists:'.length)}. Use \`rin update\`, uninstall first, or pass the internal upgrade path.`
@@ -1695,10 +1697,18 @@ function listProcessTable() {
 
 function listDaemonProcesses() {
   const pkgDir = daemonPackageDir().replace(/\\/g, '/')
+  const stateDir = rootDir().replace(/\\/g, '/')
   const markers = [
     path.join(pkgDir, 'dist', 'daemon.js').replace(/\\/g, '/'),
+    path.join(stateDir, 'app', 'current', 'dist', 'daemon.js').replace(/\\/g, '/'),
   ]
-  return listProcessTable().filter((entry) => markers.some((marker) => entry.args.includes(marker)))
+  const releasePrefix = path.join(stateDir, 'app', 'releases').replace(/\\/g, '/') + '/'
+  return listProcessTable().filter((entry) => {
+    const args = safeString(entry && entry.args || '')
+    if (markers.some((marker) => args.includes(marker))) return true
+    if (!args.includes('/dist/daemon.js')) return false
+    return args.includes(releasePrefix)
+  })
 }
 
 async function waitForPidsExit(pids, timeoutMs = 8_000) {
@@ -1870,42 +1880,100 @@ function resolveInstalledRuntimeForUser(userRecord) {
   }
 }
 
-function parseTopLevelCliOptions(argv) {
-  const forwarded = []
-  let targetUserName = ''
-  let tmuxMode = false
-  let tmuxSessionName = ''
-  let tmuxListSessions = false
+function addTopLevelLauncherOptions(command) {
+  command.addOption(new Option('-u <user>'))
+  command.addOption(new Option('--tmux [session-name]'))
+  command.addOption(new Option('--session-name <name>'))
+  command.addOption(new Option('--tmux-session <name>'))
+  command.addOption(new Option('--tmux-list'))
+  command.addOption(new Option('--list-sessions'))
+  command.addOption(new Option('--tmux-list-sessions'))
+  return command
+}
 
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]
-    const next = argv[i + 1] || ''
-    if (arg === '-u') {
-      targetUserName = next
-      i += 1
-      continue
-    }
-    if (arg === '--tmux') {
-      tmuxMode = true
-      if (!tmuxSessionName && next && !safeString(next).startsWith('-')) {
-        tmuxSessionName = next
-        i += 1
-      }
-      continue
-    }
-    if (arg === '--session-name' || arg === '--tmux-session') {
-      tmuxSessionName = next
-      i += 1
-      continue
-    }
-    if (arg === '--tmux-list' || arg === '--list-sessions' || arg === '--tmux-list-sessions') {
-      tmuxListSessions = true
-      continue
-    }
-    forwarded.push(arg)
+function normalizeTopLevelLauncherOptions(options = {}) {
+  const tmuxValue = options && Object.prototype.hasOwnProperty.call(options, 'tmux') ? options.tmux : undefined
+  return {
+    targetUserName: safeString(options && options.u).trim(),
+    tmuxMode: tmuxValue !== undefined,
+    tmuxSessionName: safeString(options && (options.sessionName || options.tmuxSession) || (typeof tmuxValue === 'string' ? tmuxValue : '')).trim(),
+    tmuxListSessions: Boolean(options && (options.tmuxList || options.listSessions || options.tmuxListSessions)),
+  }
+}
+
+function topLevelInvocationRecord(kind, argv, options = {}) {
+  return {
+    kind: safeString(kind).trim() || 'tui',
+    argv: Array.isArray(argv) ? argv.map((item) => safeString(item)) : [],
+    options: options && typeof options === 'object' ? options : {},
+  }
+}
+
+async function parseTopLevelCli(argv) {
+  let invocation = null
+  const program = new Command()
+  program.name('rin')
+  program.usage('[-u <user>] [--tmux [<session-name>] | --tmux-list] [tui-args...]')
+  program.exitOverride()
+  program.helpOption(false)
+  program.addHelpCommand(false)
+  program.storeOptionsAsProperties(false)
+  program.allowUnknownOption(true)
+  program.allowExcessArguments(true)
+  program.showHelpAfterError(false)
+  program.configureOutput({
+    writeOut: () => {},
+    writeErr: () => {},
+    outputError: () => {},
+  })
+  addTopLevelLauncherOptions(program)
+  program.addHelpText('after', [
+    '',
+    'Notes:',
+    '  - `rin` starts the daemon-backed Rin TUI frontend for the current user\'s own runtime.',
+    '  - `rin offline` starts the local offline TUI on Pi\'s native InteractiveMode host, with Rin\'s full local extensions but without the daemon.',
+    '  - `rin -u <user>` forwards the command into another user\'s Rin install.',
+    '  - `rin --tmux [name]` uses a dedicated tmux socket file, so these sessions stay out of the default `tmux list-sessions` output.',
+    '  - `rin --tmux-list` lists saved tmux session names for the selected Rin install.',
+    '  - `rin install --local` installs from a local source tree using the standard installer flow.',
+    '  - `rin install` registers the launcher for the runtime user, and also for the invoking user when those differ; without `-u`, each launcher still resolves the current user\'s own runtime.',
+    '  - `rin update --local` rebuilds and deploys from a local source tree instead of cloning.',
+    '  - `rin restart` restarts the Rin daemon service.',
+    '  - brain / koishi / schedule are internal runtime capabilities, not public subcommands.',
+  ].join('\n'))
+  program.arguments('[argv...]').action((rest, options) => {
+    invocation = topLevelInvocationRecord('tui', rest, options)
+  })
+
+  const addPassthroughCommand = (name) => {
+    program.command(name)
+      .helpOption(false)
+      .allowUnknownOption(true)
+      .allowExcessArguments(true)
+      .storeOptionsAsProperties(false)
+      .arguments('[argv...]')
+      .action((rest, options, command) => {
+        const parentOptions = command && command.parent && typeof command.parent.opts === 'function'
+          ? command.parent.opts()
+          : {}
+        invocation = topLevelInvocationRecord(name, rest, { ...parentOptions, ...options })
+      })
   }
 
-  return { argv: forwarded, targetUserName, tmuxMode, tmuxSessionName, tmuxListSessions }
+  addPassthroughCommand('offline')
+  addPassthroughCommand('install')
+  addPassthroughCommand('update')
+  addPassthroughCommand('restart')
+  addPassthroughCommand('uninstall')
+  addPassthroughCommand('__install')
+
+  try {
+    await program.parseAsync(['node', 'rin', ...(Array.isArray(argv) ? argv : [])], { from: 'node' })
+  } catch (error) {
+    throw normalizeCliParseError(error)
+  }
+
+  return invocation || topLevelInvocationRecord('tui', [], program.opts())
 }
 
 function isRuntimeInstalledForUser(userRecord) {
@@ -1919,6 +1987,140 @@ function topLevelCommandMode(argv) {
   if (!cmd || cmd === 'offline' || cmd.startsWith('-')) return 'tui'
   if (cmd === 'install' || cmd === 'restart' || cmd === 'update' || cmd === 'uninstall' || cmd === '__install') return cmd
   return 'unknown'
+}
+
+function createStrictCliParser(name, usageText = '') {
+  const command = new Command()
+  command.name(name)
+  if (usageText) command.usage(usageText)
+  command.exitOverride()
+  command.helpOption(false)
+  command.addHelpCommand(false)
+  command.storeOptionsAsProperties(false)
+  command.allowUnknownOption(false)
+  command.allowExcessArguments(false)
+  command.showHelpAfterError(false)
+  command.configureOutput({
+    writeOut: () => {},
+    writeErr: () => {},
+    outputError: () => {},
+  })
+  return command
+}
+
+function printCliParserHelp(command) {
+  console.error(command.helpInformation())
+  process.exit(0)
+}
+
+function normalizeCliParseError(error) {
+  const code = safeString(error && error.code).trim()
+  const message = safeString(error && error.message ? error.message : error).trim()
+  if (code === 'commander.helpDisplayed') process.exit(0)
+  if (message.startsWith('error: ')) return new Error(message.slice('error: '.length))
+  return error instanceof Error ? error : new Error(message || 'cli_parse_failed')
+}
+
+function parseStrictCliParser(command, argv) {
+  if (Array.isArray(argv) && argv.some((arg) => arg === '-h' || arg === '--help' || arg === 'help')) {
+    printCliParserHelp(command)
+  }
+  try {
+    command.parse(['node', safeString(command.name()).trim() || 'rin', ...(Array.isArray(argv) ? argv : [])], { from: 'node' })
+  } catch (error) {
+    throw normalizeCliParseError(error)
+  }
+  return command.opts()
+}
+
+function parseInstallCliOptions(argv) {
+  const command = createStrictCliParser(
+    'rin install',
+    '[--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]] [--current-user | --user <name> | --create-user <name>]',
+  )
+  command.addOption(new Option('-y, --yes'))
+  command.addOption(new Option('-n, --dry-run'))
+  command.addOption(new Option('--source-repo <git-url>'))
+  command.addOption(new Option('--source-ref <branch|tag|commit>'))
+  command.addOption(new Option('--bundle-root <path>'))
+  command.addOption(new Option('--local'))
+  command.addOption(new Option('--path <repo>'))
+  command.addOption(new Option('--service-manager <manager>').choices(['auto', 'systemd', 'launchd', 'detached']))
+  command.addOption(new Option('--state-root <path>'))
+  command.addOption(new Option('--home <path>').hideHelp())
+  command.addOption(new Option('--dir <path>').hideHelp())
+  command.addOption(new Option('--upgrade-existing'))
+  command.addOption(new Option('--current-user').conflicts(['user', 'createUser']))
+  command.addOption(new Option('--user <name>').conflicts(['currentUser', 'createUser']))
+  command.addOption(new Option('--create-user <name>').conflicts(['currentUser', 'user']))
+
+  const opts = parseStrictCliParser(command, argv)
+  let mode = ''
+  let targetUserName = ''
+  let createUserName = ''
+  if (opts.currentUser) mode = 'current'
+  if (safeString(opts.user).trim()) {
+    mode = 'existing'
+    targetUserName = safeString(opts.user).trim()
+  }
+  if (safeString(opts.createUser).trim()) {
+    mode = 'create'
+    createUserName = safeString(opts.createUser).trim()
+  }
+
+  return {
+    yes: Boolean(opts.yes),
+    dryRun: Boolean(opts.dryRun),
+    mode,
+    targetUserName,
+    createUserName,
+    requestedStateRoot: safeString(opts.stateRoot || opts.home || opts.dir || process.env.RIN_HOME).trim(),
+    serviceManager: safeString(opts.serviceManager || process.env.RIN_SERVICE_MANAGER).trim() || 'auto',
+    sourceRepo: safeString(opts.sourceRepo || process.env.RIN_INSTALL_SOURCE_REPO).trim(),
+    sourceRef: safeString(opts.sourceRef || process.env.RIN_INSTALL_SOURCE_REF).trim(),
+    bundleRoot: safeString(opts.path || opts.bundleRoot).trim(),
+    localSource: Boolean(opts.local || opts.path),
+    allowExistingInstall: Boolean(opts.upgradeExisting),
+  }
+}
+
+function parseUpdateCliOptions(argv) {
+  const command = createStrictCliParser('rin update', '[--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]')
+  command.addOption(new Option('--repo <git-url>'))
+  command.addOption(new Option('--ref <branch|tag|commit>'))
+  command.addOption(new Option('--local'))
+  command.addOption(new Option('--path <repo>'))
+
+  const opts = parseStrictCliParser(command, argv)
+  return {
+    repo: safeString(opts.repo).trim(),
+    ref: safeString(opts.ref).trim(),
+    localSource: Boolean(opts.local || opts.path),
+    bundleRoot: safeString(opts.path).trim(),
+  }
+}
+
+function parseRestartCliOptions(argv) {
+  const command = createStrictCliParser('rin restart')
+  parseStrictCliParser(command, argv)
+  return {}
+}
+
+function parseUninstallCliOptions(argv) {
+  const command = createStrictCliParser('rin uninstall', '[--yes] [--keep-state | --purge]')
+  command.addOption(new Option('-y, --yes'))
+  command.addOption(new Option('--keep-state').conflicts(['purge', 'all']))
+  command.addOption(new Option('--purge').conflicts(['keepState']))
+  command.addOption(new Option('--all').hideHelp().conflicts(['keepState']))
+
+  const opts = parseStrictCliParser(command, argv)
+  let mode = ''
+  if (opts.keepState) mode = 'keep'
+  if (opts.purge || opts.all) mode = 'purge'
+  return {
+    yes: Boolean(opts.yes),
+    mode,
+  }
 }
 
 function shellQuoteArg(value) {
@@ -2043,7 +2245,7 @@ function usage(exitCode = 2) {
     '',
     'Notes:',
     '  - `rin` starts the daemon-backed Rin TUI frontend for the current user\'s own runtime.',
-    '  - `rin offline` starts the local offline TUI using the native Pi InteractiveMode host.',
+    '  - `rin offline` starts the local offline TUI on Pi\'s native InteractiveMode host, with Rin\'s full local extensions but without the daemon.',
     '  - `rin -u <user>` forwards the command into another user\'s Rin install.',
     '  - `rin --tmux [name]` uses a dedicated tmux socket file, so these sessions stay out of the default `tmux list-sessions` output.',
     '  - `rin --tmux-list` lists saved tmux session names for the selected Rin install.',
@@ -2079,42 +2281,19 @@ async function promptInstallChoice(rl, question, options) {
   }
 }
 
-async function cmdInstall(argv) {
-  let yes = false
-  let dryRun = false
-  let mode = ''
-  let targetUserName = ''
-  let createUserName = ''
-  let requestedStateRoot = safeString(process.env.RIN_HOME).trim()
-  let serviceManager = safeString(process.env.RIN_SERVICE_MANAGER).trim() || 'auto'
-  let sourceRepo = safeString(process.env.RIN_INSTALL_SOURCE_REPO).trim()
-  let sourceRef = safeString(process.env.RIN_INSTALL_SOURCE_REF).trim()
-  let bundleRoot = ''
-  let localSource = false
-  let allowExistingInstall = false
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (a === '--yes' || a === '-y') { yes = true; continue }
-    if (a === '--dry-run' || a === '-n') { dryRun = true; continue }
-    if (a === '--source-repo') { sourceRepo = argv[i + 1] || ''; i++; continue }
-    if (a === '--source-ref') { sourceRef = argv[i + 1] || ''; i++; continue }
-    if (a === '--bundle-root') { bundleRoot = argv[i + 1] || ''; i++; continue }
-    if (a === '--local') { localSource = true; continue }
-    if (a === '--path') { bundleRoot = argv[i + 1] || ''; localSource = true; i++; continue }
-    if (a === '--service-manager') { serviceManager = argv[i + 1] || ''; i++; continue }
-    if (a === '--state-root' || a === '--home' || a === '--dir') { requestedStateRoot = argv[i + 1] || ''; i++; continue }
-    if (a === '--upgrade-existing') { allowExistingInstall = true; continue }
-    if (a === '--current-user') { mode = 'current'; continue }
-    if (a === '--user') { mode = 'existing'; targetUserName = argv[i + 1] || ''; i++; continue }
-    if (a === '--create-user') { mode = 'create'; createUserName = argv[i + 1] || ''; i++; continue }
-    if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin install [--yes] [--dry-run] [--state-root <path>] [--service-manager <auto|systemd|launchd|detached>] [--local [--path <repo>]] [--current-user | --user <name> | --create-user <name>]')
-      process.exit(0)
-    }
-    console.error(`Unknown arg: ${a}`)
-    usage(2)
-  }
+async function cmdInstall(options = {}) {
+  let yes = Boolean(options && options.yes)
+  const dryRun = Boolean(options && options.dryRun)
+  let mode = safeString(options && options.mode).trim()
+  let targetUserName = safeString(options && options.targetUserName).trim()
+  let createUserName = safeString(options && options.createUserName).trim()
+  let requestedStateRoot = safeString(options && options.requestedStateRoot).trim()
+  let serviceManager = safeString(options && options.serviceManager).trim() || 'auto'
+  const sourceRepo = safeString(options && options.sourceRepo).trim()
+  const sourceRef = safeString(options && options.sourceRef).trim()
+  const bundleRoot = safeString(options && options.bundleRoot).trim()
+  const localSource = Boolean(options && options.localSource)
+  const allowExistingInstall = Boolean(options && options.allowExistingInstall)
 
   const currentUser = currentUserRecord()
   const invokingUser = invokingUserRecord(currentUser)
@@ -2218,25 +2397,11 @@ async function cmdInstall(argv) {
   }
 }
 
-async function cmdUpdate(argv) {
-  let repo = ''
-  let ref = ''
-  let localSource = false
-  let bundleRoot = ''
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (a === '--repo') { repo = argv[i + 1] || ''; i += 1; continue }
-    if (a === '--ref') { ref = argv[i + 1] || ''; i += 1; continue }
-    if (a === '--local') { localSource = true; continue }
-    if (a === '--path') { bundleRoot = argv[i + 1] || ''; localSource = true; i += 1; continue }
-    if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin update [--repo <git-url>] [--ref <branch|tag|commit>] [--local [--path <repo>]]')
-      process.exit(0)
-    }
-    console.error(`Unknown arg: ${a}`)
-    usage(2)
-  }
+async function cmdUpdate(options = {}) {
+  const repo = safeString(options && options.repo).trim()
+  const ref = safeString(options && options.ref).trim()
+  const localSource = Boolean(options && options.localSource)
+  const bundleRoot = safeString(options && options.bundleRoot).trim()
 
   const stateRoot = rootDir()
   const installMeta = readJson(path.join(stateRoot, 'install.json'), {})
@@ -2320,35 +2485,14 @@ async function cmdUpdate(argv) {
   }
 }
 
-async function cmdRestart(argv) {
-  if (argv.some((arg) => arg === '-h' || arg === '--help' || arg === 'help')) {
-    console.error('Usage:\n  rin restart')
-    process.exit(0)
-  }
-  if (argv.length > 0) {
-    console.error(`Unknown arg: ${argv[0]}`)
-    usage(2)
-  }
+async function cmdRestart() {
   await startDaemonRuntime('restart')
   console.log('Rin daemon restarted.')
 }
 
-async function cmdUninstall(argv) {
-  let yes = false
-  let mode = ''
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (a === '--yes' || a === '-y') { yes = true; continue }
-    if (a === '--keep-state') { mode = 'keep'; continue }
-    if (a === '--purge' || a === '--all') { mode = 'purge'; continue }
-    if (a === '-h' || a === '--help' || a === 'help') {
-      console.error('Usage:\n  rin uninstall [--yes] [--keep-state | --purge]')
-      process.exit(0)
-    }
-    console.error(`Unknown arg: ${a}`)
-    usage(2)
-  }
+async function cmdUninstall(options = {}) {
+  let yes = Boolean(options && options.yes)
+  let mode = safeString(options && options.mode).trim()
 
   const currentStateRoot = rootDir()
   const choices = [
@@ -2893,59 +3037,114 @@ async function startDetachedDaemonRuntime() {
   return { ok: true, pid, manager: 'detached' }
 }
 
-async function main() {
-  const rawArgv = process.argv.slice(2)
-  const parsed = parseTopLevelCliOptions(rawArgv)
-  const argv = parsed.argv
-  const cmd = argv[0]
-  const rest = argv.slice(1)
+async function runTopLevelInvocation({ argv, launcherOptions, localRun }) {
+  const nextArgv = Array.isArray(argv) ? argv.map((item) => safeString(item)) : []
+  const parsedLauncher = normalizeTopLevelLauncherOptions(launcherOptions)
+  const mode = topLevelCommandMode(nextArgv)
 
-  if (!parsed.tmuxMode && !parsed.targetUserName && (cmd === '-h' || cmd === '--help' || cmd === 'help')) usage(0)
+  if ((parsedLauncher.tmuxMode || parsedLauncher.tmuxListSessions) && mode !== 'tui') {
+    throw new Error('tmux_mode_only_for_tui')
+  }
 
-  if (parsed.tmuxMode || parsed.targetUserName) {
-    const mode = topLevelCommandMode(argv)
-    if (parsed.tmuxMode && mode !== 'tui') throw new Error('tmux_mode_only_for_tui')
-    if (mode === 'install' || mode === '__install') throw new Error('tmux_mode_only_for_tui')
-
-    const targetUser = parsed.targetUserName
-      ? lookupUserRecord(parsed.targetUserName)
+  if (parsedLauncher.targetUserName || parsedLauncher.tmuxMode || parsedLauncher.tmuxListSessions) {
+    const targetUser = parsedLauncher.targetUserName
+      ? lookupUserRecord(parsedLauncher.targetUserName)
       : currentUserRecord()
-    if (!targetUser) throw new Error(`user_not_found:${parsed.targetUserName}`)
+    if (!targetUser) throw new Error(`user_not_found:${parsedLauncher.targetUserName}`)
     const installInfo = resolveInstalledRuntimeForUser(targetUser)
 
-    if (parsed.tmuxMode) {
+    if (parsedLauncher.tmuxMode || parsedLauncher.tmuxListSessions) {
       return await runTmuxSessionForUser({
-        argv,
+        argv: nextArgv,
         targetUser,
         installInfo,
-        sessionName: parsed.tmuxSessionName,
-        listSessions: parsed.tmuxListSessions,
+        sessionName: parsedLauncher.tmuxSessionName,
+        listSessions: parsedLauncher.tmuxListSessions,
       })
     }
 
-    return await runForwardedCliForUser({ argv, targetUser, installInfo })
+    return await runForwardedCliForUser({ argv: nextArgv, targetUser, installInfo })
   }
 
-  const mode = topLevelCommandMode(argv)
   const currentUser = currentUserRecord()
   if (!isRuntimeInstalledForUser(currentUser) && (mode === 'tui' || mode === 'restart' || mode === 'update')) {
     throw new Error('rin_not_installed_for_current_user')
   }
 
-  if (!cmd) return await cmdPi([])
-  if (cmd === '-h' || cmd === '--help' || cmd === 'help') usage(0)
+  return await localRun(nextArgv)
+}
 
-  if (cmd === 'install') return await cmdInstall(rest)
-  if (cmd === 'restart') return await cmdRestart(rest)
-  if (cmd === 'update') return await cmdUpdate(rest)
-  if (cmd === 'uninstall') return await cmdUninstall(rest)
-  if (cmd === 'offline') return await cmdOffline(rest)
-  if (cmd === '__install') return await cmdInstall(rest)
+async function main() {
+  const rawArgv = process.argv.slice(2)
+  if (rawArgv.length === 1 && (rawArgv[0] === '-h' || rawArgv[0] === '--help' || rawArgv[0] === 'help')) usage(0)
+  const parsed = await parseTopLevelCli(rawArgv)
 
-  if (safeString(cmd).startsWith('-')) return await cmdPi(argv)
+  if (parsed.kind === 'tui') {
+    const first = safeString(parsed.argv && parsed.argv[0]).trim()
+    if (first === 'help') usage(0)
+    if (first && !first.startsWith('-') && !rawArgv.includes('--')) {
+      console.error(`Unknown arg: ${first}`)
+      usage(2)
+    }
+    return await runTopLevelInvocation({
+      argv: parsed.argv,
+      launcherOptions: parsed.options,
+      localRun: (argv) => cmdPi(argv),
+    })
+  }
 
-  console.error(`Unknown arg: ${cmd}`)
-  usage(2)
+  if (parsed.kind === 'offline') {
+    return await runTopLevelInvocation({
+      argv: ['offline', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => cmdOffline(parsed.argv),
+    })
+  }
+
+  if (parsed.kind === 'install') {
+    return await runTopLevelInvocation({
+      argv: ['install', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => cmdInstall(parseInstallCliOptions(parsed.argv)),
+    })
+  }
+
+  if (parsed.kind === 'restart') {
+    return await runTopLevelInvocation({
+      argv: ['restart', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => {
+        parseRestartCliOptions(parsed.argv)
+        return cmdRestart()
+      },
+    })
+  }
+
+  if (parsed.kind === 'update') {
+    return await runTopLevelInvocation({
+      argv: ['update', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => cmdUpdate(parseUpdateCliOptions(parsed.argv)),
+    })
+  }
+
+  if (parsed.kind === 'uninstall') {
+    return await runTopLevelInvocation({
+      argv: ['uninstall', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => cmdUninstall(parseUninstallCliOptions(parsed.argv)),
+    })
+  }
+
+  if (parsed.kind === '__install') {
+    return await runTopLevelInvocation({
+      argv: ['__install', ...parsed.argv],
+      launcherOptions: parsed.options,
+      localRun: () => cmdInstall(parseInstallCliOptions(parsed.argv)),
+    })
+  }
+
+  throw new Error(`Unknown arg: ${parsed.kind}`)
 }
 
 export {

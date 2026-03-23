@@ -568,7 +568,7 @@ async function manageScheduleViaCtl({
   })
   if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? String(resp.error) : 'schedule_failed')
   return {
-    text: safeString(resp && resp.text).trim() || 'OK',
+    text: safeString(resp && resp.text).trim() || 'Done',
     details: resp && resp.details ? resp.details : { response: resp },
   }
 }
@@ -872,7 +872,7 @@ function manageTrustedIdentity({
     else identity.aliases.push({ platform: nextPlatform, userId: nextUserId, personId })
     if (!identity.trusted.includes(personId)) identity.trusted.push(personId)
     writeJsonAtomic(identityPath, identity, { chmod0600: true })
-    return { text: 'OK', details: { platform: nextPlatform, userId: nextUserId, name: nextName } }
+    return { text: 'Done', details: { platform: nextPlatform, userId: nextUserId, name: nextName } }
   }
 
   if (action === 'del') {
@@ -881,7 +881,7 @@ function manageTrustedIdentity({
     if (!nextPlatform || !nextUserId) throw new Error('identity_del_requires_platform_and_userId')
     identity.aliases = identity.aliases.filter((entry: any) => !(entry && entry.platform === nextPlatform && String(entry.userId) === nextUserId))
     writeJsonAtomic(identityPath, identity, { chmod0600: true })
-    return { text: 'OK', details: { platform: nextPlatform, userId: nextUserId } }
+    return { text: 'Done', details: { platform: nextPlatform, userId: nextUserId } }
   }
 
   throw new Error(`invalid_identity_action:${safeString(action)}`)
@@ -1083,7 +1083,7 @@ async function manageSchedule({
       delete state.state[`${nextKind === 'timer' ? 'timer' : 'inspect'}:${nextName}`]
       saveSchedulesStateForState(stateRoot, state)
     }
-    return { text: 'OK', details: { kind: nextKind, action: nextAction, name: nextName } }
+    return { text: 'Done', details: { kind: nextKind, action: nextAction, name: nextName } }
   }
 
   if (nextAction === 'enable' || nextAction === 'disable') {
@@ -1091,7 +1091,7 @@ async function manageSchedule({
     if (!target) throw new Error(`not_found:${nextName}`)
     target.enabled = nextAction === 'enable'
     saveSchedulesConfigForState(stateRoot, schedules)
-    return { text: 'OK', details: { kind: nextKind, action: nextAction, name: nextName, enabled: target.enabled } }
+    return { text: 'Done', details: { kind: nextKind, action: nextAction, name: nextName, enabled: target.enabled } }
   }
 
   if (nextAction === 'run') {
@@ -1102,7 +1102,7 @@ async function manageSchedule({
       signal,
     })
     if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? String(resp.error) : 'schedule_run_failed')
-    return { text: 'OK', details: { kind: nextKind, action: nextAction, name: nextName, response: resp } }
+    return { text: 'Done', details: { kind: nextKind, action: nextAction, name: nextName, response: resp } }
   }
 
   if (nextAction !== 'create') throw new Error(`invalid_schedule_action:${nextAction}`)
@@ -1124,7 +1124,7 @@ async function manageSchedule({
     const item = { ...scheduleItemBase({ name: nextName, chatKey: nextChatKey, startAtMs, intervalMs }), type: 'timer', routineFile: nextRoutineFile }
     schedules.timers = upsert(schedules.timers, item)
     saveSchedulesConfigForState(stateRoot, schedules)
-    return { text: 'OK', details: { kind: nextKind, action: nextAction, item } }
+    return { text: 'Done', details: { kind: nextKind, action: nextAction, item } }
   }
 
   if (safeString(chatKey).trim()) throw new Error('inspect_chatKey_not_supported')
@@ -1151,10 +1151,10 @@ async function manageSchedule({
     : { ...scheduleItemBase({ name: nextName, startAtMs, intervalMs }), type: 'inspect', command: nextCommand, todoFile: nextTodoFile }
   schedules.inspections = upsert(schedules.inspections, item)
   saveSchedulesConfigForState(stateRoot, schedules)
-  return { text: 'OK', details: { kind: nextKind, action: nextAction, item } }
+  return { text: 'Done', details: { kind: nextKind, action: nextAction, item } }
 }
 
-function toolResultFromCommand(result: { code: number, stdout: string, stderr: string }, okFallback = 'OK') {
+function toolResultFromCommand(result: { code: number, stdout: string, stderr: string }, okFallback = 'Done') {
   const text = [safeString(result.stdout).trim(), safeString(result.stderr).trim()].filter(Boolean).join('\n') || okFallback
   return {
     content: [{ type: 'text' as const, text }],
@@ -1424,7 +1424,7 @@ function createRinBuiltinExtensionTools({
             files: Array.isArray(params.files) ? params.files.map((file: any) => safeString(file)) : [],
             signal,
           })
-          return toolResultFromText('OK', result)
+          return toolResultFromText('Done', result)
         }
         if (action === 'history_get') {
           const result = await getChatHistoryMessage({
@@ -3586,6 +3586,23 @@ function ensureDir(dir: string) {
   fs.mkdirSync(dir, { recursive: true })
 }
 
+function pruneLegacyTodoExtension(agentDir: string) {
+  const filePath = path.join(agentDir, 'extensions', 'todo.ts')
+  if (!fs.existsSync(filePath)) return false
+  let content = ''
+  try { content = fs.readFileSync(filePath, 'utf8') } catch { return false }
+  const looksLegacy = content.includes('Todo Extension - Demonstrates state management via session entries')
+    && content.includes('pi.registerCommand("todos"')
+    && content.includes('name: "todo"')
+  if (!looksLegacy) return false
+  try {
+    fs.rmSync(filePath, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
 function syncRinPiSettings(agentDir: string) {
   ensureDir(agentDir)
   const settingsPath = path.join(agentDir, 'settings.json')
@@ -3594,10 +3611,11 @@ function syncRinPiSettings(agentDir: string) {
   const next = current && typeof current === 'object' ? JSON.parse(JSON.stringify(current)) : {}
   if (next.enableSkillCommands == null) next.enableSkillCommands = true
   if (!next.memory || typeof next.memory !== 'object') next.memory = {}
-  if (next.memory.provider == null) next.memory.provider = 'openai-codex'
+  if (next.memory.provider == null) next.memory.provider = 'openai'
   if (next.memory.model == null) next.memory.model = 'gpt-5.4'
   if (next.memory.thinking == null) next.memory.thinking = 'minimal'
   if ('translation' in next) delete next.translation
+  pruneLegacyTodoExtension(agentDir)
   fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), 'utf8')
 }
 
@@ -3710,10 +3728,59 @@ async function createRinPiSession({
   }
 }
 
-return { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, normalizeAssistantMessageForRin }
+async function createRinTuiSession({
+  repoRoot,
+  workspaceRoot,
+  sessionHome = '',
+  sessionDir = '',
+  sessionFile = '',
+  sessionPolicy = 'continueRecent',
+  brainChatKey = 'local:default',
+  currentChatKey = '',
+  provider = '',
+  model = '',
+  thinking = '',
+  systemPromptExtra = '',
+  enableBrainHooks = true,
+}: {
+  repoRoot: string
+  workspaceRoot: string
+  sessionHome?: string
+  sessionDir?: string
+  sessionFile?: string
+  sessionPolicy?: RinPiSessionPolicy
+  brainChatKey?: string
+  currentChatKey?: string
+  provider?: string
+  model?: string
+  thinking?: string
+  systemPromptExtra?: string
+  enableBrainHooks?: boolean
+}) {
+  const resolvedSessionHome = path.resolve(sessionHome || process.env.HOME || os.homedir())
+  return await createRinPiSession({
+    repoRoot,
+    workspaceRoot,
+    sessionCwd: resolvedSessionHome,
+    resourceCwd: workspaceRoot,
+    settingsCwd: workspaceRoot,
+    sessionDir,
+    sessionFile,
+    sessionPolicy,
+    brainChatKey,
+    currentChatKey,
+    provider,
+    model,
+    thinking,
+    systemPromptExtra,
+    enableBrainHooks,
+  })
+}
+
+return { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, createRinTuiSession, normalizeAssistantMessageForRin }
 })()
 
-const { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, normalizeAssistantMessageForRin } = RinPiSdk
+const { resolvePiAgentDir, loadPiSdkModule, createRinPiSession, createRinTuiSession, normalizeAssistantMessageForRin } = RinPiSdk
 
 const RinPiTurnRuntime = (() => {
 // @ts-nocheck
@@ -4043,5 +4110,6 @@ export {
   resolvePiAgentDir,
   loadPiSdkModule,
   createRinPiSession,
+  createRinTuiSession,
   runPiSdkTurn,
 }

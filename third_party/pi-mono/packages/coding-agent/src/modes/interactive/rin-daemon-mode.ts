@@ -177,8 +177,6 @@ class RinDaemonSessionAdapter {
   extensionErrorListener: any = null
   currentState: any = {}
   messages: any[] = []
-  steeringMessages: string[] = []
-  followUpMessages: string[] = []
   initialized = false
   disposed = false
   clientEventsBound = false
@@ -248,6 +246,34 @@ class RinDaemonSessionAdapter {
     }
   }
 
+  private clearTransientRuntimeState() {
+    const interrupted = {
+      wasStreaming: Boolean(this.currentState && this.currentState.isStreaming),
+      wasCompacting: Boolean(this.currentState && this.currentState.isCompacting),
+      wasRetrying: Boolean(this.currentState && this.currentState.isRetrying),
+    }
+    this.currentState = {
+      ...this.currentState,
+      isStreaming: false,
+      isCompacting: false,
+      isRetrying: false,
+      isBashRunning: false,
+    }
+    return interrupted
+  }
+
+  private emitInterruptedRuntimeEndEvents(interrupted: { wasStreaming?: boolean, wasCompacting?: boolean, wasRetrying?: boolean } = {}) {
+    if (interrupted.wasStreaming) {
+      this.emit({ type: 'agent_end', interrupted: true, daemonRestartRecovery: true })
+    }
+    if (interrupted.wasCompacting) {
+      this.emit({ type: 'auto_compaction_end', aborted: true, daemonRestartRecovery: true, willRetry: false })
+    }
+    if (interrupted.wasRetrying) {
+      this.emit({ type: 'auto_retry_end', success: true, attempt: 0, daemonRestartRecovery: true })
+    }
+  }
+
   async refreshRemote({ reloadMessages = false, refreshCommands = false }: { reloadMessages?: boolean, refreshCommands?: boolean } = {}) {
     const nextState = await this.client.getState().catch(() => null)
     if (nextState && typeof nextState === 'object') {
@@ -258,6 +284,8 @@ class RinDaemonSessionAdapter {
         provider: safeString(nextState && nextState.model && nextState.model.provider).trim() || undefined,
         model: safeString(nextState && nextState.model && nextState.model.id).trim() || undefined,
         thinking: safeString(nextState && nextState.thinkingLevel).trim() || undefined,
+        lastEventSeq: Math.max(0, Number(nextState && nextState.latestEventSeq) || 0) || undefined,
+        autoResume: Boolean(nextState && (nextState.isStreaming || nextState.isCompacting || nextState.isRetrying || nextState.isBashRunning || Number(nextState.pendingMessageCount || 0) > 0)),
       })
     }
     if (refreshCommands) {
@@ -307,12 +335,19 @@ class RinDaemonSessionAdapter {
       return
     }
     if (type === 'client_reconnecting') {
-      this.emit({ type: 'status', text: 'Daemon restarting, reconnecting…' })
+      const interrupted = this.clearTransientRuntimeState()
+      this.emitInterruptedRuntimeEndEvents(interrupted)
+      this.emit({ type: 'status', text: 'Waiting for daemon…' })
       return
     }
     if (type === 'client_reconnected') {
+      this.clearTransientRuntimeState()
       await this.refreshRemote({ reloadMessages: true, refreshCommands: true })
-      this.emit({ type: 'status', text: 'Daemon reconnected' })
+      return
+    }
+    if (type === 'daemon_restart_recovery') {
+      this.clearTransientRuntimeState()
+      await this.refreshRemote({ reloadMessages: true, refreshCommands: true })
       return
     }
     if (type === 'client_close' || type === 'client_error') {
@@ -321,8 +356,6 @@ class RinDaemonSessionAdapter {
     if (type === 'agent_start') this.currentState = { ...this.currentState, isStreaming: true }
     if (type === 'agent_end') {
       this.currentState = { ...this.currentState, isStreaming: false }
-      this.steeringMessages = []
-      this.followUpMessages = []
       await this.refreshRemote({ reloadMessages: true })
     }
     if (type === 'auto_compaction_start') this.currentState = { ...this.currentState, isCompacting: true }
@@ -445,36 +478,35 @@ class RinDaemonSessionAdapter {
   async prompt(message: string, options: any = {}) {
     const text = safeString(message)
     const streamingBehavior = safeString(options && options.streamingBehavior).trim()
-    if ((this.isStreaming || this.isCompacting) && streamingBehavior === 'followUp') this.followUpMessages.push(text)
-    if ((this.isStreaming || this.isCompacting) && streamingBehavior === 'steer') this.steeringMessages.push(text)
     await this.client.prompt(text, Array.isArray(options && options.images) ? options.images : [], streamingBehavior || undefined)
+    await this.refreshRemote()
   }
 
   async steer(message: string, images: any[] = []) {
-    this.steeringMessages.push(safeString(message))
     await this.client.steer(safeString(message), Array.isArray(images) ? images : [])
+    await this.refreshRemote()
   }
 
   async followUp(message: string, images: any[] = []) {
-    this.followUpMessages.push(safeString(message))
     await this.client.followUp(safeString(message), Array.isArray(images) ? images : [])
+    await this.refreshRemote()
   }
 
   clearQueue() {
-    const steering = this.steeringMessages.slice()
-    const followUp = this.followUpMessages.slice()
-    this.steeringMessages = []
-    this.followUpMessages = []
+    const steering = Array.isArray(this.currentState && this.currentState.steeringMessages) ? this.currentState.steeringMessages.slice() : []
+    const followUp = Array.isArray(this.currentState && this.currentState.followUpMessages) ? this.currentState.followUpMessages.slice() : []
     this.currentState = {
       ...this.currentState,
       pendingMessageCount: 0,
+      steeringMessages: [],
+      followUpMessages: [],
     }
     void this.client.clearQueue().then(() => this.refreshRemote()).catch(() => {})
     return { steering, followUp }
   }
 
-  getSteeringMessages() { return this.steeringMessages.slice() }
-  getFollowUpMessages() { return this.followUpMessages.slice() }
+  getSteeringMessages() { return Array.isArray(this.currentState && this.currentState.steeringMessages) ? this.currentState.steeringMessages.slice() : [] }
+  getFollowUpMessages() { return Array.isArray(this.currentState && this.currentState.followUpMessages) ? this.currentState.followUpMessages.slice() : [] }
   async abort() { await this.client.abort() }
   async setModel(model: any) {
     await this.client.setModel(safeString(model && model.provider), safeString(model && model.id))
@@ -645,31 +677,59 @@ async function createSessionCatalogProvider({ client, session, stateRoot, bridge
   const {
     readRinSessionInfo,
     loadRinSessions,
-    bridgeSessionPath,
-    parseBridgeSessionPath,
   } = bridgeMod
 
-  const loadBridgeSessions = async () => {
+  const normalizeSessionPath = (value: any) => {
+    const text = safeString(value).trim()
+    return text ? path.resolve(text) : ''
+  }
+
+  const loadBridgeBindings = async () => {
     const items = await client.getBridgeSessions().catch(() => [])
-    const sessions = (await Promise.all((Array.isArray(items) ? items : []).map(async (item: any) => {
+    const bindings = (await Promise.all((Array.isArray(items) ? items : []).map(async (item: any) => {
       const chatKey = safeString(item && item.chatKey).trim()
-      const sessionFile = safeString(item && item.sessionFile).trim()
+      const sessionFile = normalizeSessionPath(item && item.sessionFile)
       if (!chatKey || !sessionFile) return null
       try {
         const info = await readRinSessionInfo(sessionFile)
         return {
           ...info,
-          path: bridgeSessionPath(chatKey),
-          cwd: `koishi:${chatKey}`,
-          name: info.name || chatKey,
-          modified: new Date(Number(item && item.modifiedAt || 0) || Number(info.modified)),
+          path: sessionFile,
+          sessionFile,
+          chatKey,
+          modified: new Date(Math.max(Number(item && item.modifiedAt || 0), Number(info.modified) || 0)),
         }
       } catch {
         return null
       }
     }))).filter(Boolean)
-    sessions.sort((a: any, b: any) => Number(b.modified) - Number(a.modified))
-    return sessions
+    bindings.sort((a: any, b: any) => Number(b.modified) - Number(a.modified))
+    return bindings
+  }
+
+  const mergeSessions = (localSessions: any, bridgeSessions: any) => {
+    const rows = new Map<string, any>()
+    const upsert = (item: any, source: 'local' | 'bridge') => {
+      const sessionPath = normalizeSessionPath(item && item.path || item && item.sessionFile)
+      if (!sessionPath) return
+      const current = rows.get(sessionPath)
+      const modifiedMs = Math.max(Number(item && item.modified || 0), Number(current && current.modified || 0))
+      const boundChatKeys = Array.isArray(current && current.boundChatKeys) ? current.boundChatKeys.slice() : []
+      const nextChatKey = safeString(item && item.chatKey).trim()
+      if (source === 'bridge' && nextChatKey && !boundChatKeys.includes(nextChatKey)) boundChatKeys.push(nextChatKey)
+      const searchBridgeText = boundChatKeys.length ? `\n\n${boundChatKeys.map((chatKey: string) => `[bound chat] ${chatKey}`).join('\n')}` : ''
+      rows.set(sessionPath, {
+        ...(current && typeof current === 'object' ? current : {}),
+        ...(item && typeof item === 'object' ? item : {}),
+        path: sessionPath,
+        modified: new Date(modifiedMs || Date.now()),
+        boundChatKeys,
+        allMessagesText: `${safeString(item && item.allMessagesText || current && current.allMessagesText)}`.trim() + searchBridgeText,
+      })
+    }
+    for (const item of Array.isArray(localSessions) ? localSessions : []) upsert(item, 'local')
+    for (const item of Array.isArray(bridgeSessions) ? bridgeSessions : []) upsert(item, 'bridge')
+    return Array.from(rows.values()).sort((a: any, b: any) => Number(b.modified) - Number(a.modified))
   }
 
   return {
@@ -678,45 +738,35 @@ async function createSessionCatalogProvider({ client, session, stateRoot, bridge
       try { onProgress({ loaded: 0, total: 0 }) } catch {}
       const [localSessions, bridgeSessions] = await Promise.all([
         loadRinSessions(stateRoot, cwd),
-        loadBridgeSessions(),
+        loadBridgeBindings(),
       ])
-      return [...(Array.isArray(bridgeSessions) ? bridgeSessions : []), ...(Array.isArray(localSessions) ? localSessions : [])]
+      return mergeSessions(localSessions, bridgeSessions)
     },
     listAll: async () => {
       const [localSessions, bridgeSessions] = await Promise.all([
         loadRinSessions(stateRoot),
-        loadBridgeSessions(),
+        loadBridgeBindings(),
       ])
-      return [...(Array.isArray(bridgeSessions) ? bridgeSessions : []), ...(Array.isArray(localSessions) ? localSessions : [])]
+      return mergeSessions(localSessions, bridgeSessions)
     },
     openSession: async (sessionPath: string) => {
-      const bridgeChatKey = parseBridgeSessionPath(sessionPath)
-      if (bridgeChatKey) await client.openBridgeSession(bridgeChatKey)
-      else await client.openSession(sessionPath)
+      await client.openSession(sessionPath)
       await session.refreshRemote({ reloadMessages: true, refreshCommands: true })
     },
     renameSession: async (sessionPath: string, nextName: string | undefined) => {
       const name = safeString(nextName).trim()
-      if (!name) return
-      if (parseBridgeSessionPath(sessionPath)) {
-        if (safeString(session.currentState && session.currentState.bridgeChatKey).trim() && bridgeSessionPath(safeString(session.currentState && session.currentState.bridgeChatKey).trim()) === sessionPath) {
-          await client.setSessionName(name)
-          await session.refreshRemote()
-        }
-        return
-      }
-      if (safeString(session.currentState && session.currentState.sessionFile).trim() === sessionPath) {
+      const normalizedSessionPath = normalizeSessionPath(sessionPath)
+      if (!name || !normalizedSessionPath) return
+      if (normalizeSessionPath(session.currentState && session.currentState.sessionFile) === normalizedSessionPath) {
         await client.setSessionName(name)
         await session.refreshRemote()
         return
       }
-      const manager = SessionManager.open(sessionPath)
+      const manager = SessionManager.open(normalizedSessionPath)
       manager.appendSessionInfo(name)
     },
     getActiveSessionPath: () => {
-      const chatKey = safeString(session.currentState && session.currentState.bridgeChatKey).trim()
-      if (chatKey) return bridgeSessionPath(chatKey)
-      return safeString(session.currentState && session.currentState.sessionFile).trim() || undefined
+      return normalizeSessionPath(session.currentState && session.currentState.sessionFile) || undefined
     },
   }
 }

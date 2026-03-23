@@ -44,12 +44,6 @@
 - `hello.ts`  
   最小 custom tool 示例，用来演示最基础的工具注册方式。
 
-- `todo.ts`  
-  一个“agent 自己维护待办列表”的示例工具。模型可以通过 `todo` 工具执行 `list/add/toggle/clear`，并通过 `/todos` 查看当前分支上的待办状态。它确实对应市面上 code agent 常见的那类 todo 能力，不过这里是示例版、最小闭环版：
-  - 状态不是写进外部文件，而是存在 tool result `details` 里
-  - 会在 session / branch 恢复时重建状态
-  - fork 后 todo 会天然跟随分支历史
-
 - `question.ts`  
   演示如何用 `ctx.ui.select()` 向用户提问并获取选择结果。
 
@@ -349,7 +343,7 @@
 如果把这个目录当成示例素材库来看，可以这样理解：
 
 - 想看“安全拦截”就读：`permission-gate`、`protected-paths`、`sandbox`
-- 想看“工具扩展”就读：`todo`、`dynamic-tools`、`tool-override`
+- 想看“工具扩展”就读：`dynamic-tools`、`tool-override`
 - 想看“UI 定制”就读：`status-line`、`custom-header`、`custom-footer`、`message-renderer`
 - 想看“上下文 / workflow”就读：`plan-mode`、`trigger-compact`、`subagent`
 - 想看“provider 接入”就读：`custom-provider-*`

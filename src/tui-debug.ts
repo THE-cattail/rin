@@ -2,8 +2,8 @@
 import os from 'node:os'
 import path from 'node:path'
 
-import { importPiTuiModule } from './pi-upstream'
-import { createRinPiSession } from './runtime'
+import { importPiCodingAgentModule, importPiTuiModule } from './pi-upstream'
+import { createRinTuiSession } from './runtime'
 import { resolveRinLayout } from './runtime-paths'
 
 function safeString(value: any): string {
@@ -50,12 +50,10 @@ async function runRinInteractiveMode({
   await installBuiltinTuiKeybindings()
   const sessionHome = process.env.HOME || os.homedir()
   const brainChatKey = 'local:default'
-  const { pi, session, modelFallbackMessage } = await createRinPiSession({
+  const { pi, session, modelFallbackMessage } = await createRinTuiSession({
     repoRoot,
     workspaceRoot,
-    sessionCwd: sessionHome,
-    resourceCwd: workspaceRoot,
-    settingsCwd: workspaceRoot,
+    sessionHome,
     sessionFile,
     sessionPolicy: 'new',
     brainChatKey,
@@ -63,7 +61,7 @@ async function runRinInteractiveMode({
     provider,
     model,
     thinking,
-    enableBrainHooks: false,
+    enableBrainHooks: true,
   })
 
   const mode = new pi.InteractiveMode(session, {
@@ -99,7 +97,7 @@ function usage(exitCode = 0) {
     'Usage:',
     '  rin offline [--session <path>] [--provider <id>] [--model <id>] [--thinking <level>]',
     '',
-    'Runs Rin using the local offline TUI host backed by Pi\'s native InteractiveMode.',
+    'Runs Rin using Pi\'s native InteractiveMode host with Rin\'s full local extension/session wiring, without the daemon.',
   ].join('\n')
   if (exitCode === 0) console.log(text)
   else console.error(text)

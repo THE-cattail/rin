@@ -68,11 +68,16 @@ test('rin daemon mode keeps the patch surface minimal', () => {
   assert.doesNotMatch(source, /'\/help'/)
   assert.doesNotMatch(source, /'\/commands'/)
   assert.doesNotMatch(source, /clearQueue\(\)\s*\{\s*return this\.client\.clearQueue\(\)\.then/)
+  assert.doesNotMatch(source, /this\.steeringMessages/)
+  assert.doesNotMatch(source, /this\.followUpMessages/)
+  assert.doesNotMatch(source, /bridgeSessionPath\(/)
+  assert.doesNotMatch(source, /parseBridgeSessionPath\(/)
+  assert.doesNotMatch(source, /koishi:/)
   assert.match(source, /InteractiveMode/)
   assert.match(source, /'status'/)
   assert.match(source, /'restart'/)
   assert.match(source, /model:\s*this\.model/)
-  assert.match(source, /clearQueue\(\)\s*\{\s*const steering = this\.steeringMessages\.slice\(\)/)
+  assert.match(source, /clearQueue\(\)\s*\{\s*const steering = Array\.isArray\(this\.currentState && this\.currentState\.steeringMessages\)/)
 })
 
 test('interactive mode still relies on a synchronous clearQueue contract', () => {
@@ -80,4 +85,38 @@ test('interactive mode still relies on a synchronous clearQueue contract', () =>
 
   assert.match(source, /const \{ steering, followUp \} = this\.session\.clearQueue\(\);/)
   assert.doesNotMatch(source, /Array\.isArray\(cleared\?\.steering\)/)
+})
+
+test('offline tui host keeps native interactive mode while enabling Rin local hooks', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'tui-debug.ts'), 'utf8')
+
+  assert.match(source, /import \{ importPiCodingAgentModule, importPiTuiModule \} from '\.\/pi-upstream'/)
+  assert.match(source, /import \{ createRinTuiSession \} from '\.\/runtime'/)
+  assert.match(source, /new pi\.InteractiveMode\(session/)
+  assert.match(source, /enableBrainHooks: true/)
+  assert.doesNotMatch(source, /DaemonTuiRpcClient/)
+  assert.doesNotMatch(source, /session\.bindExtensions\(/)
+})
+
+test('daemon tui rpc and offline share the same Rin TUI session assembly helper', () => {
+  const runtimeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtime.ts'), 'utf8')
+  const rpcSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'daemon-tui-rpc.ts'), 'utf8')
+  const offlineSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'tui-debug.ts'), 'utf8')
+
+  assert.match(runtimeSource, /async function createRinTuiSession\(/)
+  assert.match(rpcSource, /import \{ createRinTuiSession \} from '\.\/runtime'/)
+  assert.match(offlineSource, /import \{ createRinTuiSession \} from '\.\/runtime'/)
+  assert.doesNotMatch(rpcSource, /import \{ createRinPiSession \} from '\.\/runtime'/)
+  assert.doesNotMatch(offlineSource, /import \{ createRinPiSession \} from '\.\/runtime'/)
+})
+
+test('daemon tui session catalog flattens bridge-bound sessions into normal session entries', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'third_party', 'pi-mono', 'packages', 'coding-agent', 'dist', 'modes', 'interactive', 'rin-daemon-mode.js'), 'utf8')
+
+  assert.match(source, /const mergeSessions = \(localSessions, bridgeSessions\)/)
+  assert.match(source, /boundChatKeys/)
+  assert.match(source, /await client\.openSession\(sessionPath\)/)
+  assert.match(source, /normalizeSessionPath\(session\.currentState && session\.currentState\.sessionFile\)/)
+  assert.doesNotMatch(source, /bridgeSessionPath\(/)
+  assert.doesNotMatch(source, /parseBridgeSessionPath\(/)
 })

@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 
 import { Loader, Logger, h } from 'koishi'
+import { BUILTIN_SLASH_COMMANDS } from '../third_party/pi-mono/packages/coding-agent/dist/core/slash-commands.js'
 import {
   buildDaemonConfigFromSettings,
   composeChatKey,
@@ -16,10 +17,35 @@ import {
   ownerChatKeysFromIdentity,
   parseChatKey,
   preferredOwnerChatKey,
+  sendTextToChatKey,
   sendTextToOwners,
 } from './daemon-support'
-import { loadPiSdkModule, manageSchedule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { createRinPiSession, loadPiSdkModule, manageSchedule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
 import { startDaemonTuiRpcServer } from './daemon-tui-rpc'
+import {
+  applyInboundRecord,
+  buildBridgeRestartResumeThreadText,
+  buildConversationTrigger,
+  claimConversationProcessing,
+  claimConversationTurn,
+  clearPersistentConversationRunFlags,
+  defaultConversationState,
+  mergeConversationState,
+  mergePendingTrigger,
+  normalizeConversationState,
+  normalizeLastAgentResult as normalizeConversationLastAgentResult,
+  pickNewerLastAgentResult as pickNewerConversationLastAgentResult,
+  planConversationActivation,
+  queueConversationTrigger,
+  recoverConversationFromStaleProcessing,
+  releaseConversationProcessing,
+  releaseConversationTurn,
+  requestConversationInterrupt,
+  resetConversationContinuation,
+  resetConversationStateForBoundary,
+  summarizeConversationResumeWork,
+  syncConversationFromDisk,
+} from './chat-session-state'
 import { ensureSearxngSidecar, stopSearxngSidecar } from './web-search'
 import { resolveRinLayout } from './runtime-paths'
 
@@ -56,6 +82,10 @@ const rinBridge = (() => {
 
   const logger = new Logger('rin-bridge')
   const chatContextCache = new Map()
+  let sendToChatRef: any = null
+  let isCurrentProcessingRunRef: any = null
+  let requestInterruptIfProcessingRef: any = null
+  let syncConcurrentStateFromDiskRef: any = null
 
   const INLINE_CODE_SENTINEL = '\u0002'
   const FENCE_CODE_SENTINEL = '\u0003'
@@ -853,56 +883,28 @@ const rinBridge = (() => {
     return session.guildId || session.channelId
   }
 
-				  function defaultState(chatKey) {
-				    return {
-				      chatKey,
-				      codexThreadId: '',
-              piSessionFile: '',
-            bridgeProtocolRetryCount: 0,
-				      lastProcessedSeq: 0,
-              lastThreadIngestedSeq: 0,
-			      lastSeq: 0,
-			      lastInboundSeq: 0,
-			      lastInboundText: '',
-            lastAgentInboundSeq: 0,
-            lastAgentInboundAt: 0,
-            lastAgentInboundText: '',
-            lastAgentResult: null,
-            lastShadowResult: null,
-            lastResetResult: null,
-            inboundUnprocessed: 0,
-					      processing: false,
-	              processingNoInterrupt: false,
-                processingRuntime: '',
-					      processingPid: 0,
-              processingThreadId: '',
-            processingTurnId: '',
-				      processingRunId: '',
-				      processingStartedAt: 0,
-              resetPendingTrigger: null,
-				      batchEndSeq: 0,
-		      lastSystemAckAt: 0,
-		      interruptRequested: false,
-		      interruptRequestedAt: 0,
-	      pendingWake: false,
-	      pendingTrigger: null,
-	      replyToMessageId: '',
-	      forceContinue: false,
-	      recentMessageIds: [],
-	    }
-	  }
-
-  function readCodexThreadId(state: any) {
-    if (!state || typeof state !== 'object') return ''
-    return safeString((state as any).codexThreadId || (state as any).codexSessionId || '').trim()
+  function pickUserId(session) {
+    const directChatId = safeString(pickChatId(session)).trim()
+    return safeString(
+      session?.userId
+      || session?.author?.user?.id
+      || session?.author?.id
+      || session?.event?.user?.id
+      || (!session?.guildId ? directChatId : '')
+      || '',
+    ).trim()
   }
 
-  function writeCodexThreadId(state: any, value: any) {
-    if (!state || typeof state !== 'object') return ''
-    const nextThreadId = safeString(value || '').trim()
-    ;(state as any).codexThreadId = nextThreadId
-    try { delete (state as any).codexSessionId } catch {}
-    return nextThreadId
+				  function defaultState(chatKey) {
+				    return defaultConversationState(chatKey)
+	  }
+
+  function readLegacyThreadHandle(_state: any) {
+    return ''
+  }
+
+  function writeLegacyThreadHandle(_state: any, _value: any) {
+    return ''
   }
 
   function readPiSessionFile(state: any) {
@@ -915,6 +917,17 @@ const rinBridge = (() => {
     const nextSessionFile = safeString(value || '').trim()
     ;(state as any).piSessionFile = nextSessionFile
     return nextSessionFile
+  }
+
+  function reconcilePiSessionFile(state: any, value: any, _chatKey = '') {
+    if (!state || typeof state !== 'object') return ''
+    const nextSessionFile = safeString(value || '').trim()
+    if (nextSessionFile) return writePiSessionFile(state, nextSessionFile)
+    const currentSessionFile = readPiSessionFile(state)
+    if (currentSessionFile && !fs.existsSync(currentSessionFile)) {
+      return writePiSessionFile(state, '')
+    }
+    return currentSessionFile
   }
 
   async function readPiSessionContextSummary(sessionFile: any) {
@@ -963,34 +976,6 @@ const rinBridge = (() => {
     return path.join(chatDir, 'pi-session')
   }
 
-  function piShadowSessionDirForChat(chatDir: string) {
-    return path.join(chatDir, 'pi-shadow-session')
-  }
-
-  function shadowRunLogPath(chatDir: string) {
-    return path.join(chatDir, 'shadow-runs.jsonl')
-  }
-
-  function mergePendingTrigger(a, b) {
-    if (!a) return b || null
-    if (!b) return a || null
-    const as = Number(a.seq || 0)
-    const bs = Number(b.seq || 0)
-    if (Number.isFinite(bs) && Number.isFinite(as) && bs !== as) {
-      const picked = bs > as ? b : a
-      return { ...picked, isMentioned: Boolean((a as any)?.isMentioned || (b as any)?.isMentioned) }
-    }
-    const at = Number(a.ts || 0)
-    const bt = Number(b.ts || 0)
-    if (Number.isFinite(bt) && Number.isFinite(at) && bt !== at) {
-      const picked = bt > at ? b : a
-      return { ...picked, isMentioned: Boolean((a as any)?.isMentioned || (b as any)?.isMentioned) }
-    }
-    const picked = b || a || null
-    if (!picked) return null
-    return { ...picked, isMentioned: Boolean((a as any)?.isMentioned || (b as any)?.isMentioned) }
-  }
-
   function cloneTurnInputItems(items: Array<any>) {
     return (Array.isArray(items) ? items : [])
       .filter(Boolean)
@@ -1009,52 +994,36 @@ const rinBridge = (() => {
     turnStatus: string
   }
 
-  const BRIDGE_AGENT_SEND_PREFIX = '#RIN_SEND'
   const BRIDGE_AGENT_INTERIM_MARKER = '··· '
   const activeProcessingTurns = new Map<string, any>()
-  const shadowTurnQueues = new Map<string, Promise<any>>()
-  let codexAppServerSupervisor: any = null
-  let codexAppServerSupervisorPromise: Promise<any> | null = null
-  let sendToChatRef: any = null
-  let isCurrentProcessingRunRef: any = null
-  let syncConcurrentStateFromDiskRef: any = null
-  let requestInterruptIfProcessingRef: any = null
 
-  function lockRootDir() {
-    const override = safeString(process.env.RIN_LOCK_DIR).trim()
-    if (override) return path.resolve(override)
-    const runtime = safeString(process.env.XDG_RUNTIME_DIR).trim()
-    if (runtime) return path.join(runtime, 'rin')
-    const cacheHome = safeString(process.env.XDG_CACHE_HOME).trim()
-    if (cacheHome) return path.join(cacheHome, 'rin')
-    try {
-      const home = os.homedir && os.homedir()
-      if (home) return path.join(home, '.cache', 'rin')
-    } catch {}
-    return path.join(os.tmpdir(), 'rin')
+  function activeProcessingTurnKey(chatKey: any, processingRunId: any) {
+    const keyChat = safeString(chatKey || '').trim()
+    const keyRun = safeString(processingRunId || '').trim()
+    if (!keyChat || !keyRun) return ''
+    return `${keyChat}::${keyRun}`
   }
 
-  function lockFilePathForKey(key) {
-    const h = nodeCrypto.createHash('sha256').update(safeString(key)).digest('hex')
-    return path.join(lockRootDir(), 'locks', `${h}.lock`)
+  function registerActiveProcessingTurn({ chatKey, processingRunId, ...rest }: any = {}) {
+    const key = activeProcessingTurnKey(chatKey, processingRunId)
+    if (!key) return
+    activeProcessingTurns.set(key, {
+      chatKey: safeString(chatKey || '').trim(),
+      processingRunId: safeString(processingRunId || '').trim(),
+      ...rest,
+    })
   }
 
-  function trimTail(text: any, limit = 128_000) {
-    const s = safeString(text)
-    if (!limit || s.length <= limit) return s
-    return s.slice(-limit)
+  function clearActiveProcessingTurn({ chatKey, processingRunId }: any = {}) {
+    const key = activeProcessingTurnKey(chatKey, processingRunId)
+    if (!key) return
+    activeProcessingTurns.delete(key)
   }
 
-  function extractBridgeSendText(value: any) {
-    const raw = safeString(value || '')
-    if (!raw) return ''
-    const normalized = raw.replace(/^\uFEFF/, '')
-    if (!normalized.startsWith(BRIDGE_AGENT_SEND_PREFIX)) return ''
-    let rest = normalized.slice(BRIDGE_AGENT_SEND_PREFIX.length)
-    if (rest.startsWith('\r\n')) rest = rest.slice(2)
-    else if (rest.startsWith('\n')) rest = rest.slice(1)
-    else if (rest.startsWith(' ')) rest = rest.slice(1)
-    return rest.replace(/^\s+/, '')
+  function getActiveProcessingTurn({ chatKey, processingRunId }: any = {}) {
+    const key = activeProcessingTurnKey(chatKey, processingRunId)
+    if (!key) return null
+    return activeProcessingTurns.get(key) || null
   }
 
   function normalizeBridgePayloadKey(value: any) {
@@ -1068,777 +1037,18 @@ const rinBridge = (() => {
     return prefix ? `${prefix}${text}` : text
   }
 
-  function candidateOutboundTextKeys(value: any, platform = '') {
-    const raw = safeString(value || '')
-    const out = new Set<string>()
-    const key = normalizeBridgePayloadKey(raw)
-    if (key) out.add(key)
-    return out
-  }
-
-  function outboundHasText(records: Array<any>, value: any) {
-    const items = Array.isArray(records) ? records : []
-    return items.some((item) => {
-      const logged = normalizeBridgePayloadKey(item && item.text)
-      if (!logged) return false
-      const platform = safeString(item && item.platform || '')
-      return candidateOutboundTextKeys(value, platform).has(logged)
-    })
-  }
-
-  function normalizeFinalAgentMessage(value: any) {
-    const raw = safeString(value || '')
-    const trimmed = raw.trim()
-    const normalized = raw.replace(/^\uFEFF/, '')
-    const prefixedSend = normalized.startsWith(BRIDGE_AGENT_SEND_PREFIX)
-    const sent = extractBridgeSendText(raw)
-    if (prefixedSend) {
-      return sent
-        ? { kind: 'reply', raw: trimmed, text: sent }
-        : { kind: 'empty', raw: trimmed, text: '' }
-    }
-    if (!trimmed) return { kind: 'empty', raw: '', text: '' }
-    if (trimmed === 'OK') return { kind: 'ok', raw: trimmed, text: '' }
-    return { kind: 'reply', raw: trimmed, text: trimmed }
-  }
-
-  function evaluateTurnCompletion(value: any, outbound: Array<any>, {
-    allowContinue = true,
-    allowLegacyOk = false,
-    allowReplyWithoutDelivery = false,
-  } = {}) {
-    const normalized = normalizeFinalAgentMessage(value)
-    const hasOutbound = Array.isArray(outbound) && outbound.length > 0
-    const sentFinalReply = normalized.kind === 'reply' ? outboundHasText(outbound, normalized.text) : false
-    if (normalized.kind === 'reply') {
-      const acceptedReply = sentFinalReply || (!hasOutbound && allowReplyWithoutDelivery)
-      return { normalized, hasOutbound, sentFinalReply, kind: acceptedReply ? 'ok' : 'protocol_violation' }
-    }
-    if (normalized.kind === 'ok') {
-      return { normalized, hasOutbound, sentFinalReply, kind: allowLegacyOk && hasOutbound ? 'ok' : 'protocol_violation' }
-    }
-    return { normalized, hasOutbound, sentFinalReply, kind: 'protocol_violation' }
-  }
-
-  function activeProcessingTurnKey(chatKey: any, processingRunId: any) {
-    return `${safeString(chatKey || '')}@@${safeString(processingRunId || '')}`
-  }
-
-  function registerActiveProcessingTurn({ chatKey, processingRunId, runtime = 'codex', threadId, turnId, abort = null }: any) {
-    const key = activeProcessingTurnKey(chatKey, processingRunId)
-    if (!key || key === '@@') return
-    activeProcessingTurns.set(key, {
-      chatKey: safeString(chatKey || ''),
-      processingRunId: safeString(processingRunId || ''),
-      runtime: normalizeRuntimeKind(runtime),
-      threadId: safeString(threadId || ''),
-      turnId: safeString(turnId || ''),
-      abort: typeof abort === 'function' ? abort : null,
-    })
-  }
-
-  function clearActiveProcessingTurn({ chatKey, processingRunId }: any) {
-    const key = activeProcessingTurnKey(chatKey, processingRunId)
-    if (!key || key === '@@') return
-    activeProcessingTurns.delete(key)
-  }
-
-  function getActiveProcessingTurn({ chatKey, processingRunId }: any) {
-    const key = activeProcessingTurnKey(chatKey, processingRunId)
-    if (!key || key === '@@') return null
-    return activeProcessingTurns.get(key) || null
-  }
-
-  function currentCodexAppServerPid() {
-    const pid = Number(codexAppServerSupervisor && codexAppServerSupervisor.child && codexAppServerSupervisor.child.pid)
-    return Number.isFinite(pid) && pid > 0 ? pid : 0
-  }
-
-  function createCodexAppServerSupervisor(repoRoot: string, workspaceRoot: string) {
-    const supervisor: any = {
-      child: null,
-      lineBuf: '',
-      pending: new Map<number, { resolve: (value: any) => void, reject: (error: any) => void }>(),
-      rpcId: 1,
-      initialized: false,
-      closed: false,
-      stderrTail: '',
-      turnsByTurnId: new Map<string, any>(),
-      turnsByThreadId: new Map<string, any>(),
-    }
-
-    const clearTurnTimeout = (turn: any) => {
-      if (turn && turn.timeoutTimer) {
-        try { clearTimeout(turn.timeoutTimer) } catch {}
-        turn.timeoutTimer = null
-      }
-    }
-
-    const armTurnTimeout = (turn: any) => {
-      if (!turn || turn.completed || turn.killedByTimeout) return
-      const timeoutMs = Number(turn.timeoutMs || 0)
-      if (!(timeoutMs > 0)) return
-      clearTurnTimeout(turn)
-      turn.timeoutTimer = setTimeout(() => {
-        turn.killedByTimeout = true
-        clearTurnTimeout(turn)
-        void supervisor.interruptTurn({ threadId: turn.threadId, turnId: turn.turnId })
-        turn.forceStopTimer = setTimeout(() => {
-          if (turn.completed) return
-          turn.stderr = trimTail(`${safeString(turn.stderr || '')}${turn.stderr ? '\n' : ''}turn_timeout`, 32_000)
-          supervisor.forceRestart('turn_timeout')
-        }, 10_000)
-      }, timeoutMs)
-    }
-
-    const refreshTurnTimeout = (turn: any) => {
-      if (!turn || turn.completed || turn.killedByTimeout) return
-      turn.lastActivityAt = Date.now()
-      armTurnTimeout(turn)
-    }
-
-    const removeTurn = (turn: any) => {
-      const threadId = safeString(turn && turn.threadId || '')
-      const turnId = safeString(turn && turn.turnId || '')
-      if (turnId) supervisor.turnsByTurnId.delete(turnId)
-      if (threadId && supervisor.turnsByThreadId.get(threadId) === turn) supervisor.turnsByThreadId.delete(threadId)
-      clearTurnTimeout(turn)
-      if (turn && turn.forceStopTimer) {
-        try { clearTimeout(turn.forceStopTimer) } catch {}
-        turn.forceStopTimer = null
-      }
-      if (turn && turn.runtimeTracking) {
-        clearActiveProcessingTurn({
-          chatKey: turn.runtimeTracking.chatKey,
-          processingRunId: turn.runtimeTracking.processingRunId,
-        })
-      }
-    }
-
-    const finishTurn = (turn: any, code: any) => {
-      if (!turn || turn.completed) return
-      if (Number(code) === 0) queueBridgeFinalReply(turn)
-      turn.completed = true
-      removeTurn(turn)
-      void Promise.resolve(turn.sendQueue || Promise.resolve())
-        .catch(() => {})
-        .then(() => {
-          try {
-            turn.resolve({
-              code: code == null ? 1 : code,
-              stdout: safeString(turn.stdout || ''),
-              stderr: safeString(turn.stderr || ''),
-              lastMessage: safeString(turn.lastMessage || ''),
-              killedByTimeout: Boolean(turn.killedByTimeout),
-              threadId: safeString(turn.threadId || ''),
-              turnStarted: Boolean(turn.turnStarted),
-              turnStatus: safeString(turn.turnStatus || ''),
-            })
-          } catch {}
-        })
-    }
-
-    const failTurn = (turn: any, error: any, code = 1) => {
-      if (!turn || turn.completed) return
-      const msg = safeString(error && error.message ? error.message : error || '')
-      if (msg) turn.stderr = trimTail(`${safeString(turn.stderr || '')}${turn.stderr ? '\n' : ''}${msg}`, 32_000)
-      if (!safeString(turn.stderr || '').trim() && supervisor.stderrTail) {
-        turn.stderr = trimTail(supervisor.stderrTail, 32_000)
-      }
-      finishTurn(turn, code)
-    }
-
-    const captureLastMessage = (turn: any, value: any, phase = '') => {
-      if (!turn) return
-      const text = safeString(value)
-      if (!text.trim()) return
-      const normalizedPhase = safeString(phase).trim().toLowerCase()
-      if (normalizedPhase === 'final_answer') {
-        turn.lastMessage = text
-        return
-      }
-      if (!safeString(turn.lastMessage || '').trim()) turn.lastMessage = text
-    }
-
-    const enqueueBridgeText = (turn: any, payload: any, { itemId = '', dedupeByPayload = false, interim = false, viaOverride = '' }: any = {}) => {
-      if (!turn || !turn.bridgeSend) return false
-      const rawPayload = safeString(payload || '')
-      if (!rawPayload) return false
-      const textPayload = interim
-        ? formatBridgeInterimText(rawPayload, safeString(turn.bridgeSend.interimMarker || '') || BRIDGE_AGENT_INTERIM_MARKER)
-        : rawPayload
-      if (!textPayload) return false
-      const id = safeString(itemId || '')
-      if (id) {
-        if (!turn.sentBridgeItemIds) turn.sentBridgeItemIds = new Set()
-        if (turn.sentBridgeItemIds.has(id)) return false
-        turn.sentBridgeItemIds.add(id)
-      }
-      const chatKey = safeString(turn.bridgeSend.chatKey || '')
-      if (!chatKey) return false
-      const parsed = parseChatKey(chatKey)
-      if (!parsed) return false
-      const replyToMessageId = safeString(turn.bridgeSend.replyToMessageId || '')
-      const via = safeString(viaOverride || turn.bridgeSend.via || 'agent-prefix')
-      const payloadKey = normalizeBridgePayloadKey(textPayload)
-      if (dedupeByPayload && payloadKey) {
-        if (!turn.sentBridgePayloadKeys) turn.sentBridgePayloadKeys = new Set()
-        if (turn.sentBridgePayloadKeys.has(payloadKey)) return false
-      }
-      if (payloadKey) {
-        if (!turn.sentBridgePayloadKeys) turn.sentBridgePayloadKeys = new Set()
-        turn.sentBridgePayloadKeys.add(payloadKey)
-      }
-      turn.sendQueue = Promise.resolve(turn.sendQueue || Promise.resolve())
-        .catch(() => {})
-        .then(async () => {
-          await sendToChatRef({
-            chatKey,
-            parsed,
-            text: textPayload,
-            elements: [],
-            images: [],
-            files: [],
-            via,
-            replyToMessageId,
-          })
-        })
-        .catch((e: any) => {
-          logger.warn(`agent prefix send failed chatKey=${chatKey} err=${safeString(e && e.message ? e.message : e)}`)
-        })
-      return true
-    }
-
-    const queueBridgeSend = (turn: any, value: any, itemId = '') => {
-      const payload = extractBridgeSendText(value)
-      if (!payload) return
-      enqueueBridgeText(turn, payload, { itemId, dedupeByPayload: false, interim: true })
-    }
-
-    const queueBridgeFinalReply = (turn: any) => {
-      if (!turn || turn.finalBridgeReplyQueued) return
-      turn.finalBridgeReplyQueued = true
-      const normalized = normalizeFinalAgentMessage(turn.lastMessage)
-      if (normalized.kind !== 'reply') return
-      enqueueBridgeText(turn, normalized.text, { dedupeByPayload: true })
-    }
-
-    const resolvePending = (obj: any) => {
-      const pendingEntry = supervisor.pending.get(obj.id)
-      if (!pendingEntry) return false
-      supervisor.pending.delete(obj.id)
-      if (obj.error) {
-        const message = safeString(obj.error && obj.error.message || 'rpc_error')
-        pendingEntry.reject(new Error(message))
-      } else {
-        pendingEntry.resolve(obj.result)
-      }
-      return true
-    }
-
-    const findTurnForParams = (params: any) => {
-      const turnIds = [
-        params && params.turnId,
-        params && params.turn && params.turn.id,
-        params && params.turn && params.turn.turnId,
-        params && params.msg && params.msg.turn_id,
-        params && params.id,
-      ]
-      for (const rawId of turnIds) {
-        const id = safeString(rawId || '')
-        if (!id) continue
-        const turn = supervisor.turnsByTurnId.get(id)
-        if (turn) return turn
-      }
-      const threadIds = [
-        params && params.threadId,
-        params && params.thread && params.thread.id,
-        params && params.thread && params.thread.threadId,
-        params && params.msg && params.msg.thread_id,
-        params && params.conversationId,
-      ]
-      for (const rawId of threadIds) {
-        const id = safeString(rawId || '')
-        if (!id) continue
-        const turn = supervisor.turnsByThreadId.get(id)
-        if (turn) return turn
-      }
-      return null
-    }
-
-    const handleRpcLine = (line: string) => {
-      const raw = safeString(line)
-      const t = raw.trim()
-      if (!t) return
-
-      let obj: any = null
-      try { obj = JSON.parse(t) } catch { return }
-
-      if (obj && typeof obj.id === 'number' && Object.prototype.hasOwnProperty.call(obj, 'method')) {
-        try {
-          supervisor.child.stdin.write(JSON.stringify({
-            jsonrpc: '2.0',
-            id: obj.id,
-            error: {
-              code: -32601,
-              message: `unsupported_server_request:${safeString(obj.method || '')}`,
-            },
-          }) + '\n')
-        } catch {}
-        return
-      }
-
-      if (obj && typeof obj.id === 'number' && (Object.prototype.hasOwnProperty.call(obj, 'result') || Object.prototype.hasOwnProperty.call(obj, 'error'))) {
-        resolvePending(obj)
-        return
-      }
-
-      const method = safeString(obj && obj.method || '')
-      const params = obj && typeof obj.params === 'object' ? obj.params : {}
-      const turn = findTurnForParams(params)
-      if (turn) turn.stdout = trimTail(`${safeString(turn.stdout || '')}${raw}\n`, 256_000)
-      if (turn) refreshTurnTimeout(turn)
-
-      if (method === 'item/started') {
-        const item = params && typeof params.item === 'object' ? params.item : null
-        if (turn && item && safeString(item.type).toLowerCase() === 'agentmessage') {
-          const itemId = safeString(item.id || '')
-          if (itemId) {
-            turn.agentMessageTexts.set(itemId, safeString(item.text || ''))
-            turn.agentMessagePhases.set(itemId, safeString(item.phase || ''))
-          }
-        }
-        return
-      }
-
-      if (method === 'item/agentMessage/delta') {
-        if (!turn) return
-        const itemId = safeString(params && params.itemId || '')
-        if (!itemId) return
-        const next = safeString(turn.agentMessageTexts.get(itemId) || '') + safeString(params && params.delta || '')
-        turn.agentMessageTexts.set(itemId, next)
-        return
-      }
-
-      if (method === 'item/completed') {
-        const item = params && typeof params.item === 'object' ? params.item : null
-        if (turn && item && safeString(item.type).toLowerCase() === 'agentmessage') {
-          const itemId = safeString(item.id || '')
-          const phase = safeString(item.phase || turn.agentMessagePhases.get(itemId) || '')
-          const text = safeString(item.text || turn.agentMessageTexts.get(itemId) || '')
-          queueBridgeSend(turn, text, itemId)
-          captureLastMessage(turn, text, phase)
-        }
-        return
-      }
-
-      if (method === 'codex/event/agent_message') {
-        if (!turn) return
-        const msg = params && params.msg && typeof params.msg === 'object' ? params.msg : {}
-        captureLastMessage(turn, msg.message, msg.phase)
-        return
-      }
-
-      if (method === 'codex/event/task_complete') {
-        if (!turn) return
-        const msg = params && params.msg && typeof params.msg === 'object' ? params.msg : {}
-        captureLastMessage(turn, msg.last_agent_message, 'final_answer')
-        return
-      }
-
-      if (method === 'turn/started') {
-        if (!turn) return
-        const turnObj = params && typeof params.turn === 'object' ? params.turn : null
-        const turnId = safeString(turnObj && (turnObj.id || turnObj.turnId) || '')
-        turn.turnStarted = true
-        if (turnId) {
-          turn.turnId = turnId
-          supervisor.turnsByTurnId.set(turnId, turn)
-          if (turn.runtimeTracking) {
-            registerActiveProcessingTurn({
-              chatKey: turn.runtimeTracking.chatKey,
-              processingRunId: turn.runtimeTracking.processingRunId,
-              runtime: 'codex',
-              threadId: turn.threadId,
-              turnId,
-            })
-          }
-          if (turn.autoInterruptOnTurnStart && !turn.autoInterruptIssued) {
-            turn.autoInterruptIssued = true
-            void supervisor.interruptTurn({ threadId: turn.threadId, turnId })
-          }
-        }
-        return
-      }
-
-      if (method === 'turn/completed') {
-        if (!turn) return
-        const turnObj = params && typeof params.turn === 'object' ? params.turn : null
-        const turnError = turnObj && turnObj.error
-        if (turnError) {
-          const msg = safeString(turnError && turnError.message ? turnError.message : JSON.stringify(turnError))
-          if (msg) turn.stderr = trimTail(`${safeString(turn.stderr || '')}${turn.stderr ? '\n' : ''}${msg}`, 32_000)
-        }
-        const status = safeString(turnObj && turnObj.status || '')
-        turn.turnStatus = status
-        const interruptedAsSuccess = Boolean(turn.allowInterruptedSuccess && turn.autoInterruptIssued && status === 'interrupted' && !turnError)
-        const code = turn.killedByTimeout
-          ? 124
-          : (turnError || (status && status !== 'completed' && !interruptedAsSuccess))
-            ? 1
-            : 0
-        finishTurn(turn, code)
-      }
-    }
-
-    supervisor.sendRequest = (method: string, params: any) => {
-      if (supervisor.closed || !supervisor.child) return Promise.reject(new Error('app_server_unavailable'))
-      const id = supervisor.rpcId++
-      return awaitableRequest(id, method, params)
-    }
-
-    const awaitableRequest = (id: number, method: string, params: any) => {
-      return new Promise<any>((resolveReq, rejectReq) => {
-        supervisor.pending.set(id, { resolve: resolveReq, reject: rejectReq })
-        try {
-          supervisor.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
-        } catch (e) {
-          supervisor.pending.delete(id)
-          rejectReq(e)
-        }
-      })
-    }
-
-    supervisor.interruptTurn = async ({ threadId, turnId }: any) => {
-      const nextThreadId = safeString(threadId || '')
-      const nextTurnId = safeString(turnId || '')
-      if (!nextThreadId || !nextTurnId) return
-      try {
-        await supervisor.sendRequest('turn/interrupt', { threadId: nextThreadId, turnId: nextTurnId })
-      } catch (e) {
-        logger.warn(`turn interrupt failed thread=${nextThreadId} turn=${nextTurnId} err=${safeString(e && (e as any).message ? (e as any).message : e)}`)
-      }
-    }
-
-    supervisor.forceRestart = (reason = '') => {
-      if (!supervisor.child) return
-      logger.warn(`restarting codex app-server reason=${safeString(reason || 'unknown')}`)
-      try { supervisor.child.kill('SIGTERM') } catch {}
-      setTimeout(() => { try { supervisor.child.kill('SIGKILL') } catch {} }, 2000)
-    }
-
-    supervisor.start = async () => {
-      if (supervisor.child && !supervisor.closed) return supervisor
-      const child = spawn('codex', ['app-server'], {
-        cwd: repoRoot,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          RIN_REPO_ROOT: repoRoot,
-          PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
-        },
-      })
-      supervisor.child = child
-      supervisor.closed = false
-      supervisor.stderrTail = ''
-      supervisor.lineBuf = ''
-      supervisor.rpcId = 1
-      supervisor.pending = new Map()
-      supervisor.turnsByTurnId = new Map()
-      supervisor.turnsByThreadId = new Map()
-
-      child.stdout.on('data', (d) => {
-        const s = d.toString()
-        supervisor.lineBuf += s
-        while (true) {
-          const idx = supervisor.lineBuf.indexOf('\n')
-          if (idx < 0) break
-          const line = supervisor.lineBuf.slice(0, idx)
-          supervisor.lineBuf = supervisor.lineBuf.slice(idx + 1)
-          handleRpcLine(line)
-        }
-      })
-      child.stderr.on('data', (d) => {
-        supervisor.stderrTail = trimTail(`${supervisor.stderrTail}${d.toString()}`, 32_000)
-      })
-      child.on('error', (e) => {
-        supervisor.stderrTail = trimTail(`${supervisor.stderrTail}${supervisor.stderrTail ? '\n' : ''}spawn_error:${safeString(e && (e as any).message ? (e as any).message : e)}`, 32_000)
-      })
-      child.on('close', (code, signal) => {
-        if (supervisor.lineBuf) handleRpcLine(supervisor.lineBuf)
-        supervisor.lineBuf = ''
-        supervisor.closed = true
-        const message = signal
-          ? `app_server_signal:${signal}`
-          : `app_server_closed:${String(code == null ? 1 : code)}`
-        for (const [, pendingEntry] of supervisor.pending) {
-          try { pendingEntry.reject(new Error(message)) } catch {}
-        }
-        supervisor.pending.clear()
-        const activeTurns = Array.from(supervisor.turnsByTurnId.values()) as any[]
-        const provisionalTurns = Array.from(supervisor.turnsByThreadId.values()).filter((turn: any) => !safeString(turn && turn.turnId || '')) as any[]
-        const turns = [...activeTurns, ...provisionalTurns] as any[]
-        for (const turn of turns) failTurn(turn, message, turn && turn.killedByTimeout ? 124 : 1)
-        supervisor.turnsByTurnId.clear()
-        supervisor.turnsByThreadId.clear()
-        if (codexAppServerSupervisor === supervisor) codexAppServerSupervisor = null
-      })
-
-      await supervisor.sendRequest('initialize', {
-        protocolVersion: 1,
-        clientInfo: {
-          name: 'rin',
-          version: '1.0.0',
-        },
-      })
-      supervisor.initialized = true
-      return supervisor
-    }
-
-    supervisor.runTurn = async ({
-      prompt,
-      inputItems = null,
-      resumeThreadId,
-      timeoutMs = 0,
-      images = [],
-      bridgeSend = null,
-      runtimeTracking = null,
-      turnBehavior = null,
-      threadConfig = null,
-    }: any): Promise<CodexTurnResult> => {
-      const rt = runtimeTracking && typeof runtimeTracking === 'object' ? runtimeTracking : null
-      const behavior = turnBehavior && typeof turnBehavior === 'object' ? turnBehavior : {}
-      const nextThreadConfig = threadConfig && typeof threadConfig === 'object' ? threadConfig : {}
-      const primeRuntimeState = () => {
-        if (!rt) return
-        if (!isCurrentProcessingRunRef || !isCurrentProcessingRunRef(rt.state, rt.processingRunId)) throw new Error('stale_processing_run')
-        rt.state.processingPid = supervisor.child && supervisor.child.pid ? supervisor.child.pid : 0
-        if (syncConcurrentStateFromDiskRef) {
-          syncConcurrentStateFromDiskRef({ chatDir: rt.chatDir, state: rt.state, observedToSeq: rt.observedToSeq })
-        }
-        rt.saveState()
-      }
-
-      primeRuntimeState()
-
-      let threadResult = null as any
-      if (resumeThreadId) {
-        try {
-          threadResult = await supervisor.sendRequest('thread/resume', {
-            threadId: resumeThreadId,
-            cwd: repoRoot,
-            sandbox: 'danger-full-access',
-            approvalPolicy: 'never',
-            ...nextThreadConfig,
-          })
-        } catch (e) {
-          logger.warn(`thread resume failed thread=${safeString(resumeThreadId)} err=${safeString(e && (e as any).message ? (e as any).message : e)}; starting fresh thread`)
-        }
-      }
-      if (!threadResult) {
-        threadResult = await supervisor.sendRequest('thread/start', {
-          cwd: repoRoot,
-          sandbox: 'danger-full-access',
-          approvalPolicy: 'never',
-          ...nextThreadConfig,
-        })
-      }
-
-      const threadId = safeString(
-        threadResult
-        && threadResult.thread
-        && (threadResult.thread.id || threadResult.thread.threadId),
-      )
-
-      const turn: any = {
-        threadId,
-        turnId: '',
-        stdout: '',
-        stderr: '',
-        lastMessage: '',
-        killedByTimeout: false,
-        turnStarted: false,
-        turnStatus: '',
-        completed: false,
-        resolve: (_value: CodexTurnResult) => {},
-        bridgeSend: bridgeSend && typeof bridgeSend === 'object' ? bridgeSend : null,
-        runtimeTracking: rt,
-        agentMessageTexts: new Map(),
-        agentMessagePhases: new Map(),
-        sentBridgeItemIds: new Set(),
-        sentBridgePayloadKeys: new Set(),
-        finalBridgeReplyQueued: false,
-        timeoutMs: Number(timeoutMs || 0),
-        timeoutTimer: null,
-        forceStopTimer: null,
-        lastActivityAt: Date.now(),
-        sendQueue: Promise.resolve(),
-        autoInterruptOnTurnStart: Boolean(behavior.autoInterruptOnTurnStart),
-        autoInterruptIssued: false,
-        allowInterruptedSuccess: Boolean(behavior.allowInterruptedSuccess),
-      }
-      if (threadId) supervisor.turnsByThreadId.set(threadId, turn)
-
-      const input = Array.isArray(inputItems) && inputItems.length
-        ? inputItems
-        : [
-            { type: 'text', text: prompt },
-            ...((Array.isArray(images) ? images : [])
-              .map((filePath) => safeString(filePath).trim())
-              .filter(Boolean)
-              .map((filePath) => ({ type: 'localImage', path: filePath }))),
-          ]
-
-      const resultPromise = new Promise<CodexTurnResult>((resolveTurn) => {
-        turn.resolve = resolveTurn
-      })
-
-      armTurnTimeout(turn)
-
-      try {
-        const turnResult = await supervisor.sendRequest('turn/start', {
-          threadId,
-          input,
-          cwd: repoRoot,
-          approvalPolicy: 'never',
-        })
-        turn.turnId = safeString(
-          turnResult
-          && turnResult.turn
-          && (turnResult.turn.id || turnResult.turn.turnId),
-        )
-        if (turn.turnId) supervisor.turnsByTurnId.set(turn.turnId, turn)
-        if (rt) {
-          registerActiveProcessingTurn({
-            chatKey: rt.chatKey,
-            processingRunId: rt.processingRunId,
-            runtime: 'codex',
-            threadId,
-            turnId: turn.turnId,
-          })
-          try {
-            rt.state.processingThreadId = threadId
-            rt.state.processingTurnId = turn.turnId
-          } catch {}
-          primeRuntimeState()
-          if ((rt.allowInterrupt ?? true) && rt.state.interruptRequested && requestInterruptIfProcessingRef) {
-            void requestInterruptIfProcessingRef({
-              chatKey: rt.chatKey,
-              chatDir: rt.chatDir,
-              state: rt.state,
-              saveState: rt.saveState,
-              reason: 'interrupt_pending_on_turn_start',
-            })
-          }
-        }
-      } catch (e) {
-        failTurn(turn, e, 1)
-      }
-
-      return await resultPromise
-    }
-
-    return supervisor
-  }
-
-  async function ensureCodexAppServerSupervisor(repoRoot: string, workspaceRoot: string) {
-    if (codexAppServerSupervisor && !codexAppServerSupervisor.closed && codexAppServerSupervisor.child) return codexAppServerSupervisor
-    if (codexAppServerSupervisorPromise) return await codexAppServerSupervisorPromise
-    const supervisor = createCodexAppServerSupervisor(repoRoot, workspaceRoot)
-    codexAppServerSupervisor = supervisor
-    codexAppServerSupervisorPromise = supervisor.start()
-      .then(() => supervisor)
-      .catch((error: any) => {
-        if (codexAppServerSupervisor === supervisor) codexAppServerSupervisor = null
-        throw error
-      })
-      .finally(() => {
-        codexAppServerSupervisorPromise = null
-      })
-    return await codexAppServerSupervisorPromise
-  }
-
-  async function runCodexAppServerTurn({
-    repoRoot,
-    workspaceRoot,
-    prompt,
-    inputItems = null,
-    resumeThreadId,
-    timeoutMs = 0,
-    onSpawn = null,
-    images = [],
-    lockKey = '',
-    threadInitLockKey = 'thread-init',
-    envPatch = null,
-    configOverrides = [],
-    bridgeSend = null,
-    runtimeTracking = null,
-    turnBehavior = null,
-    threadConfig = null,
-  }: any): Promise<CodexTurnResult> {
-    const threadInitLockPath = (!resumeThreadId && threadInitLockKey)
-      ? lockFilePathForKey(`codex:${safeString(threadInitLockKey)}`)
-      : ''
-    let threadInitLockReleased = false
-    const releaseThreadInitLock = threadInitLockPath
-      ? await acquireExclusiveFileLock(threadInitLockPath, {
-        pollMs: 120,
-        heartbeatMs: 10_000,
-        staleMs: 10 * 60 * 1000,
-        meta: { cmd: 'codex', lockKey: 'thread-init' },
-      })
-      : null
-    const safeReleaseThreadInitLock = () => {
-      if (!releaseThreadInitLock || threadInitLockReleased) return
-      threadInitLockReleased = true
-      try { releaseThreadInitLock() } catch {}
-    }
-    const lockPath = lockKey ? lockFilePathForKey(`codex:${safeString(lockKey)}`) : ''
-    const releaseLock = lockPath
-      ? await acquireExclusiveFileLock(lockPath, {
-        pollMs: 120,
-        heartbeatMs: 10_000,
-        staleMs: 10 * 60 * 1000,
-        meta: { cmd: 'codex', lockKey: safeString(lockKey) },
-      })
-      : null
-
-    try {
-      if (envPatch && Object.keys(envPatch).length) {
-        logger.warn('persistent app-server ignores per-turn envPatch; configure behavior in prompt/runtime instead')
-      }
-      if (Array.isArray(configOverrides) && configOverrides.some((entry) => safeString(entry).trim())) {
-        logger.warn('persistent app-server ignores per-turn configOverrides; configure behavior in prompt/runtime instead')
-      }
-      const supervisor = await ensureCodexAppServerSupervisor(repoRoot, workspaceRoot)
-      if (typeof onSpawn === 'function') {
-        try { onSpawn(supervisor.child) } catch {}
-      }
-      const result = await supervisor.runTurn({
-        prompt,
-        inputItems,
-        resumeThreadId,
-        timeoutMs,
-        images,
-        bridgeSend,
-        runtimeTracking,
-        turnBehavior,
-        threadConfig,
-      })
-      if (!resumeThreadId && result && safeString(result.threadId || '')) safeReleaseThreadInitLock()
-      return result
-    } finally {
-      safeReleaseThreadInitLock()
-      try { if (typeof releaseLock === 'function') releaseLock() } catch {}
-    }
+  function normalizeBridgeAssistantText(value: any) {
+    const text = safeString(value || '').trim()
+    if (!text) return { kind: 'empty', text: '' }
+    return { kind: 'reply', text }
   }
 
   async function runPiTurn({
     rootDir = '',
     repoRoot,
     workspaceRoot,
-    piProvider = 'openai-codex',
-    piModel = 'gpt-5.3-codex',
+    piProvider = 'openai',
+    piModel = 'gpt-5.4',
     piThinking = '',
     systemPromptExtra = '',
     prompt,
@@ -1890,7 +1100,7 @@ const rinBridge = (() => {
       piTurn.pendingInterimText = ''
       piTurn.pendingInterimItemId = ''
       if (!rawText || !piTurn.bridgeSend || typeof sendToChatRef !== 'function') return
-      const normalized = normalizeFinalAgentMessage(rawText)
+      const normalized = normalizeBridgeAssistantText(rawText)
       if (normalized.kind !== 'reply' || !normalized.text) return
       const chatKey = safeString(piTurn.bridgeSend.chatKey || '')
       if (!chatKey) return
@@ -2015,34 +1225,6 @@ const rinBridge = (() => {
     return await runPiTurn(options)
   }
 
-  function reconcileCodexThreadId(state: any, resultThreadId: any, chatKey = '') {
-    const nextThreadId = safeString(resultThreadId || '').trim()
-    if (!nextThreadId) return
-    const currentThreadId = readCodexThreadId(state)
-    if (!currentThreadId) {
-      writeCodexThreadId(state, nextThreadId)
-      return
-    }
-    if (currentThreadId !== nextThreadId) {
-      logger.warn(`codex thread mismatch chatKey=${safeString(chatKey)} expected=${currentThreadId} got=${nextThreadId}`)
-      writeCodexThreadId(state, nextThreadId)
-    }
-  }
-
-  function reconcilePiSessionFile(state: any, resultSessionFile: any, chatKey = '') {
-    const nextSessionFile = safeString(resultSessionFile || '').trim()
-    if (!nextSessionFile) return
-    const currentSessionFile = readPiSessionFile(state)
-    if (!currentSessionFile) {
-      writePiSessionFile(state, nextSessionFile)
-      return
-    }
-    if (currentSessionFile !== nextSessionFile) {
-      logger.warn(`pi session mismatch chatKey=${safeString(chatKey)} expected=${currentSessionFile} got=${nextSessionFile}`)
-      writePiSessionFile(state, nextSessionFile)
-    }
-  }
-
   function yamlStringifyValue(v) {
     if (v == null) return 'null'
     if (typeof v === 'number' || typeof v === 'boolean') return String(v)
@@ -2113,8 +1295,8 @@ const rinBridge = (() => {
       limit: Math.max(1, Number((config as any)?.scheduleCommandConcurrency || 0) || 4),
       pending: [],
     }
-    const configuredPiProvider = safeString((config as any)?.provider || (config as any)?.piProvider || 'openai-codex').trim()
-    const configuredPiModel = safeString((config as any)?.model || (config as any)?.piModel || 'gpt-5.3-codex').trim()
+    const configuredPiProvider = safeString((config as any)?.provider || (config as any)?.piProvider || 'openai').trim()
+    const configuredPiModel = safeString((config as any)?.model || (config as any)?.piModel || 'gpt-5.4').trim()
     const configuredPiThinking = safeString((config as any)?.thinking || (config as any)?.piThinking || '').trim()
     const scheduleInFlight = new Set()
     let schedulesCache = null
@@ -2354,24 +1536,6 @@ const rinBridge = (() => {
 	      }
 	    }
 
-    function buildRestartResumeThreadText({ requestId = '', reason = '', startupText = '' }: any = {}) {
-      const visibleReply = safeString(startupText || localizedDaemonStatusText('startup') || '').trim() || 'Daemon is back online now.'
-      const lines = [
-        '[daemon internal restart note]',
-        'This is an internal runtime event, not a user message.',
-        'Daemon just completed a self-restart for this chat.',
-      ]
-      const nextRequestId = safeString(requestId || '').trim()
-      const nextReason = safeString(reason || '').trim()
-      if (nextRequestId) lines.push(`requestId: ${nextRequestId}`)
-      if (nextReason) lines.push(`reason: ${nextReason}`)
-      lines.push('Do not mention requestId, reason, logs, thread state, or restart internals to the user.')
-      lines.push('Please send exactly this brief plain-text message to the current chat:')
-      lines.push(visibleReply)
-      lines.push('After sending it, continue normally on later turns.')
-      return lines.join('\n')
-    }
-
     async function enqueueRestartResumeIntent({
       chatKey,
       requestId = '',
@@ -2383,7 +1547,7 @@ const rinBridge = (() => {
       const parsed = parseChatKey(nextChatKey)
       if (!parsed) return { ok: false, error: 'invalid_chatKey' }
 
-      const syntheticText = buildRestartResumeThreadText({
+      const syntheticText = buildBridgeRestartResumeThreadText({
         requestId,
         reason,
         startupText: localizedDaemonStatusText('startup'),
@@ -2430,24 +1594,22 @@ const rinBridge = (() => {
         }
         appendJsonl(path.join(chatDir, 'logs', `${isoDate(tsMs)}.jsonl`), record)
 
-        state.lastAgentInboundSeq = Number(record.seq || 0) || 0
-        state.lastAgentInboundAt = tsMs
-        state.lastAgentInboundText = syntheticText
-        state.inboundUnprocessed = Math.max(0, Number(state.inboundUnprocessed || 0) || 0) + 1
-        state.pendingWake = true
-        state.pendingTrigger = mergePendingTrigger(state.pendingTrigger, {
-          seq: Number(record.seq || 0) || 0,
-          ts: Number(record.ts || 0) || 0,
-          messageId: syntheticMessageId,
-          content: syntheticText,
-          senderUserId: '',
-          senderName: 'Daemon',
-          isMentioned: false,
-          chatType: effectiveChatType,
-          replyToMessageId: '',
-          quotedText: '',
-          quotedSenderUserId: '',
-          quotedSenderName: '',
+        applyInboundRecord({
+          state,
+          record,
+          tsMs,
+          agentVisible: true,
+        })
+        queueConversationTrigger({
+          state,
+          trigger: buildConversationTrigger({
+            record,
+            userId: '',
+            senderName: 'Daemon',
+            isMentioned: false,
+            chatType: effectiveChatType,
+          }),
+          mergePendingTrigger,
         })
         saveState()
         appended = true
@@ -3076,122 +2238,49 @@ const rinBridge = (() => {
 
 		      let state = readJson(statePath, null)
 			      if (!state) state = defaultState(chatKey)
-				      writeCodexThreadId(state, readCodexThreadId(state))
-              writePiSessionFile(state, readPiSessionFile(state))
-				      if (!state.chatKey) state.chatKey = chatKey
-              state.processingRuntime = state.processing
-                ? normalizeRuntimeKind(state.processingRuntime || 'codex')
-                : safeString(state.processingRuntime || '').trim()
-			      if (!Number.isFinite(Number(state.lastInboundSeq))) state.lastInboundSeq = Number(state.lastSeq || 0)
-			      if (typeof state.lastInboundText !== 'string') state.lastInboundText = safeString(state.lastInboundText || '')
-            if (!Number.isFinite(Number(state.lastThreadIngestedSeq))) {
-              state.lastThreadIngestedSeq = Number(state.lastProcessedSeq || 0) || 0
-            }
-            if (!Number.isFinite(Number(state.lastAgentInboundSeq))) state.lastAgentInboundSeq = 0
-            if (!Number.isFinite(Number(state.lastAgentInboundAt))) state.lastAgentInboundAt = 0
-            if (typeof state.lastAgentInboundText !== 'string') state.lastAgentInboundText = safeString(state.lastAgentInboundText || '')
-            state.lastAgentResult = normalizeLastAgentResult(state.lastAgentResult)
-            state.lastShadowResult = normalizeLastAgentResult(state.lastShadowResult)
-            state.lastResetResult = normalizeLastAgentResult(state.lastResetResult)
-            if (!Number.isFinite(Number(state.inboundUnprocessed))) state.inboundUnprocessed = 0
-			      try {
-			        const lastProcessableInbound = Number(state.lastAgentInboundSeq || 0)
-			        const lastProcessed = Number(state.lastProcessedSeq || 0)
-			        const unprocessedInbound = Math.max(0, lastProcessableInbound - lastProcessed)
-              if (Number(state.inboundUnprocessed || 0) > unprocessedInbound) state.inboundUnprocessed = unprocessedInbound
-			      } catch {}
-	      if (state.processing && !state.processingPid) {
-          const active = getActiveProcessingTurn({ chatKey, processingRunId: state.processingRunId })
-          const activeRuntime = normalizeRuntimeKind(
-            (active && active.runtime)
-            || state.processingRuntime
-            || primaryRuntimeForChat(chatKey),
-          )
-          const keepInProcessPi = Boolean(active && activeRuntime === 'pi')
-	        const startedAt = Number(state.processingStartedAt || 0)
-	        if (!keepInProcessPi && (!startedAt || nowMs() - startedAt > 5 * 60 * 1000)) {
-	          state.processing = false
-            state.processingRuntime = ''
-	          state.processingThreadId = ''
-          state.processingTurnId = ''
-          state.processingStartedAt = 0
-        }
-      }
-      if (state.processing && state.processingPid) {
+      const active = getActiveProcessingTurn({ chatKey, processingRunId: state && state.processingRunId })
+      const activeRuntime = normalizeRuntimeKind(
+        (active && active.runtime)
+        || (state && state.processingRuntime)
+        || primaryRuntimeForChat(chatKey),
+      )
+      let hasLiveProcessingPid = false
+      if (state && state.processing && state.processingPid) {
         try {
           process.kill(Number(state.processingPid), 0)
-	        } catch (e) {
-		          if (e && e.code === 'ESRCH') {
-		            state.processing = false
-                state.processingRuntime = ''
-		            state.processingPid = 0
-              state.processingThreadId = ''
-              state.processingTurnId = ''
-	            state.processingStartedAt = 0
-	          }
-	        }
-	      }
+          hasLiveProcessingPid = true
+        } catch (e) {
+          if (!e || e.code !== 'ESRCH') throw e
+        }
+      }
+      state = normalizeConversationState({
+        state,
+        chatKey,
+        normalizeRuntimeKind,
+        normalizeLastAgentResult,
+        readLegacyThreadHandle,
+        writeLegacyThreadHandle,
+        readPiSessionFile,
+        writePiSessionFile,
+        processingActive: Boolean(active),
+        processingRuntime: activeRuntime,
+        nowMs: nowMs(),
+        hasLiveProcessingPid,
+      })
 
 	        const saveState = () => {
 		        const disk = readJson(statePath, null) || defaultState(chatKey)
-		        const merged = { ...disk, ...state }
-		        merged.chatKey = state.chatKey || disk.chatKey || chatKey
-	        writeCodexThreadId(merged, readCodexThreadId(state))
-          writePiSessionFile(merged, readPiSessionFile(state))
-		        merged.lastSeq = Math.max(Number(disk.lastSeq || 0), Number(state.lastSeq || 0))
-	        merged.lastProcessedSeq = Math.max(Number(disk.lastProcessedSeq || 0), Number(state.lastProcessedSeq || 0))
-        merged.lastThreadIngestedSeq = Math.max(Number(disk.lastThreadIngestedSeq || 0), Number(state.lastThreadIngestedSeq || 0))
-	        merged.lastInboundSeq = Math.max(Number(disk.lastInboundSeq || 0), Number(state.lastInboundSeq || 0))
-        merged.batchEndSeq = Math.max(Number(disk.batchEndSeq || 0), Number(state.batchEndSeq || 0))
-        // Reset boundary must be monotonic; also avoid stale writers resurrecting pre-reset state.
-        const diskResetAtMs = Number(disk.lastResetAtMs || 0)
-        const stateResetAtMs = Number(state.lastResetAtMs || 0)
-        merged.lastResetAtMs = Math.max(diskResetAtMs, stateResetAtMs)
-        merged.lastResetSeq = Math.max(Number(disk.lastResetSeq || 0), Number(state.lastResetSeq || 0))
-        try {
-          const diskProcessed = Number(disk.lastProcessedSeq || 0)
-          const nextProcessed = Math.max(Number(disk.lastProcessedSeq || 0), Number(state.lastProcessedSeq || 0))
-          const diskInbound = Number(disk.inboundUnprocessed || 0)
-          const stateInbound = Number(state.inboundUnprocessed || 0)
-          merged.inboundUnprocessed = nextProcessed > diskProcessed ? Math.max(0, stateInbound) : Math.max(0, Math.max(diskInbound, stateInbound))
-        } catch {}
-        merged.pendingWake = Boolean(state.pendingWake)
-        merged.pendingTrigger = state.pendingTrigger == null ? null : mergePendingTrigger(disk.pendingTrigger, state.pendingTrigger)
-        merged.replyToMessageId = state.replyToMessageId == null ? (disk.replyToMessageId || '') : state.replyToMessageId
-        merged.forceContinue = Boolean(state.forceContinue)
-        const diskAgentInboundSeq = Math.max(0, Number(disk.lastAgentInboundSeq || 0) || 0)
-        const stateAgentInboundSeq = Math.max(0, Number(state.lastAgentInboundSeq || 0) || 0)
-        const diskAgentInboundAt = Math.max(0, Number(disk.lastAgentInboundAt || 0) || 0)
-        const stateAgentInboundAt = Math.max(0, Number(state.lastAgentInboundAt || 0) || 0)
-        if (stateAgentInboundSeq > diskAgentInboundSeq || (stateAgentInboundSeq === diskAgentInboundSeq && stateAgentInboundAt >= diskAgentInboundAt)) {
-          merged.lastAgentInboundSeq = stateAgentInboundSeq
-          merged.lastAgentInboundAt = stateAgentInboundAt
-          merged.lastAgentInboundText = safeString(state.lastAgentInboundText || '')
-        } else {
-          merged.lastAgentInboundSeq = diskAgentInboundSeq
-          merged.lastAgentInboundAt = diskAgentInboundAt
-          merged.lastAgentInboundText = safeString(disk.lastAgentInboundText || '')
-        }
-	        merged.lastAgentResult = pickNewerLastAgentResult(disk.lastAgentResult, state.lastAgentResult)
-	        merged.lastShadowResult = pickNewerLastAgentResult(disk.lastShadowResult, state.lastShadowResult)
-	        merged.lastResetResult = pickNewerLastAgentResult(disk.lastResetResult, state.lastResetResult)
-	        if (diskResetAtMs > stateResetAtMs) {
-		          writeCodexThreadId(merged, readCodexThreadId(disk))
-              writePiSessionFile(merged, readPiSessionFile(disk))
-		          merged.pendingWake = Boolean(disk.pendingWake)
-          merged.pendingTrigger = (disk as any).pendingTrigger == null ? null : (disk as any).pendingTrigger
-          try { merged.inboundUnprocessed = Math.max(0, Number(disk.inboundUnprocessed || 0)) } catch {}
-        }
-        const a = Array.isArray(disk.recentMessageIds) ? disk.recentMessageIds : []
-        const b = Array.isArray(state.recentMessageIds) ? state.recentMessageIds : []
-        merged.recentMessageIds = Array.from(new Set([...a, ...b])).slice(-200)
-        // Keep background counters strictly in-memory (restart-safe).
-        try { delete (merged as any).recentInboundAtMs } catch {}
-        try { delete (merged as any).backgroundPending } catch {}
-        try { delete (merged as any).backgroundNonAtUnprocessed } catch {}
-        try { delete (merged as any).backgroundLastCodexAt } catch {}
-        try { delete (merged as any).lastBackgroundAt } catch {}
-        try { delete (merged as any).backgroundArmed } catch {}
+        const merged = mergeConversationState({
+          disk,
+          state,
+          chatKey,
+          mergePendingTrigger,
+          pickNewerLastAgentResult,
+          readLegacyThreadHandle,
+          writeLegacyThreadHandle,
+          readPiSessionFile,
+          writePiSessionFile,
+        })
 	        Object.assign(state, merged)
 	        writeJsonAtomic(statePath, state)
 	      }
@@ -3203,15 +2292,55 @@ const rinBridge = (() => {
       if (!s.startsWith('/')) return ''
       const first = s.split(/\s+/, 1)[0] || ''
       const name = first.split('@')[0]
-      if (!/^\/[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(name)) return ''
+      if (!/^\/[A-Za-z0-9_][A-Za-z0-9_:-]*$/.test(name)) return ''
       return name
     }
 
-    function isSlashCommandText(text) {
-      const name = extractCommandLikeText(text)
-      if (!name) return ''
-      if (name === '/help' || name === '/reset' || name === '/restart' || name === '/status') return name
-      return ''
+    function parseSlashInvocation(text) {
+      const trimmed = safeString(text).trim()
+      if (!trimmed.startsWith('/')) return null
+      const first = trimmed.split(/\s+/, 1)[0] || ''
+      const name = first.split('@')[0]
+      if (!/^\/[A-Za-z0-9_][A-Za-z0-9_:-]*$/.test(name)) return null
+      const argsText = trimmed.slice(first.length).trim()
+      return {
+        raw: trimmed,
+        name,
+        bareName: name.replace(/^\//, ''),
+        argsText,
+      }
+    }
+
+    function parseCommandArgs(argsText: any) {
+      const text = safeString(argsText)
+      const args: string[] = []
+      let current = ''
+      let quote: string | null = null
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i]
+        if (quote) {
+          if (ch === quote) {
+            quote = null
+          } else {
+            current += ch
+          }
+          continue
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch
+          continue
+        }
+        if (ch === ' ' || ch === '\t') {
+          if (current) {
+            args.push(current)
+            current = ''
+          }
+          continue
+        }
+        current += ch
+      }
+      if (current) args.push(current)
+      return args
     }
 
     // Group input is agent-visible only for OWNER/TRUSTED mentions or replies. Commands are excluded.
@@ -3244,26 +2373,11 @@ const rinBridge = (() => {
     }
 
     function normalizeLastAgentResult(raw: any) {
-      if (!raw || typeof raw !== 'object') return null
-      return {
-        runtime: normalizeRuntimeKind(raw.runtime || 'codex'),
-        kind: safeString(raw.kind || ''),
-        finishedAt: Math.max(0, Number(raw.finishedAt || 0) || 0),
-        forInboundSeq: Math.max(0, Number(raw.forInboundSeq || 0) || 0),
-        processedToSeq: Math.max(0, Number(raw.processedToSeq || 0) || 0),
-        exitCode: raw.exitCode == null ? null : Number(raw.exitCode),
-        lastMessage: safeString(raw.lastMessage || ''),
-      }
+      return normalizeConversationLastAgentResult(raw, normalizeRuntimeKind)
     }
 
     function pickNewerLastAgentResult(a: any, b: any) {
-      const left = normalizeLastAgentResult(a)
-      const right = normalizeLastAgentResult(b)
-      if (!left) return right
-      if (!right) return left
-      if (right.finishedAt !== left.finishedAt) return right.finishedAt > left.finishedAt ? right : left
-      if (right.forInboundSeq !== left.forInboundSeq) return right.forInboundSeq > left.forInboundSeq ? right : left
-      return right
+      return pickNewerConversationLastAgentResult(a, b, normalizeRuntimeKind)
     }
 
     function summarizeLastAgentResult(result: any) {
@@ -3271,13 +2385,10 @@ const rinBridge = (() => {
       if (!normalized) return 'none'
       const prefix = normalized.runtime ? `${normalized.runtime}: ` : ''
       if (normalized.kind === 'ok') {
-        const finalMessage = normalizeFinalAgentMessage(normalized.lastMessage)
+        const finalMessage = normalizeBridgeAssistantText(normalized.lastMessage)
         return `${prefix}${finalMessage.kind === 'reply' ? 'reply' : 'completed'}`
       }
       if (normalized.kind === 'interrupted') return `${prefix}INTERRUPTED`
-      if (normalized.kind === 'protocol_violation') {
-        return normalized.lastMessage ? `${prefix}PROTOCOL_VIOLATION (${normalized.lastMessage})` : `${prefix}PROTOCOL_VIOLATION`
-      }
       if (normalized.kind === 'failed') {
         const code = normalized.exitCode == null || Number.isNaN(normalized.exitCode) ? 'unknown' : String(normalized.exitCode)
         return normalized.lastMessage ? `${prefix}FAILED (${code}, ${normalized.lastMessage})` : `${prefix}FAILED (${code})`
@@ -3304,33 +2415,293 @@ const rinBridge = (() => {
       return ids
     }
 
-    function uiText(pathKey: string, params: Record<string, any> = {}) {
-      return daemonText(ctx.i18n, pathKey, params)
-    }
-
-    async function handleHelp({ chatKey, session }) {
-      const parsed = parseChatKey(chatKey)
-      if (!parsed) return
-      const cache = new Map<string, Promise<boolean>>()
-      const lines = []
-      for (const cmd of ctx.$commander._commandList) {
-        if (!cmd || cmd.name.includes('.') || cmd.config?.slash === false) continue
-        if (!cmd.match(session)) continue
-        if (!await ctx.permissions.test(`command:${cmd.name}`, session, cache)) continue
-        const name = safeString(cmd.displayName || cmd.name || '').trim()
-        if (!name) continue
-        const description = safeString(session.text(`commands.${cmd.name}.description`) || '').trim()
-        lines.push(description ? `· /${name}：${description}` : `· /${name}`)
-      }
-
+    async function sendBridgeCommandText({ chatKey, parsed, text, replyToMessageId = '' }: any = {}) {
+      const nextText = safeString(text).trim()
+      if (!nextText) return
       await sendToChat({
         chatKey,
         parsed,
-        text: lines.join('\n').trim(),
+        text: nextText,
         images: [],
         files: [],
         via: 'koishi-cmd',
+        replyToMessageId: safeString(replyToMessageId || ''),
       })
+    }
+
+    function createHeadlessCommandUi(notices: string[]) {
+      const pushNotice = (value: any) => {
+        const text = safeString(value).trim()
+        if (text) notices.push(text)
+      }
+      return {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        notify: (message: string) => pushNotice(message),
+        onTerminalInput: () => (() => {}),
+        setStatus: (_statusKey: string, statusText?: string) => pushNotice(statusText),
+        setWorkingMessage: () => {},
+        setWidget: () => {},
+        setFooter: () => {},
+        setHeader: () => {},
+        setTitle: () => {},
+        custom: async () => undefined,
+        pasteToEditor: (text: string) => pushNotice(text),
+        setEditorText: (text: string) => pushNotice(text),
+      }
+    }
+
+    function builtinBridgeCommands() {
+      const rows = Array.isArray(BUILTIN_SLASH_COMMANDS)
+        ? BUILTIN_SLASH_COMMANDS.map((command: any) => ({
+            name: safeString(command && command.name).trim(),
+            description: safeString(command && command.description).trim(),
+            source: 'builtin',
+          }))
+        : []
+      rows.push({ name: 'status', description: 'Show status for the current session', source: 'daemon' })
+      rows.push({ name: 'restart', description: 'Restart the Rin daemon', source: 'daemon' })
+      return rows.filter((item) => item && item.name)
+    }
+
+    const TRUSTED_BRIDGE_COMMANDS = new Set(['new'])
+    const koishiBridgeCommands = new Map<string, { command: any, description: string }>()
+
+    function normalizeBridgeSlashInvocationFromSession(session: any) {
+      const fromText = parseSlashInvocation(safeString(session && session.content || ''))
+      if (fromText) return fromText
+      const bareName = safeString(session && session.argv && session.argv.command && session.argv.command.name || session && session.command && session.command.name || '').trim().replace(/^\//, '')
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_:-]*$/.test(bareName)) return null
+      const argvArgs = Array.isArray(session && session.argv && session.argv.args) ? session.argv.args : []
+      const argsText = argvArgs.map((value: any) => safeString(value).trim()).filter(Boolean).join(' ').trim()
+      return {
+        raw: `/${bareName}${argsText ? ` ${argsText}` : ''}`,
+        name: `/${bareName}`,
+        bareName,
+        argsText,
+      }
+    }
+
+    function canRegisterKoishiBridgeCommand(name: string) {
+      return /^[a-z][a-z0-9_]{0,31}$/.test(safeString(name).trim())
+    }
+
+    function dedupeBridgeCommands(commands: any[]) {
+      const seen = new Set<string>()
+      const out: Array<any> = []
+      for (const item of Array.isArray(commands) ? commands : []) {
+        const name = safeString(item && item.name).trim()
+        if (!name || seen.has(name)) continue
+        seen.add(name)
+        out.push({
+          ...item,
+          name,
+          description: safeString(item && item.description).trim(),
+        })
+      }
+      return out
+    }
+
+    function canRunBridgeCommand(commandName: string, trust: string) {
+      const nextName = safeString(commandName).trim()
+      const nextTrust = safeString(trust).trim()
+      if (!nextName) return false
+      if (nextTrust === 'OWNER') return true
+      if (nextTrust === 'TRUSTED') return TRUSTED_BRIDGE_COMMANDS.has(nextName)
+      return false
+    }
+
+    async function listBridgeSlashCommands(chatKey: string) {
+      const controller = await openBridgeCommandSession(chatKey)
+      if (!controller) return []
+      try {
+        return collectBridgeSlashCommandsFromController(controller)
+      } finally {
+        await controller.dispose()
+      }
+    }
+
+    async function discoverBridgeSlashCommandsForRegistration() {
+      const rows = [...builtinBridgeCommands()]
+      const ownerChatKey = preferredOwnerChatKey(root)
+      if (ownerChatKey) {
+        try {
+          rows.push(...(await listBridgeSlashCommands(ownerChatKey)))
+        } catch (e) {
+          const message = safeString(e && (e as any).message ? (e as any).message : e)
+          logger.warn(`bridge command discovery failed chatKey=${ownerChatKey} err=${message}`)
+        }
+      }
+      return dedupeBridgeCommands(rows).filter((item) => canRegisterKoishiBridgeCommand(item && item.name))
+    }
+
+    async function runKoishiRegisteredBridgeCommand(session: any, commandName: string, argsText: any) {
+      if (!session) return ''
+      const nextCommandName = safeString(commandName).trim().replace(/^\//, '')
+      if (!nextCommandName) return ''
+      const { platform, chatKey } = getChatCtx(session)
+      const trust = safeString(getIdentity().trustOf(platform, pickUserId(session))).trim()
+      if (!canRunBridgeCommand(nextCommandName, trust)) return ''
+      const normalizedArgs = safeString(argsText).trim()
+      await runBridgeSlashCommand({
+        chatKey,
+        text: `/${nextCommandName}${normalizedArgs ? ` ${normalizedArgs}` : ''}`,
+        replyToMessageId: safeString(session && session.messageId || ''),
+      })
+      return ''
+    }
+
+    async function syncKoishiBridgeCommands() {
+      const discovered = await discoverBridgeSlashCommandsForRegistration()
+      const desired = new Map(discovered.map((item) => [safeString(item && item.name).trim(), item]))
+      for (const [name, entry] of Array.from(koishiBridgeCommands.entries())) {
+        const next = desired.get(name)
+        if (next && safeString(entry && entry.description).trim() === safeString(next && next.description).trim()) continue
+        try { entry && entry.command && entry.command.dispose?.() } catch {}
+        koishiBridgeCommands.delete(name)
+      }
+      for (const item of discovered) {
+        const name = safeString(item && item.name).trim()
+        if (!name || koishiBridgeCommands.has(name)) continue
+        const description = safeString(item && item.description).trim()
+        const command = ctx.command(`${name} [args:text]`, description, { slash: true })
+          .action(async ({ session }: any, argsText: any) => await runKoishiRegisteredBridgeCommand(session, name, argsText))
+        koishiBridgeCommands.set(name, { command, description })
+      }
+      for (const bot of Array.isArray(ctx.bots) ? ctx.bots : []) {
+        try { await ctx.$commander.updateCommands(bot) } catch {}
+      }
+    }
+
+    async function resolveBridgeSlashSessionCommand(session: any) {
+      const cached = session && session.__rinBridgeSlashResolution
+      if (cached) return cached
+      const invocation = normalizeBridgeSlashInvocationFromSession(session)
+      if (!invocation) {
+        const empty = { invocation: null, commandName: '', known: false, authorized: false, trust: '' }
+        try { session.__rinBridgeSlashResolution = empty } catch {}
+        return empty
+      }
+      const { platform, chatKey } = getChatCtx(session)
+      const identity = getIdentity()
+      const trust = safeString(identity.trustOf(platform, pickUserId(session))).trim()
+      const commandName = safeString(invocation.bareName).trim()
+      let known = new Set(builtinBridgeCommands().map((item) => safeString(item && item.name).trim()).filter(Boolean)).has(commandName)
+      if (!known && chatKey) {
+        try {
+          const commands = await listBridgeSlashCommands(chatKey)
+          known = commands.some((item) => safeString(item && item.name).trim() === commandName)
+        } catch {}
+      }
+      const resolved = {
+        invocation,
+        commandName,
+        known,
+        authorized: known && canRunBridgeCommand(commandName, trust),
+        trust,
+      }
+      try { session.__rinBridgeSlashResolution = resolved } catch {}
+      return resolved
+    }
+
+    async function openBridgeCommandSession(chatKey: string) {
+      const parsed = parseChatKey(chatKey)
+      if (!parsed) return null
+      const pseudo = pseudoSessionFromParsed(parsed, '')
+      const { chatDir, state, saveState } = getChatCtx(pseudo)
+      const notices: string[] = []
+      const created = await createRinPiSession({
+        repoRoot,
+        workspaceRoot: homeRoot,
+        resourceCwd: repoRoot,
+        settingsCwd: homeRoot,
+        sessionCwd: repoRoot,
+        sessionDir: piSessionDirForChat(chatDir),
+        sessionFile: readPiSessionFile(state),
+        sessionPolicy: readPiSessionFile(state) ? 'continueRecent' : 'new',
+        brainChatKey: chatKey,
+        currentChatKey: chatKey,
+        enableBrainHooks: true,
+      })
+      const session = created && created.session
+      if (!session) throw new Error('bridge_command_session_missing')
+      try {
+        await session.bindExtensions({
+          uiContext: createHeadlessCommandUi(notices),
+          onError: (event: any) => {
+            const errorText = safeString(event && event.error || event && event.message || '').trim()
+            const extensionPath = safeString(event && event.extensionPath || '').trim()
+            if (errorText) notices.push(extensionPath ? `${extensionPath}: ${errorText}` : errorText)
+          },
+        })
+      } catch {}
+      return {
+        parsed,
+        pseudo,
+        chatDir,
+        state,
+        saveState,
+        notices,
+        created,
+        session,
+        async dispose() {
+          if (session && typeof session.dispose === 'function') {
+            try { session.dispose() } catch {}
+          }
+        },
+      }
+    }
+
+    function collectBridgeSlashCommandsFromController(controller: any) {
+      const reserved = new Set(builtinBridgeCommands().map((item) => safeString(item && item.name).trim()).filter(Boolean))
+      const commands: Array<any> = []
+      commands.push(...builtinBridgeCommands())
+      for (const item of controller.session.extensionRunner?.getRegisteredCommandsWithPaths?.() || []) {
+        const name = safeString(item && item.command && item.command.name).trim()
+        if (!name || reserved.has(name)) continue
+        commands.push({
+          name,
+          description: safeString(item && item.command && item.command.description).trim(),
+          source: 'extension',
+          path: safeString(item && item.extensionPath).trim(),
+        })
+      }
+      for (const template of controller.session.promptTemplates || []) {
+        const name = safeString(template && template.name).trim()
+        if (!name || reserved.has(name)) continue
+        commands.push({
+          name,
+          description: safeString(template && template.description).trim(),
+          source: 'prompt',
+          path: safeString(template && template.filePath).trim(),
+        })
+      }
+      if (controller.created && controller.created.settingsManager && controller.created.settingsManager.getEnableSkillCommands?.()) {
+        for (const skill of controller.created.resourceLoader.getSkills().skills || []) {
+          const name = `skill:${safeString(skill && skill.name).trim()}`
+          if (!safeString(skill && skill.name).trim() || reserved.has(name)) continue
+          commands.push({
+            name,
+            description: safeString(skill && skill.description).trim(),
+            source: 'skill',
+            path: safeString(skill && skill.filePath).trim(),
+          })
+        }
+      }
+      return commands
+    }
+
+    function formatBridgeCommandList(commands: any[]) {
+      return (Array.isArray(commands) ? commands : [])
+        .map((item) => {
+          const name = safeString(item && item.name).trim()
+          const description = safeString(item && item.description).trim()
+          if (!name) return ''
+          return description ? `/${name} — ${description}` : `/${name}`
+        })
+        .filter(Boolean)
+        .join('\n')
     }
 
     async function handleRestart({ chatKey, restartMessageId = '' }: any = {}) {
@@ -3392,45 +2763,22 @@ const rinBridge = (() => {
         } catch {}
       }
 
-      const resetCommandSeq = Number(state.lastResetCommandSeq || 0) || 0
-      const resetCommandAt = Number(state.lastResetCommandAtMs || state.lastResetAtMs || 0) || 0
-      if (resetCommandSeq > lastInboundSeq) {
-        lastInboundSeq = resetCommandSeq
-        if (resetCommandAt > 0) lastInboundAt = resetCommandAt
-        lastInboundText = '/reset'
-      }
-
       const currentResult = normalizeLastAgentResult(state.lastAgentResult)
-      const currentResetResult = normalizeLastAgentResult(state.lastResetResult)
       const resultForLastInbound = currentResult && currentResult.forInboundSeq >= lastInboundSeq ? currentResult : null
-      const resultForLastReset = currentResetResult && currentResetResult.forInboundSeq >= resetCommandSeq ? currentResetResult : null
-      const resetInProgress = Boolean(state.processing && state.processingNoInterrupt)
       const processingRuntime = state.processing
         ? normalizeRuntimeKind(state.processingRuntime || primaryRuntimeForChat(chatKey))
         : ''
-      const statusLine = resetInProgress
-        ? `resetting since ${formatStatusTime(state.processingStartedAt)}${processingRuntime ? ` (${processingRuntime})` : ''}`
-        : state.processing
-          ? `running since ${formatStatusTime(state.processingStartedAt)}${processingRuntime ? ` (${processingRuntime})` : ''}`
-          : 'idle'
-      const resetLine = !resetCommandSeq
-        ? 'none yet'
-        : resetInProgress
-          ? `running since ${formatStatusTime(state.processingStartedAt)}`
-          : resultForLastReset
-            ? summarizeLastAgentResult(resultForLastReset)
-            : 'none yet'
+      const statusLine = state.processing
+        ? `running since ${formatStatusTime(state.processingStartedAt)}${processingRuntime ? ` (${processingRuntime})` : ''}`
+        : 'idle'
       const resultLine = state.processing
-        ? (resetInProgress ? 'none yet (reset is still running)' : 'none yet (agent is still running)')
+        ? 'none yet (agent is still running)'
         : resultForLastInbound
           ? summarizeLastAgentResult(resultForLastInbound)
           : 'none yet'
       const finishedLine = !state.processing && resultForLastInbound
         ? formatStatusTime(resultForLastInbound.finishedAt)
         : 'n/a'
-      const resetFinishedLine = !resetCommandSeq || resetInProgress || !resultForLastReset
-        ? 'n/a'
-        : formatStatusTime(resultForLastReset.finishedAt)
       const inboundPreview = lastInboundText
         ? decodeEscapedControlsIfLikely(lastInboundText).replace(/\s+/g, ' ').slice(0, 120)
         : ''
@@ -3453,28 +2801,293 @@ const rinBridge = (() => {
       ]
       if (piSession) parts.push(`Pi session: ${piSession}`)
       if (!state.processing) parts.push(`Result time: ${finishedLine}`)
-      if (resetCommandSeq || resetCommandAt) {
-        parts.push(`Last reset: ${formatStatusTime(resetCommandAt)}${resetCommandSeq ? ` (seq ${resetCommandSeq})` : ''}`)
-        parts.push(`Reset result: ${resetLine}`)
-        if (!resetInProgress) parts.push(`Reset result time: ${resetFinishedLine}`)
-      }
       if (inboundPreview) parts.push(`Inbound preview: ${inboundPreview}`)
       return parts.join('\n')
     }
 
-    async function handleStatus({ chatKey }) {
+    async function exportBridgeSessionFile(sessionFile: string, outputPath = '') {
+      const sourceFile = safeString(sessionFile).trim()
+      if (!sourceFile || !fs.existsSync(sourceFile)) throw new Error('session_file_missing')
+      const requested = safeString(outputPath).trim()
+      const targetPath = requested
+        ? path.resolve(requested)
+        : path.resolve(repoRoot, `${path.basename(sourceFile, path.extname(sourceFile))}.html`)
+      if (targetPath.endsWith('.html')) {
+        const exportHtml = await import('../third_party/pi-mono/packages/coding-agent/dist/core/export-html/index.js')
+        return await exportHtml.exportFromFile(sourceFile, targetPath)
+      }
+      if (path.resolve(targetPath) !== path.resolve(sourceFile)) {
+        fs.copyFileSync(sourceFile, targetPath)
+      }
+      return targetPath
+    }
+
+    async function runBridgeSlashCommand({ chatKey, text, replyToMessageId = '' }: any = {}) {
+      const invocation = parseSlashInvocation(text)
+      if (!invocation) return { handled: false }
+      const commandName = safeString(invocation.bareName).trim()
+      const commandArgs = parseCommandArgs(invocation.argsText)
       const parsed = parseChatKey(chatKey)
-      if (!parsed) return
-      const text = await buildStatusText(chatKey)
-      if (!text) return
-      await sendToChat({
-        chatKey,
-        parsed,
-        text,
-        images: [],
-        files: [],
-        via: 'koishi-cmd',
-      })
+      if (!parsed) return { handled: false }
+
+      if (commandName === 'status') {
+        await sendBridgeCommandText({
+          chatKey,
+          parsed,
+          text: await buildStatusText(chatKey),
+          replyToMessageId,
+        })
+        return { handled: true }
+      }
+
+      if (commandName === 'restart') {
+        await handleRestart({ chatKey, restartMessageId: replyToMessageId })
+        return { handled: true }
+      }
+
+      if (commandName === 'new') {
+        await handleNew({ chatKey, newMessageId: replyToMessageId })
+        return { handled: true }
+      }
+
+      const controller = await openBridgeCommandSession(chatKey)
+      if (!controller) return { handled: false }
+      const syncSessionBinding = () => {
+        reconcilePiSessionFile(controller.state, controller.session && controller.session.sessionFile, chatKey)
+        controller.saveState()
+      }
+      try {
+        const availableCommands = collectBridgeSlashCommandsFromController(controller)
+        const known = new Set(availableCommands.map((item) => safeString(item && item.name).trim()).filter(Boolean))
+        const readOnlyCommands = new Set(['session', 'copy'])
+        if (controller.state && controller.state.processing && known.has(commandName) && !readOnlyCommands.has(commandName)) {
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: 'This chat is still processing a turn. Please try that command again after it finishes, or use /new to start a fresh session.',
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'session') {
+          const stats = controller.session.getSessionStats()
+          const model = controller.session.model
+          const thinking = safeString(controller.session.thinkingLevel).trim() || 'n/a'
+          const lines = [
+            `Session file: ${safeString(stats && stats.sessionFile).trim() || 'n/a'}`,
+            `Session id: ${safeString(stats && stats.sessionId).trim() || 'n/a'}`,
+            `Messages: ${Number(stats && stats.totalMessages || 0) || 0}`,
+            `User messages: ${Number(stats && stats.userMessages || 0) || 0}`,
+            `Assistant messages: ${Number(stats && stats.assistantMessages || 0) || 0}`,
+            `Tool calls: ${Number(stats && stats.toolCalls || 0) || 0}`,
+            `Tool results: ${Number(stats && stats.toolResults || 0) || 0}`,
+            `Model: ${safeString(model && model.provider).trim() || 'n/a'}/${safeString(model && model.id).trim() || 'n/a'}`,
+            `Thinking: ${thinking}`,
+          ]
+          await sendBridgeCommandText({ chatKey, parsed, text: lines.join('\n'), replyToMessageId })
+          return { handled: true }
+        }
+
+        if (commandName === 'copy') {
+          const lastText = safeString(controller.session.getLastAssistantText() || '').trim()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: lastText || 'No assistant message yet.',
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'name') {
+          const nextName = safeString(invocation.argsText).trim()
+          if (!nextName) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Usage: /name <session name>', replyToMessageId })
+            return { handled: true }
+          }
+          controller.session.setSessionName(nextName)
+          syncSessionBinding()
+          await sendBridgeCommandText({ chatKey, parsed, text: `Session name set to: ${nextName}`, replyToMessageId })
+          return { handled: true }
+        }
+
+        if (commandName === 'model') {
+          const currentModel = controller.session.model
+          if (!commandArgs.length) {
+            const currentThinking = safeString(controller.session.thinkingLevel).trim() || 'n/a'
+            await sendBridgeCommandText({
+              chatKey,
+              parsed,
+              text: [
+                `Current model: ${safeString(currentModel && currentModel.provider).trim() || 'n/a'}/${safeString(currentModel && currentModel.id).trim() || 'n/a'}`,
+                `Current thinking: ${currentThinking}`,
+                'Usage: /model <provider/model> [thinking-level]',
+              ].join('\n'),
+              replyToMessageId,
+            })
+            return { handled: true }
+          }
+          const targetRef = safeString(commandArgs[0]).trim()
+          const targetThinking = safeString(commandArgs[1]).trim()
+          const slashIndex = targetRef.indexOf('/')
+          if (slashIndex <= 0) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Please use the exact form /model <provider/model> [thinking-level].', replyToMessageId })
+            return { handled: true }
+          }
+          const provider = targetRef.slice(0, slashIndex).trim()
+          const modelId = targetRef.slice(slashIndex + 1).trim()
+          const model = (controller.created && controller.created.modelRegistry && controller.created.modelRegistry.getAvailable
+            ? controller.created.modelRegistry.getAvailable()
+            : []).find((item: any) => safeString(item && item.provider).trim() === provider && safeString(item && item.id).trim() === modelId)
+          if (!model) {
+            await sendBridgeCommandText({ chatKey, parsed, text: `Model not found: ${targetRef}`, replyToMessageId })
+            return { handled: true }
+          }
+          await controller.session.setModel(model)
+          if (targetThinking) controller.session.setThinkingLevel(targetThinking)
+          syncSessionBinding()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: `Model set to ${provider}/${modelId}${targetThinking ? ` with thinking ${targetThinking}` : ''}.`,
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'compact') {
+          const result = await controller.session.compact(safeString(invocation.argsText).trim())
+          syncSessionBinding()
+          const summary = safeString(result && result.summary || '').trim()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: summary ? `Compacted current session.\n\n${summary}` : 'Compacted current session.',
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'reload') {
+          await controller.created.resourceLoader.reload().catch(() => {})
+          try { controller.created.modelRegistry.refresh?.() } catch {}
+          syncSessionBinding()
+          await syncKoishiBridgeCommands().catch(() => {})
+          await sendBridgeCommandText({ chatKey, parsed, text: 'Reloaded extensions, prompts, skills, and themes.', replyToMessageId })
+          return { handled: true }
+        }
+
+        if (commandName === 'fork') {
+          const entryId = safeString(commandArgs[0]).trim()
+          if (!entryId) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Usage: /fork <entry-id>', replyToMessageId })
+            return { handled: true }
+          }
+          const result = await controller.session.fork(entryId)
+          syncSessionBinding()
+          if (result && result.cancelled) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Fork cancelled.', replyToMessageId })
+            return { handled: true }
+          }
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: `Forked to a new session.${safeString(controller.session && controller.session.sessionFile).trim() ? `\nSession file: ${safeString(controller.session.sessionFile).trim()}` : ''}`,
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'tree') {
+          const entryId = safeString(commandArgs[0]).trim()
+          if (!entryId) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Usage: /tree <entry-id>', replyToMessageId })
+            return { handled: true }
+          }
+          const result = await controller.session.navigateTree(entryId, {})
+          syncSessionBinding()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: result && result.cancelled ? 'Tree navigation cancelled.' : 'Switched to the requested point in the current session tree.',
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'resume') {
+          const sessionPath = safeString(commandArgs[0]).trim()
+          if (!sessionPath) {
+            await sendBridgeCommandText({
+              chatKey,
+              parsed,
+              text: `Usage: /resume <session-path>${safeString(controller.session && controller.session.sessionFile).trim() ? `\nCurrent session: ${safeString(controller.session.sessionFile).trim()}` : ''}`,
+              replyToMessageId,
+            })
+            return { handled: true }
+          }
+          const cancelled = !(await controller.session.switchSession(sessionPath))
+          syncSessionBinding()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: cancelled ? 'Resume cancelled.' : `Switched to session: ${safeString(controller.session && controller.session.sessionFile || sessionPath).trim()}`,
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'import') {
+          const inputPath = safeString(commandArgs[0]).trim()
+          if (!inputPath) {
+            await sendBridgeCommandText({ chatKey, parsed, text: 'Usage: /import <jsonl-path>', replyToMessageId })
+            return { handled: true }
+          }
+          await controller.session.importFromJsonl(inputPath)
+          syncSessionBinding()
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: `Imported session: ${safeString(controller.session && controller.session.sessionFile).trim() || inputPath}`,
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (commandName === 'export') {
+          const outPath = await exportBridgeSessionFile(safeString(controller.session && controller.session.sessionFile).trim(), safeString(commandArgs[0]).trim())
+          await sendBridgeCommandText({ chatKey, parsed, text: `Exported session to: ${outPath}`, replyToMessageId })
+          return { handled: true }
+        }
+
+        if (['settings', 'scoped-models', 'share', 'login', 'logout', 'changelog', 'hotkeys', 'quit'].includes(commandName)) {
+          await sendBridgeCommandText({
+            chatKey,
+            parsed,
+            text: `/${commandName} is currently available only in the TUI.`,
+            replyToMessageId,
+          })
+          return { handled: true }
+        }
+
+        if (known.has(commandName)) {
+          const beforeAssistant = safeString(controller.session.getLastAssistantText() || '').trim()
+          await controller.session.prompt(invocation.raw, { source: 'interactive' })
+          syncSessionBinding()
+          const afterAssistant = safeString(controller.session.getLastAssistantText() || '').trim()
+          const notices = controller.notices.filter(Boolean)
+          const replyText = afterAssistant && afterAssistant !== beforeAssistant
+            ? afterAssistant
+            : notices.join('\n').trim() || 'Done.'
+          await sendBridgeCommandText({ chatKey, parsed, text: replyText, replyToMessageId })
+          return { handled: true }
+        }
+
+        return { handled: false }
+      } finally {
+        await controller.dispose()
+      }
     }
 
     function queueBrainFinalize({ chatKey, reason = 'manual' }: any = {}) {
@@ -3500,34 +3113,11 @@ const rinBridge = (() => {
       return 'private'
     }
 
-    function isExplicitSlashControlCommand(session: any, expectedSlash = '') {
-      const want = safeString(expectedSlash || '').trim()
-      if (!want) return false
-      const content = safeString(session && session.content || '')
-      if (extractCommandLikeText(content) === want) return true
-      const strippedContent = safeString(session && session.stripped && session.stripped.content || '')
-      return extractCommandLikeText(strippedContent) === want
-    }
-
     function clearPersistentRunFlags(
       state: any,
       { keepPendingTrigger = false, keepResetPending = false }: { keepPendingTrigger?: boolean, keepResetPending?: boolean } = {},
     ) {
-      state.pendingWake = false
-      if (!keepPendingTrigger) state.pendingTrigger = null
-      if (!keepResetPending) state.resetPendingTrigger = null
-      state.replyToMessageId = ''
-      state.forceContinue = false
-      state.processing = false
-      state.processingNoInterrupt = false
-      state.processingRuntime = ''
-      state.processingPid = 0
-      state.processingThreadId = ''
-      state.processingTurnId = ''
-      state.processingRunId = ''
-      state.processingStartedAt = 0
-      state.interruptRequested = false
-      state.interruptRequestedAt = 0
+      clearPersistentConversationRunFlags(state, { keepPendingTrigger, keepResetPending })
     }
 
     function isCurrentProcessingRun(state: any, runId: any) {
@@ -3575,11 +3165,6 @@ const rinBridge = (() => {
       threadInitLockKey = 'thread-init',
       turnBehavior = null,
       systemPromptExtra = '',
-      recentOutboundMinSeqExclusive = 0,
-      recentOutboundMinTsMs = 0,
-      allowContinue = true,
-      allowLegacyOk = false,
-      allowReplyWithoutDelivery = false,
       threadConfig = null,
     }: any = {}) {
       const result = await withTelegramTyping(parsed, async () => {
@@ -3620,7 +3205,7 @@ const rinBridge = (() => {
       })
 
       if (normalizeRuntimeKind(runtimeKind) === 'pi' && Number(result && result.code || 0) === 0) {
-        const normalized = normalizeFinalAgentMessage(result && result.lastMessage || '')
+        const normalized = normalizeBridgeAssistantText(result && result.lastMessage || '')
         if (normalized.kind === 'reply') {
           const target = parsed || parseChatKey(chatKey)
           if (target) {
@@ -3642,116 +3227,11 @@ const rinBridge = (() => {
       }
 
       const trimmed = safeString(result && result.lastMessage || '').trim()
-      const outbound = recentOutboundRecords(chatDir, {
-        minSeqExclusive: Math.max(0, Number(recentOutboundMinSeqExclusive || 0) || 0),
-        minTsMs: Math.max(0, Number(recentOutboundMinTsMs || 0) || 0),
-      })
-      const completion = evaluateTurnCompletion(result && result.lastMessage || '', outbound, {
-        allowContinue,
-        allowLegacyOk,
-        allowReplyWithoutDelivery,
-      })
-	      const protocolViolation = Boolean(result && Number(result.code || 0) === 0 && completion.kind === 'protocol_violation')
-	      return { result, trimmed, outbound, completion, protocolViolation }
+	      return { result, trimmed }
 	    }
 
-    function queueShadowBridgeTurn({
-      chatKey,
-      parsed,
-      uptoSeq,
-      liveInputItems = [],
-      batchInputItems = [],
-      primaryRuntime = 'codex',
-      primaryResultText = '',
-    }: any = {}) {
-      const configuredShadow = shadowRuntimeForChat(chatKey)
-      if (!configuredShadow) return
-      const prev = shadowTurnQueues.get(chatKey) || Promise.resolve()
-      const next = prev
-        .catch(() => {})
-        .then(async () => {
-          const shadowRuntime = shadowRuntimeForChat(chatKey)
-          if (!shadowRuntime) return
-          const shadowParsed = parsed || parseChatKey(chatKey)
-          if (!shadowParsed) return
-          const pseudo = pseudoSessionFromParsed(shadowParsed)
-          const { chatDir, state, saveState } = getChatCtx(pseudo)
-          if (Number(state.lastResetSeq || 0) >= (Number(uptoSeq || 0) || 0)) return
-
-          const shadowResumeId = shadowRuntime === 'codex'
-            ? (readCodexThreadId(state) || null)
-            : (readPiSessionFile(state) || null)
-          const shadowInputItems = shadowRuntime === 'pi'
-            ? cloneTurnInputItems(batchInputItems)
-            : cloneTurnInputItems(shadowResumeId ? liveInputItems : batchInputItems)
-          if (!shadowInputItems.length) return
-
-          const result = await runSelectedRuntimeTurn({
-            runtimeKind: shadowRuntime,
-            rootDir: root,
-            repoRoot,
-            workspaceRoot,
-            piProvider: configuredPiProvider,
-            piModel: configuredPiModel,
-            piThinking: configuredPiThinking,
-            prompt: '',
-            inputItems: shadowInputItems,
-            resumeThreadId: shadowResumeId,
-            timeoutMs: config.agentMaxRuntimeMs || config.codexMaxRuntimeMs || 0,
-            images: [],
-          })
-          const shadowCompletion = evaluateTurnCompletion(result && result.lastMessage || '', [], {
-            allowContinue: true,
-            allowLegacyOk: false,
-            allowReplyWithoutDelivery: true,
-          })
-          const shadowResultRecord = {
-            runtime: shadowRuntime,
-            kind: Number(result && result.code || 0) === 0
-              ? (shadowCompletion.kind === 'ok' ? 'ok' : 'protocol_violation')
-              : 'failed',
-            finishedAt: nowMs(),
-            forInboundSeq: Number(uptoSeq || 0) || 0,
-            processedToSeq: Number(uptoSeq || 0) || 0,
-            exitCode: result && result.code == null ? null : Number(result.code),
-            lastMessage: safeString(result && result.lastMessage || ''),
-          }
-
-          await withChatLock(chatKey, async () => {
-            const latest = getChatCtx(pseudo)
-            if (shadowRuntime === 'codex') {
-              reconcileCodexThreadId(latest.state, result && result.threadId, chatKey)
-            } else {
-              reconcilePiSessionFile(latest.state, result && ((result as any).sessionFile || result.threadId), chatKey)
-            }
-            latest.state.lastShadowResult = shadowResultRecord
-            latest.saveState()
-          }, { op: 'shadow_turn_commit', chatKey, runtime: shadowRuntime })
-
-          const primaryPreview = safeString(primaryResultText || '').replace(/\s+/g, ' ').slice(0, 160)
-          const shadowPreview = safeString(result && result.lastMessage || '').replace(/\s+/g, ' ').slice(0, 160)
-          try {
-            appendJsonl(shadowRunLogPath(chatDir), {
-              ts: nowMs(),
-              chatKey,
-              uptoSeq: Number(uptoSeq || 0) || 0,
-              primaryRuntime: safeString(primaryRuntime),
-              shadowRuntime,
-              exitCode: result && result.code == null ? null : Number(result.code),
-              completion: safeString(shadowCompletion.kind || ''),
-              primaryPreview,
-              shadowPreview,
-            })
-          } catch {}
-          logger.info(`shadow compare chatKey=${chatKey} primary=${safeString(primaryRuntime)} shadow=${shadowRuntime} code=${String(result && result.code == null ? '' : result.code)} primaryPreview=${JSON.stringify(primaryPreview)} shadowPreview=${JSON.stringify(shadowPreview)}`)
-        })
-        .catch((e: any) => {
-          logger.warn(`shadow turn failed chatKey=${chatKey} runtime=${shadowRuntimeForChat(chatKey)} err=${safeString(e && e.message ? e.message : e)}`)
-        })
-      shadowTurnQueues.set(chatKey, next)
-      void next.finally(() => {
-        if (shadowTurnQueues.get(chatKey) === next) shadowTurnQueues.delete(chatKey)
-      })
+    function queueShadowBridgeTurn(_options: any = {}) {
+      return
     }
 
 		    function makeProcessingOnSpawn({
@@ -3774,213 +3254,78 @@ const rinBridge = (() => {
       }
     }
 
-    async function handleReset({ chatKey, resetMessageId = '' }) {
+    function abortActiveChatProcessing({ chatKey, state }: any = {}) {
+      try {
+        const active = getActiveProcessingTurn({ chatKey, processingRunId: state && state.processingRunId })
+        if (!(state && (state.processing || state.processingPid || active))) return
+        const activeRuntime = normalizeRuntimeKind(
+          (active && active.runtime)
+          || state.processingRuntime
+          || primaryRuntimeForChat(chatKey),
+        )
+        if (activeRuntime === 'pi' && active && typeof active.abort === 'function') {
+          void Promise.resolve(active.abort()).catch(() => {})
+          return
+        }
+        const pid = Number(state.processingPid || 0)
+        if (pid) {
+          try { process.kill(pid, 'SIGTERM') } catch {}
+          setTimeout(() => { try { process.kill(pid, 'SIGKILL') } catch {} }, 2000)
+        }
+      } catch {}
+    }
+
+    async function handleNew({ chatKey, newMessageId = '' }: any = {}) {
       const parsed = parseChatKey(chatKey)
       if (!parsed) return
       const pseudo = { platform: parsed.platform, channelId: parsed.chatId, guildId: null }
       const { chatDir, state, saveState } = getChatCtx(pseudo)
-      let resetRecord = null as any
-      try {
-        if (safeString(resetMessageId || '').trim()) {
-          resetRecord = findLoggedMessageById(chatDir, resetMessageId)
-        }
-      } catch {}
-      const resetLogCutover = prepareResetLogCutover(chatDir)
       resetEphemeral(chatKey)
-      try {
-        const active = getActiveProcessingTurn({ chatKey, processingRunId: state.processingRunId })
-        if (state.processing || state.processingPid || active) {
-          const activeRuntime = normalizeRuntimeKind(
-            (active && active.runtime)
-            || state.processingRuntime
-            || primaryRuntimeForChat(chatKey),
-          )
-          if (activeRuntime === 'pi' && active && typeof active.abort === 'function') {
-            void Promise.resolve(active.abort()).catch(() => {})
-          } else if (activeRuntime === 'codex' && active && active.threadId && active.turnId) {
-            void ensureCodexAppServerSupervisor(repoRoot, workspaceRoot)
-              .then((supervisor) => supervisor.interruptTurn({ threadId: active.threadId, turnId: active.turnId }))
-              .catch(() => {})
-          } else {
-            const pid = Number(state.processingPid || 0)
-            const supervisorPid = currentCodexAppServerPid()
-            if (pid && (!supervisorPid || pid !== supervisorPid)) {
-              try { process.kill(pid, 'SIGTERM') } catch {}
-              setTimeout(() => { try { process.kill(pid, 'SIGKILL') } catch {} }, 2000)
-            }
-          }
-        }
-      } catch {}
+      abortActiveChatProcessing({ chatKey, state })
 
-      let resetBoundarySeq = 0
+      const controller = await openBridgeCommandSession(chatKey)
+      if (!controller) return
+      let nextSessionFile = ''
       try {
-        const disk = readJson(path.join(chatDir, 'state.json'), null) || {}
-        const diskLastSeq = Number(disk.lastSeq || 0)
-        const diskLastInbound = Number(disk.lastInboundSeq || 0)
-        const memLastSeq = Number(state.lastSeq || 0)
-        const memLastInbound = Number(state.lastInboundSeq || 0)
-        resetBoundarySeq = Math.max(
-          Number.isFinite(diskLastSeq) ? diskLastSeq : 0,
-          Number.isFinite(diskLastInbound) ? diskLastInbound : 0,
-          Number.isFinite(memLastSeq) ? memLastSeq : 0,
-          Number.isFinite(memLastInbound) ? memLastInbound : 0,
-        )
-      } catch {}
+        await controller.session.newSession()
+        nextSessionFile = safeString(controller.session && controller.session.sessionFile || '').trim()
+      } finally {
+        await controller.dispose()
+      }
 
-      try {
-        const cmdSeq = Number(state.lastResetCommandSeq || 0)
-        const cmdMsgId = safeString(state.lastResetCommandMessageId || '')
-        const want = safeString(resetMessageId || '')
-        if (cmdSeq > 0 && cmdMsgId && want && cmdMsgId === want) resetBoundarySeq = cmdSeq
-      } catch {}
-      const freshBoundarySeq = Math.max(0, resetBoundarySeq - 1)
-
-	      state.lastResetAtMs = nowMs()
-	      state.lastResetSeq = freshBoundarySeq
-	      state.lastThreadIngestedSeq = freshBoundarySeq
-	      writeCodexThreadId(state, '')
-        writePiSessionFile(state, '')
-	      try { fs.rmSync(piSessionDirForChat(chatDir), { recursive: true, force: true }) } catch {}
-      state.bridgeProtocolRetryCount = 0
-      clearPersistentRunFlags(state, { keepPendingTrigger: false })
-      state.inboundUnprocessed = 0
-      state.lastInboundText = ''
-      state.lastAgentInboundSeq = 0
-      state.lastAgentInboundAt = 0
-      state.lastAgentInboundText = ''
-      state.lastAgentResult = null
-      state.lastShadowResult = null
-      state.lastResetResult = null
-      state.lastProcessedSeq = freshBoundarySeq
-      state.batchEndSeq = freshBoundarySeq
-      state.replyToMessageId = ''
+      const freshBoundarySeq = Math.max(0, Number(state.lastSeq || state.lastInboundSeq || 0) || 0)
+      state.lastThreadIngestedSeq = freshBoundarySeq
+      resetConversationStateForBoundary({
+        state,
+        freshBoundarySeq,
+        keepPendingTrigger: false,
+      })
+      reconcilePiSessionFile(state, nextSessionFile, chatKey)
       saveState()
+      queueBrainFinalize({ chatKey, reason: 'new' })
 
-      queueBrainFinalize({ chatKey, reason: 'reset' })
-
-      void finalizeResetLogCutover({
+      await sendBridgeCommandText({
         chatKey,
-        chatDir,
-        stagingDir: resetLogCutover.stagingDir,
-        historyDir: resetLogCutover.historyDir,
-      }).catch(() => {})
-      if (resetRecord && typeof resetRecord === 'object') {
-        try {
-          appendJsonl(
-            path.join(chatDir, 'logs', `${isoDate((Number(resetRecord.ts || 0) || 0) * 1000 || nowMs())}.jsonl`),
-            resetRecord,
-          )
-        } catch (e) {
-          logger.warn(`reset record reappend failed chatKey=${chatKey} err=${safeString(e && (e as any).message ? (e as any).message : e)}`)
-        }
-      }
-
-      const resetReplyText = safeString(uiText('commands.reset.messages.reply') || 'Understood. Starting fresh here.').trim()
-      if (!resetReplyText) return
-
-      const resetReplyToMessageId = safeString(resetMessageId || (resetRecord && resetRecord.messageId) || '')
-      const markResetResult = (result: any) => {
-        state.lastResetResult = normalizeLastAgentResult({
-          runtime: state.processingRuntime || primaryRuntimeForChat(chatKey),
-          ...result,
-        })
-        saveState()
-      }
-
-      try {
-        await sendToChat({
-          chatKey,
-          parsed,
-          text: resetReplyText,
-          images: [],
-          files: [],
-          via: 'koishi-cmd',
-          replyToMessageId: resetReplyToMessageId,
-        })
-        state.lastSystemAckAt = nowMs()
-        markResetResult({
-          kind: 'ok',
-          finishedAt: nowMs(),
-          forInboundSeq: Number(resetBoundarySeq || 0) || Number(state.lastResetCommandSeq || 0) || 0,
-          processedToSeq: freshBoundarySeq,
-          exitCode: 0,
-          lastMessage: resetReplyText,
-        })
-      } catch (e) {
-        logger.warn(`reset reply send failed chatKey=${chatKey} err=${safeString(e && (e as any).message ? (e as any).message : e)}`)
-        markResetResult({
-          kind: 'failed',
-          finishedAt: nowMs(),
-          forInboundSeq: Number(resetBoundarySeq || 0) || Number(state.lastResetCommandSeq || 0) || 0,
-          processedToSeq: freshBoundarySeq,
-          exitCode: 1,
-          lastMessage: safeString(e && (e as any).message ? (e as any).message : e),
-        })
-      }
+        parsed,
+        text: 'Started a new session here.',
+        replyToMessageId: safeString(newMessageId || ''),
+      })
     }
 
 
 
-    function canRunRestartCommand(_session, trust) {
-      return trust === 'OWNER'
-    }
-
-    // Control command permissions.
-    function canRunControlCommand(session, trust) {
-      if (!(trust === 'OWNER' || trust === 'TRUSTED')) return false
-      // Private: OWNER only (avoid social engineering).
-      if (!session.guildId) return trust === 'OWNER'
-      // Group: OWNER/TRUSTED.
+    async function maybeHandleBridgeSlashCommand(session: any) {
+      const resolved = await resolveBridgeSlashSessionCommand(session)
+      if (!resolved.known || !resolved.invocation) return false
+      if (!resolved.authorized) return true
+      const { chatKey } = getChatCtx(session)
+      await runBridgeSlashCommand({
+        chatKey,
+        text: resolved.invocation.raw,
+        replyToMessageId: safeString(session && session.messageId || ''),
+      })
       return true
     }
-
-    ctx.before('command/execute', (argv: any) => {
-      const commandName = safeString(argv && argv.command && argv.command.name || '')
-      if (!commandName || !['help', 'reset', 'restart', 'status'].includes(commandName)) return
-      const session = argv && argv.session
-      if (isExplicitSlashControlCommand(session, `/${commandName}`)) return
-      return ''
-    }, true)
-
-    ctx.command('help', uiText('commands.help.description')).action(async ({ session }) => {
-      if (!isExplicitSlashControlCommand(session, '/help')) return ''
-      const { platform, chatKey } = getChatCtx(session)
-      const identity = getIdentity()
-      const trust = identity.trustOf(platform, safeString(session.userId))
-      if (!canRunControlCommand(session, trust)) return
-      await handleHelp({ chatKey, session })
-    })
-
-    ctx.command('status', uiText('commands.status.description')).action(async ({ session }) => {
-      if (!isExplicitSlashControlCommand(session, '/status')) return ''
-      const { platform, chatKey } = getChatCtx(session)
-      const identity = getIdentity()
-      const trust = identity.trustOf(platform, safeString(session.userId))
-      if (!canRunControlCommand(session, trust)) return
-      await handleStatus({ chatKey })
-    })
-
-    ctx.command('reset', uiText('commands.reset.description')).action(async ({ session }) => {
-      if (!isExplicitSlashControlCommand(session, '/reset')) return ''
-      const { platform, chatKey } = getChatCtx(session)
-      const identity = getIdentity()
-      const trust = identity.trustOf(platform, safeString(session.userId))
-      if (!canRunControlCommand(session, trust)) return
-      // Ensure the inbound `/reset` message has a seq + is de-duped, regardless of middleware ordering.
-      // (This prevents boot catch-up from "resurrecting" a pre-reset message after restart.)
-      try { await handleMessageLike(session) } catch {}
-      await handleReset({ chatKey, resetMessageId: safeString(session.messageId) })
-    })
-
-    ctx.command('restart', uiText('commands.restart.description')).action(async ({ session }) => {
-      if (!isExplicitSlashControlCommand(session, '/restart')) return ''
-      const { platform, chatKey } = getChatCtx(session)
-      const identity = getIdentity()
-      const trust = identity.trustOf(platform, safeString(session.userId))
-      if (!canRunRestartCommand(session, trust)) return
-      try { await handleMessageLike(session) } catch {}
-      await handleRestart({ chatKey, restartMessageId: safeString(session.messageId) })
-    })
 
     function scheduleActivation(chatKey, fn, delayMs, maxDelayMs) {
       if (isShuttingDown()) return
@@ -4007,96 +3352,17 @@ const rinBridge = (() => {
       debounceTimers.set(key, { timer, firstAt: existing.firstAt })
     }
 
-    async function hydrateInboundHistoryIntoThread({
-      chatKey,
-      chatDir,
-      state,
-      saveState,
-      processingRunId,
-      uptoSeqExclusive,
-    }: any) {
-      const targetSeqExclusive = Math.max(0, Number(uptoSeqExclusive || 0) || 0)
-      let hydratedThroughSeq = Math.max(0, Number(state.lastThreadIngestedSeq || 0) || 0)
-      if (targetSeqExclusive <= hydratedThroughSeq + 1) {
-        return { ok: true, hydratedThroughSeq, injectedCount: 0, interrupted: false }
-      }
-
-      const records = readChatLogRecordsInSeqRange(chatDir, {
-        minSeqInclusive: hydratedThroughSeq + 1,
-        maxSeqInclusive: targetSeqExclusive - 1,
-        inboundOnly: true,
-      }).filter((record) => !shouldSkipThreadHistoryRecord(record))
-
-      let injectedCount = 0
-      for (const record of records) {
-        if (!isCurrentProcessingRun(state, processingRunId) || state.interruptRequested) {
-          return { ok: false, hydratedThroughSeq, injectedCount, interrupted: true }
-        }
-
-        const recordSeq = Math.max(0, Number(record && record.seq || 0) || 0)
-        const inputs = buildThreadHistoryInputsFromRecord(record)
-        if (!inputs.length) {
-          hydratedThroughSeq = Math.max(hydratedThroughSeq, recordSeq)
-          state.lastThreadIngestedSeq = Math.max(Number(state.lastThreadIngestedSeq || 0), hydratedThroughSeq)
-          saveState()
-          continue
-        }
-
-        const result = await runCodexAppServerTurn({
-          repoRoot,
-          workspaceRoot,
-          prompt: '',
-          inputItems: inputs,
-          resumeThreadId: readCodexThreadId(state) || null,
-          timeoutMs: 30_000,
-          runtimeTracking: {
-            chatKey,
-            chatDir,
-            state,
-            saveState,
-            processingRunId,
-            observedToSeq: state.batchEndSeq,
-            allowInterrupt: true,
-          },
-          turnBehavior: {
-            autoInterruptOnTurnStart: true,
-            allowInterruptedSuccess: true,
-          },
-        })
-
-        reconcileCodexThreadId(state, result && result.threadId, chatKey)
-        if (result && result.turnStarted) {
-          hydratedThroughSeq = Math.max(hydratedThroughSeq, recordSeq)
-          state.lastThreadIngestedSeq = Math.max(Number(state.lastThreadIngestedSeq || 0), hydratedThroughSeq)
-          saveState()
-        }
-
-        if (state.interruptRequested) {
-          return { ok: false, hydratedThroughSeq, injectedCount, interrupted: true }
-        }
-        if (result.code !== 0) {
-          logger.warn(`thread history inject failed chatKey=${chatKey} seq=${recordSeq} code=${result.code} status=${safeString(result.turnStatus || '')} stderr=${JSON.stringify((result.stderr || '').slice(0, 500))}`)
-          return { ok: false, hydratedThroughSeq, injectedCount, interrupted: false }
-        }
-
-        injectedCount += 1
-      }
-
-      return { ok: true, hydratedThroughSeq, injectedCount, interrupted: false }
-    }
-
 	    function requestInterruptIfProcessing({ chatKey, chatDir, state, saveState, reason }: any) {
 	      if (!state || !state.processing) return
-	      // Some operations (e.g. /reset thread init) must not be interrupted by new inbound work.
+	      // Some operations (e.g. session replacement during /new) must not be interrupted by new inbound work.
 	      if (state.processingNoInterrupt) return
 
-      if (!state.interruptRequested) {
-        state.interruptRequested = true
-        state.interruptRequestedAt = nowMs()
-        // New inbound work should cancel any CONTINUE loop.
-        state.forceContinue = false
-        saveState()
-      }
+      const interrupt = requestConversationInterrupt({
+        state,
+        nowMs: nowMs(),
+        clearForceContinue: true,
+      })
+      if (interrupt.changed) saveState()
 
 	      const runId = safeString(state.processingRunId || '')
         const active = getActiveProcessingTurn({ chatKey, processingRunId: runId })
@@ -4123,24 +3389,9 @@ const rinBridge = (() => {
             })
           return
         }
-        if (activeRuntime === 'codex' && activeThreadId && activeTurnId) {
-          logger.info(`interrupt requested chatKey=${chatKey} runtime=${activeRuntime} thread=${activeThreadId} turn=${activeTurnId} reason=${safeString(reason)}`)
-          void ensureCodexAppServerSupervisor(repoRoot, workspaceRoot)
-            .then((supervisor) => supervisor.interruptTurn({ threadId: activeThreadId, turnId: activeTurnId }))
-            .catch((e: any) => {
-              logger.warn(`interrupt dispatch failed chatKey=${chatKey} err=${safeString(e && e.message ? e.message : e)}`)
-            })
-          return
-        }
 
 	      const pid = Number(state.processingPid || 0)
 	      if (!Number.isFinite(pid) || pid <= 0) return
-
-        const supervisorPid = currentCodexAppServerPid()
-        if (activeRuntime === 'codex' && supervisorPid && pid === supervisorPid) {
-          logger.warn(`interrupt requested but no active turn handle chatKey=${chatKey} pid=${pid} reason=${safeString(reason)}`)
-          return
-        }
 	      const statePath = path.join(chatDir, 'state.json')
 
       const signalIfStillCurrent = (signal) => {
@@ -4164,40 +3415,12 @@ const rinBridge = (() => {
       try {
         const statePath = path.join(chatDir, 'state.json')
         const disk = readJson(statePath, null)
-        if (!disk || typeof disk !== 'object') return
-
-        // If a new inbound message arrives while `activate()` is running, it updates state.json from
-        // another call stack. `activate()` must not clobber those flags with a stale in-memory copy.
-
-        const diskInterrupt = Boolean(disk.interruptRequested)
-        if (diskInterrupt) {
-          state.interruptRequested = true
-          state.interruptRequestedAt = Math.max(Number(state.interruptRequestedAt || 0), Number(disk.interruptRequestedAt || 0))
-        }
-
-        const diskLastAgentInbound = Number(disk.lastAgentInboundSeq || 0)
-        const diskPendingWake = Boolean(disk.pendingWake)
-        const diskTrigger = disk.pendingTrigger && typeof disk.pendingTrigger === 'object' ? disk.pendingTrigger : null
-        const diskTriggerSeq = diskTrigger ? Number(diskTrigger.seq || 0) : 0
-
-        const shouldKeepTrigger = diskTrigger && (!Number.isFinite(Number(observedToSeq)) || Number(diskTriggerSeq) > Number(observedToSeq))
-        if (shouldKeepTrigger) {
-          state.pendingTrigger = mergePendingTrigger(state.pendingTrigger, diskTrigger)
-          state.pendingWake = true
-        }
-
-        // Extra guardrail: even if another writer forgot to set `pendingWake`, a larger
-        // agent-visible inbound seq means there is still pending work after `observedToSeq`.
-        if (Number.isFinite(Number(observedToSeq)) && Number.isFinite(diskLastAgentInbound)) {
-          if (diskLastAgentInbound > Number(observedToSeq)) state.pendingWake = true
-        } else if (diskPendingWake) {
-          state.pendingWake = true
-	        }
-	      } catch {}
+        syncConversationFromDisk({ state, disk, observedToSeq, mergePendingTrigger })
+      } catch {}
 	    }
     syncConcurrentStateFromDiskRef = syncConcurrentStateFromDisk
 
-	    async function runCodexInChatSession({ chatKey, prompt, kind, name = '' }: any) {
+	    async function runChatSessionTurn({ chatKey, prompt, kind, name = '' }: any) {
 	      const parsed = parseChatKey(chatKey)
 	      if (!parsed) throw new Error('invalid_chatKey')
 	      const pseudo = pseudoSessionFromParsed(parsed)
@@ -4213,24 +3436,21 @@ const rinBridge = (() => {
           state = ctx.state
           saveState = ctx.saveState
           if (isShuttingDown()) return { ok: false, error: 'shutting_down' }
-          if (state.processing) {
-            state.pendingWake = true
+          processingRunId = nodeCrypto.randomBytes(12).toString('hex')
+          const claimed = claimConversationProcessing({
+            state,
+            runtime: runtimeKind,
+            processingRunId,
+            nowMs: nowMs(),
+            noInterrupt: false,
+            pendingOnBusy: true,
+            clearReplyTo: true,
+            clearForceContinue: true,
+          })
+          if (!claimed.ok) {
             saveState()
             return { ok: false, error: 'chat_busy' }
           }
-
-          state.processing = true
-          state.processingNoInterrupt = false
-          state.processingRuntime = runtimeKind
-          state.processingPid = 0
-          state.processingThreadId = ''
-          state.processingTurnId = ''
-          processingRunId = nodeCrypto.randomBytes(12).toString('hex')
-          state.processingRunId = processingRunId
-          state.processingStartedAt = nowMs()
-          state.replyToMessageId = ''
-          // Never allow CONTINUE loops for scheduled jobs.
-          state.forceContinue = false
           // Preserve any pending triggers/wake requests; they will be processed after the job.
           syncConcurrentStateFromDisk({ chatDir, state, observedToSeq: null })
           saveState()
@@ -4238,8 +3458,8 @@ const rinBridge = (() => {
         }, { op: 'scheduled_claim', chatKey, kind: safeString(kind), name: safeString(name) })
         if (!claim || claim.ok === false) throw new Error(claim?.error || 'chat_busy')
 
-		        const activeHandle = runtimeKind === 'pi' ? readPiSessionFile(state) : readCodexThreadId(state)
-            logger.info(`scheduled run chatKey=${chatKey} kind=${safeString(kind)} name=${safeString(name)} runner=${runtimeKind === 'pi' ? 'pi-sdk' : 'codex-app-server'} thread=${activeHandle || '(new)'}`)
+		        const activeHandle = readPiSessionFile(state)
+            logger.info(`scheduled run chatKey=${chatKey} kind=${safeString(kind)} name=${safeString(name)} runner=pi-sdk thread=${activeHandle || '(new)'}`)
 
 		        const doRun = async () => {
 		          const result = await runSelectedRuntimeTurn({
@@ -4251,10 +3471,8 @@ const rinBridge = (() => {
                 piModel: configuredPiModel,
                 piThinking: configuredPiThinking,
 		            prompt,
-		            resumeThreadId: runtimeKind === 'pi'
-                  ? (readPiSessionFile(state) || null)
-                  : (readCodexThreadId(state) || null),
-		            timeoutMs: config.agentMaxRuntimeMs || config.codexMaxRuntimeMs || 0,
+		            resumeThreadId: readPiSessionFile(state) || null,
+		            timeoutMs: config.agentMaxRuntimeMs || 0,
 		            images: [],
               bridgeSend: {
                 chatKey,
@@ -4277,13 +3495,6 @@ const rinBridge = (() => {
         const result = await doRun()
 
         const trimmed = (result.lastMessage || '').trim()
-        const outbound = recentOutboundRecords(chatDir, {
-          minTsMs: Number(state.processingStartedAt || 0) || 0,
-        })
-        const completion = evaluateTurnCompletion(result.lastMessage, outbound, {
-          allowContinue: false,
-          allowLegacyOk: false,
-        })
         const post = await withChatLock(chatKey, async () => {
           syncConcurrentStateFromDisk({ chatDir, state, observedToSeq: null })
           if (!isCurrentProcessingRun(state, processingRunId)) {
@@ -4291,7 +3502,7 @@ const rinBridge = (() => {
             return { shouldWake: false, interrupted: false, stale: true }
           }
           const interrupted = Boolean(state.interruptRequested)
-          if (!interrupted && result.code === 0 && completion.kind === 'ok') {
+          if (!interrupted && result.code === 0) {
             state.lastSystemAckAt = nowMs()
           } else if (interrupted) {
             logger.info(`scheduled run interrupted chatKey=${chatKey} kind=${safeString(kind)} name=${safeString(name)}`)
@@ -4299,26 +3510,17 @@ const rinBridge = (() => {
             logger.warn(`scheduled run failed chatKey=${chatKey} kind=${safeString(kind)} name=${safeString(name)} code=${result.code} lastMessage=${JSON.stringify(trimmed)} stderr=${JSON.stringify((result.stderr || '').slice(0, 500))}`)
           }
 
-            if (runtimeKind === 'pi') {
-              reconcilePiSessionFile(state, result && ((result as any).sessionFile || result.threadId), chatKey)
-            } else {
-              reconcileCodexThreadId(state, result && result.threadId, chatKey)
-            }
+            reconcilePiSessionFile(state, result && ((result as any).sessionFile || result.threadId), chatKey)
 
-          state.processing = false
-          state.processingRuntime = ''
-          state.processingPid = 0
-          state.processingThreadId = ''
-          state.processingTurnId = ''
-          state.processingRunId = ''
-          state.processingStartedAt = 0
-          state.replyToMessageId = ''
-          state.forceContinue = false
-          state.interruptRequested = false
-          state.interruptRequestedAt = 0
-          const shouldWake = !isShuttingDown() && Boolean(state.pendingWake)
+          const released = releaseConversationProcessing({
+            state,
+            preservePendingWake: !isShuttingDown(),
+            preservePendingTrigger: true,
+            preserveResetPending: true,
+            preserveForceContinue: false,
+          })
           saveState()
-          return { shouldWake, interrupted }
+          return { shouldWake: released.shouldWake, interrupted }
         }, { op: 'scheduled_release', chatKey, kind: safeString(kind), name: safeString(name) })
 
         if (post && post.shouldWake) {
@@ -4329,9 +3531,6 @@ const rinBridge = (() => {
 
         if (post && post.interrupted) throw new Error('interrupted')
         if (result.code !== 0) throw new Error(`${runtimeKind}_failed`)
-        if (completion.kind !== 'ok') {
-          throw new Error(`${runtimeKind}_bad_last_message:${trimmed || '(empty)'}`)
-        }
         return { ok: true }
       })
 
@@ -4345,7 +3544,7 @@ const rinBridge = (() => {
 	      const abs = path.resolve(workspaceRoot, routinePath)
 	      if (!abs.startsWith(workspaceRoot + path.sep) && abs !== workspaceRoot) throw new Error('routineFile_outside_workspace')
 	      const promptText = readPromptFileText(abs, 'routineFile')
-	      return await runCodexEphemeralTurn({ inputItems: [{ type: 'text', text: promptText }], prompt: '', kind: 'timer', name, chatKey })
+	      return await runEphemeralTurn({ inputItems: [{ type: 'text', text: promptText }], prompt: '', kind: 'timer', name, chatKey })
 	    }
 
       function deriveInspectTodoPath(promptPath: string, inspectName = '') {
@@ -4375,7 +3574,7 @@ const rinBridge = (() => {
       const { todoRel, todoAbs } = resolveInspectTodoPath(safeString(todoFile).trim() || deriveInspectTodoPath(p, name), true)
 	      if (!fs.existsSync(todoAbs)) return { ok: true, skipped: 'missing_todo' }
 
-	      return await runCodexEphemeralTurn({ inputItems: [{ type: 'text', text: promptText }], prompt: '', kind: 'inspect', name, chatKey: deliveryChatKey })
+	      return await runEphemeralTurn({ inputItems: [{ type: 'text', text: promptText }], prompt: '', kind: 'inspect', name, chatKey: deliveryChatKey })
 	    }
 
       async function runInspectCommandNow({ sessionChatKey, command, todoFile, name = '' }: any) {
@@ -4422,11 +3621,9 @@ const rinBridge = (() => {
         })
       }
 
-    async function runCodexEphemeralTurn({ prompt, inputItems = null, kind, name = '', chatKey = '' }: any) {
+    async function runEphemeralTurn({ prompt, inputItems = null, kind, name = '', chatKey = '' }: any) {
       const runtimeKind = runtimeForEphemeralTurn(safeString(chatKey || '').trim())
-      const runnerName = runtimeKind === 'pi' ? 'pi-sdk' : 'codex-app-server'
-      logger.info(`scheduled run (ephemeral) kind=${safeString(kind)} name=${safeString(name)} runner=${runnerName} thread=(new)`)
-      const runStartedAtMs = nowMs()
+      logger.info(`scheduled run (ephemeral) kind=${safeString(kind)} name=${safeString(name)} runner=pi-sdk thread=(new)`)
 
       const result = await runSelectedRuntimeTurn({
         runtimeKind,
@@ -4439,7 +3636,7 @@ const rinBridge = (() => {
         prompt,
         inputItems,
         resumeThreadId: null,
-        timeoutMs: config.agentMaxRuntimeMs || config.codexMaxRuntimeMs || 0,
+        timeoutMs: config.agentMaxRuntimeMs || 0,
         images: [],
         bridgeSend: safeString(chatKey || '')
           ? {
@@ -4454,7 +3651,7 @@ const rinBridge = (() => {
       const parsed = safeString(chatKey || '') ? parseChatKey(safeString(chatKey || '')) : null
       const chatDir = parsed ? chatDirForParsed(parsed) : ''
       if (runtimeKind === 'pi' && parsed && Number(result.code || 0) === 0) {
-        const normalized = normalizeFinalAgentMessage(result.lastMessage || '')
+        const normalized = normalizeBridgeAssistantText(result.lastMessage || '')
         if (normalized.kind === 'reply') {
           await sendToChat({
             chatKey: safeString(chatKey || ''),
@@ -4467,18 +3664,7 @@ const rinBridge = (() => {
           })
         }
       }
-      const outbound = chatDir
-        ? recentOutboundRecords(chatDir, { minTsMs: runStartedAtMs })
-        : []
-      const completion = evaluateTurnCompletion(result.lastMessage, outbound, {
-        allowContinue: false,
-        allowLegacyOk: false,
-        allowReplyWithoutDelivery: !safeString(chatKey || '').trim(),
-      })
       if (result.code !== 0) throw new Error(`${runtimeKind}_failed:code=${String(result.code)}`)
-      if (completion.kind !== 'ok') {
-        throw new Error(`${runtimeKind}_bad_last_message:${trimmed || '(empty)'}`)
-      }
       return { ok: true, continue: false }
     }
 
@@ -4622,49 +3808,21 @@ const rinBridge = (() => {
 	          if (isShuttingDown()) {
 	            return { ok: false }
 	          }
-	          if (state.processing) {
-	            state.pendingWake = true
-	            saveState()
+	          processingRunId = nodeCrypto.randomBytes(12).toString('hex')
+          runStartedAtMs = nowMs()
+          const claimed = claimConversationTurn({
+            state,
+            primaryRuntime,
+            processingRunId,
+            nowMs: runStartedAtMs,
+          })
+          if (!claimed || claimed.ok === false) {
+            saveState()
             return { ok: false }
           }
-
-          const pendingTrigger = state.pendingTrigger && typeof state.pendingTrigger === 'object' ? state.pendingTrigger : null
-          const resetPendingTrigger = state.resetPendingTrigger && typeof state.resetPendingTrigger === 'object'
-            ? state.resetPendingTrigger
-            : null
-          const claimedTrigger = resetPendingTrigger || pendingTrigger
-          const triggerSeq = Number(claimedTrigger && claimedTrigger.seq || 0) || 0
-          fromSeq = (state.lastProcessedSeq || 0) + 1
-          toSeq = triggerSeq > 0 ? triggerSeq : (state.lastAgentInboundSeq || 0)
-          const allowEmpty = Boolean(state.forceContinue)
-          if (toSeq < fromSeq && !allowEmpty) return { ok: false }
-
-          state.processing = true
-          state.processingNoInterrupt = Boolean(claimedTrigger && (claimedTrigger as any).processingNoInterrupt)
-          state.processingRuntime = primaryRuntime
-          state.processingPid = 0
-          state.processingThreadId = ''
-          state.processingTurnId = ''
-	          processingRunId = nodeCrypto.randomBytes(12).toString('hex')
-	          state.processingRunId = processingRunId
-          runStartedAtMs = nowMs()
-	          state.processingStartedAt = runStartedAtMs
-	          state.batchEndSeq = toSeq
-	          trigger = claimedTrigger
-	          state.interruptRequested = false
-	          state.interruptRequestedAt = 0
-          const pendingTriggerSeq = Number(pendingTrigger && pendingTrigger.seq || 0) || 0
-          const keepQueuedPending = Boolean(
-            resetPendingTrigger
-            && pendingTrigger
-            && pendingTriggerSeq > triggerSeq,
-          )
-	          state.pendingWake = keepQueuedPending
-          if (resetPendingTrigger) {
-            state.resetPendingTrigger = null
-          }
-	          state.pendingTrigger = keepQueuedPending ? pendingTrigger : null
-          state.replyToMessageId = safeString(trigger?.messageId || '')
+          fromSeq = Number(claimed.fromSeq || 0) || 0
+          toSeq = Number(claimed.toSeq || 0) || 0
+          trigger = claimed.trigger || null
           // If a new trigger arrived between the state snapshot above and this state write,
           // preserve it (and any interrupt request) instead of wiping it.
           syncConcurrentStateFromDisk({ chatDir, state, observedToSeq: toSeq })
@@ -4673,53 +3831,7 @@ const rinBridge = (() => {
         }, { op: 'activate_claim', chatKey })
         if (!claim || claim.ok === false) return
 
-	        if (primaryRuntime === 'codex') {
-	          const historyHydration = await hydrateInboundHistoryIntoThread({
-            chatKey,
-            chatDir,
-            state,
-            saveState,
-            processingRunId,
-            uptoSeqExclusive: toSeq,
-          })
-          if (historyHydration && historyHydration.interrupted) {
-          logger.info(`activate history hydration interrupted chatKey=${chatKey} hydratedThrough=${Number(historyHydration.hydratedThroughSeq || 0) || 0} targetExclusive=${toSeq}`)
-          const post = await withChatLock(chatKey, async () => {
-            syncConcurrentStateFromDisk({ chatDir, state, observedToSeq: state.batchEndSeq })
-            if (!isCurrentProcessingRun(state, processingRunId)) return { action: 'stale' }
-            state.forceContinue = false
-            state.processing = false
-            state.processingRuntime = ''
-            state.processingPid = 0
-            state.processingThreadId = ''
-            state.processingTurnId = ''
-            state.processingRunId = ''
-            state.processingStartedAt = 0
-            state.replyToMessageId = ''
-            state.interruptRequested = false
-            state.interruptRequestedAt = 0
-            const action = isShuttingDown()
-              ? 'shutdown'
-              : state.pendingWake
-                ? 'wake'
-                : 'done'
-            saveState()
-            return { action }
-          }, { op: 'activate_history_abort', chatKey })
-
-          if (!post) return
-          if (post.action === 'shutdown' || post.action === 'stale') return
-	          if (post.action === 'wake') {
-	            scheduleActivation(chatKey, () => {
-	              activate(session).catch((e) => logger.error(e))
-	            }, 0, 0)
-		          }
-		          return
-		        }
-          }
-	        const activeThreadId = primaryRuntime === 'codex'
-            ? readCodexThreadId(state)
-            : readPiSessionFile(state)
+	        const activeThreadId = readPiSessionFile(state)
         const currentRecord = readChatLogRecordsInSeqRange(chatDir, {
           minSeqInclusive: toSeq,
           maxSeqInclusive: toSeq,
@@ -4747,12 +3859,12 @@ const rinBridge = (() => {
         const batchInputItems = buildBatchInputItemsFromRecords(batchedRecords, {
           maxImages: 6,
         })
-	        const runnerName = primaryRuntime === 'pi' ? 'pi-sdk' : 'codex-app-server'
+	        const runnerName = 'pi-sdk'
 	        logger.info(`activate chatKey=${chatKey} seq=${fromSeq}..${toSeq} runner=${runnerName} thread=${activeThreadId || '(new)'}`)
 
-	        const { result, trimmed, completion, protocolViolation } = await runBridgeReplyTurn({
+	        const { result, trimmed } = await runBridgeReplyTurn({
           runtimeKind: primaryRuntime,
-          parsed: { platform, chatId },
+          parsed: { platform, botId, chatId },
           chatKey,
           chatDir,
           state,
@@ -4761,16 +3873,10 @@ const rinBridge = (() => {
           observedToSeq: state.batchEndSeq,
           allowInterrupt: true,
           prompt: '',
-	          inputItems: primaryRuntime === 'pi' ? batchInputItems : liveInputItems,
-	          resumeThreadId: primaryRuntime === 'pi'
-              ? (readPiSessionFile(state) || null)
-              : (readCodexThreadId(state) || null),
-          timeoutMs: config.agentMaxRuntimeMs || config.codexMaxRuntimeMs || 0,
+	          inputItems: batchInputItems,
+	          resumeThreadId: readPiSessionFile(state) || null,
+          timeoutMs: config.agentMaxRuntimeMs || 0,
           replyToMessageId: safeString(currentRecord && currentRecord.messageId || trigger?.messageId || ''),
-          recentOutboundMinSeqExclusive: toSeq,
-          recentOutboundMinTsMs: runStartedAtMs || 0,
-          allowContinue: true,
-          allowLegacyOk: false,
         })
         const post = await withChatLock(chatKey, async () => {
           // Pick up concurrent interrupt requests / pending triggers that happened during the run.
@@ -4780,102 +3886,36 @@ const rinBridge = (() => {
             return { action: 'stale' }
           }
 
-	          if (primaryRuntime === 'codex') {
-	            reconcileCodexThreadId(state, result && result.threadId, chatKey)
-	          } else {
-              reconcilePiSessionFile(state, result && ((result as any).sessionFile || result.threadId), chatKey)
-            }
-	          if (primaryRuntime === 'codex' && result && result.turnStarted) {
-	            state.lastThreadIngestedSeq = Math.max(
-	              Number(state.lastThreadIngestedSeq || 0),
-	              Number(state.batchEndSeq || 0) || 0,
-            )
-          }
+	          reconcilePiSessionFile(state, result && ((result as any).sessionFile || result.threadId), chatKey)
 
           const interrupted = Boolean(state.interruptRequested)
           const finishedAt = nowMs()
-          const resultKind = !interrupted && result.code === 0 && completion.kind === 'ok'
-            ? 'ok'
-            : !interrupted && protocolViolation
-              ? 'protocol_violation'
-              : interrupted
-                ? 'interrupted'
-                : 'failed'
-          const lastAgentResultRecord = {
-            runtime: primaryRuntime,
-            kind: resultKind,
+          const released = releaseConversationTurn({
+            state,
+            resultCode: result.code,
+            interrupted,
+            primaryRuntime,
+            trimmed,
+            toSeq,
+            fromSeq,
             finishedAt,
-            forInboundSeq: Number(toSeq || state.batchEndSeq || 0) || 0,
-            processedToSeq: Number(state.batchEndSeq || 0) || 0,
-            exitCode: result.code == null ? null : Number(result.code),
-            lastMessage: trimmed,
-          }
-          state.lastAgentResult = lastAgentResultRecord
-          const resetCommandSeq = Number(state.lastResetCommandSeq || 0) || 0
-          const coversResetCommand = resetCommandSeq > 0
-            && Number(fromSeq || 0) <= resetCommandSeq
-            && Number(toSeq || state.batchEndSeq || 0) >= resetCommandSeq
-          if (coversResetCommand) state.lastResetResult = { ...lastAgentResultRecord }
-          if (!interrupted && result.code === 0 && completion.kind === 'ok') {
-            state.lastProcessedSeq = state.batchEndSeq
-            state.forceContinue = false
-            state.inboundUnprocessed = 0
-            state.bridgeProtocolRetryCount = 0
+            isShuttingDown: isShuttingDown(),
+          })
+          if (!interrupted && result.code === 0) {
             logger.info(`${runnerName} reply chatKey=${chatKey} processedTo=${state.lastProcessedSeq}`)
-          } else if (!interrupted && protocolViolation && Number(state.bridgeProtocolRetryCount || 0) < 2) {
-            state.forceContinue = false
-            state.bridgeProtocolRetryCount = Number(state.bridgeProtocolRetryCount || 0) + 1
-            state.pendingWake = true
-            state.pendingTrigger = mergePendingTrigger(state.pendingTrigger, trigger)
-            logger.warn(`${runnerName} protocol violation chatKey=${chatKey} retry=${state.bridgeProtocolRetryCount} lastMessage=${JSON.stringify(trimmed)}`)
-          } else if (!interrupted && protocolViolation) {
-            state.forceContinue = false
-            state.bridgeProtocolRetryCount = 0
-            logger.warn(`${runnerName} protocol violation exhausted chatKey=${chatKey} lastMessage=${JSON.stringify(trimmed)}`)
           } else if (interrupted) {
-            state.forceContinue = false
-            state.bridgeProtocolRetryCount = 0
             logger.info(`${runnerName} interrupted chatKey=${chatKey} processedTo=${state.lastProcessedSeq || 0} batchEnd=${state.batchEndSeq}`)
           } else {
-            state.forceContinue = false
-            state.bridgeProtocolRetryCount = 0
             logger.warn(`${runnerName} failed chatKey=${chatKey} code=${result.code} lastMessage=${JSON.stringify(trimmed)} stderr=${JSON.stringify((result.stderr || '').slice(0, 500))}`)
           }
 
-          state.processing = false
-          state.processingRuntime = ''
-          state.processingPid = 0
-          state.processingThreadId = ''
-          state.processingTurnId = ''
-          state.processingRunId = ''
-          state.processingStartedAt = 0
-          state.replyToMessageId = ''
-          state.interruptRequested = false
-          state.interruptRequestedAt = 0
-
-          const action = isShuttingDown()
-            ? 'shutdown'
-            : state.forceContinue
-              ? 'continue'
-              : state.pendingWake
-                ? 'wake'
-                : 'done'
           saveState()
-          return { action }
+          return { action: released && released.action ? released.action : 'done' }
         }, { op: 'activate_release', chatKey })
 
 	        if (!post) return
 	        if (post.action === 'shutdown') return
 	        if (post.action === 'stale') return
-          queueShadowBridgeTurn({
-            chatKey,
-            parsed: { platform, chatId },
-            uptoSeq: toSeq,
-            liveInputItems,
-            batchInputItems,
-            primaryRuntime,
-            primaryResultText: result && result.lastMessage || '',
-          })
 	        // CONTINUE: re-activate soon even if no new messages.
         if (post.action === 'continue') {
           scheduleActivation(chatKey, () => {
@@ -4900,13 +3940,16 @@ const rinBridge = (() => {
       const { platform, chatId, chatKey, chatDir, state, saveState } = getChatCtx(session)
       const shuttingDown = isShuttingDown()
       const identity = getIdentity()
-      const userId = safeString(session.userId)
+      const userId = pickUserId(session)
       const trust = identity.trustOf(platform, userId)
       const inboundText = getInboundText(session)
 
-      const commandLike = extractCommandLikeText(inboundText)
-      const slash = isSlashCommandText(inboundText)
-      const isPrivilegedCommand = !!slash && canRunControlCommand(session, trust)
+      const slashResolution = await resolveBridgeSlashSessionCommand(session)
+      const commandLike = slashResolution && slashResolution.known
+        ? safeString(slashResolution.invocation && slashResolution.invocation.name).trim()
+        : ''
+      const slash = commandLike
+      const isPrivilegedCommand = Boolean(slashResolution && slashResolution.known)
 
       // De-dupe: adapters may re-deliver after restarts; avoid double-log + double-activation.
       const messageId = safeString(session.messageId)
@@ -4964,99 +4007,78 @@ const rinBridge = (() => {
       }
 	      appendJsonl(path.join(chatDir, 'logs', `${isoDate(ts)}.jsonl`), record)
 
-      if (!isPrivilegedCommand && agentVisible) {
-        state.lastAgentInboundSeq = Number(record.seq || 0) || 0
-        state.lastAgentInboundAt = Number(ts || 0) || 0
-        state.lastAgentInboundText = safeString(record.text || '')
-        saveState()
-      }
+      const inboundEffect = applyInboundRecord({
+        state,
+        record,
+        tsMs: ts,
+        agentVisible,
+        isPrivilegedCommand,
+        slash,
+      })
+      saveState()
 
-	      // Don't wake Codex for privileged control commands; Koishi command handlers will respond.
-	      if (isPrivilegedCommand) {
-          // Persist reset boundary info ASAP so `/reset` can be slow without swallowing messages
-          // that arrive after the reset command.
-          if (slash === '/reset') {
-            state.lastResetCommandSeq = record.seq
-            state.lastResetCommandMessageId = record.messageId
-            state.lastResetCommandAtMs = nowMs()
-            saveState()
-          }
-          return
-        }
-        state.inboundUnprocessed = Number(state.inboundUnprocessed || 0) + 1
-        saveState()
+      // Don't wake Codex for privileged control commands; Koishi command handlers will respond.
+      if (inboundEffect && inboundEffect.shouldActivate === false) return
       // (No persistent "last inbound" metadata; keep state minimal.)
 
-      const makeTrigger = (opts: { isMentioned?: boolean, chatType?: string } = {}) => ({
-        seq: record.seq,
-        ts: record.ts,
-        messageId: record.messageId,
-        content: record.text,
-        senderUserId: userId,
+      const trigger = buildConversationTrigger({
+        record,
+        userId,
         senderName: record.sender?.name || '',
-        isMentioned: Boolean(opts.isMentioned),
-        chatType: safeString(opts.chatType || effectiveChatType || record.chatType || ''),
-        replyToMessageId: safeString(replyMeta.replyToMessageId || ''),
-        quotedText: safeString(replyMeta.quotedText || ''),
-        quotedSenderUserId: safeString(replyMeta.quotedSenderUserId || ''),
-        quotedSenderName: safeString(replyMeta.quotedSenderName || ''),
+        isMentioned: mentionLike,
+        chatType: effectiveChatType,
+        replyMeta,
       })
+      const activationPlan = planConversationActivation({
+        state,
+        effectiveChatType,
+        agentVisible,
+        trigger,
+      })
+      saveState()
+      if (shuttingDown) return
 
-	      const markTriggerAndActivate = (trigger, delayMs, maxDelayMs) => {
-	        state.pendingWake = true
-	        state.pendingTrigger = mergePendingTrigger(state.pendingTrigger, trigger)
-	        saveState()
-	        if (shuttingDown) return
+      if (activationPlan.mode === 'activate_private') {
         if (state.processing) {
           requestInterruptIfProcessing({ chatKey, chatDir, state, saveState, reason: 'new_trigger' })
           return
         }
         scheduleActivation(chatKey, () => {
           activate(session).catch((e) => logger.error(e))
-        }, delayMs, maxDelayMs)
+        }, config.ownerDebounceMs, config.ownerDebounceMaxMs)
+        return
       }
 
-	      // Gate rules
-	      if (effectiveChatType === 'private' && agentVisible) {
-	        markTriggerAndActivate(makeTrigger({ isMentioned: mentionLike, chatType: effectiveChatType }), config.ownerDebounceMs, config.ownerDebounceMaxMs)
-	      } else if (effectiveChatType === 'group' && agentVisible) {
-	        // Always record the trigger, but only activate after we have enough group context.
-	        state.pendingWake = true
-	        state.pendingTrigger = mergePendingTrigger(state.pendingTrigger, makeTrigger({ isMentioned: true, chatType: effectiveChatType }))
-	        saveState()
-	        if (shuttingDown) return
-          if (state.processing) {
-            requestInterruptIfProcessing({ chatKey, chatDir, state, saveState, reason: 'new_trigger' })
-            return
-          }
-          // Mentions from OWNER/TRUSTED are explicit; respond immediately (no startup silence / context gate).
-          scheduleActivation(chatKey, () => {
-            activate(session).catch((e) => logger.error(e))
-          }, config.mentionedDebounceMs, config.mentionedDebounceMs)
-	      } else {
-          if (effectiveChatType === 'group') {
-            const pending = state.pendingTrigger && typeof state.pendingTrigger === 'object' ? state.pendingTrigger : null
-            if (pending && pending.isMentioned && state.pendingWake && !state.processing) {
-              // If a mention trigger is pending, keep trying to activate (debounced).
-	              scheduleActivation(chatKey, () => {
-                activate(session).catch((e) => logger.error(e))
-              }, config.mentionedDebounceMs, config.mentionedDebounceMs)
-            }
-          }
-	      }
+      if (activationPlan.mode === 'activate_group_mention' || activationPlan.mode === 'activate_group_pending_mention') {
+        if (state.processing) {
+          requestInterruptIfProcessing({ chatKey, chatDir, state, saveState, reason: 'new_trigger' })
+          return
+        }
+        scheduleActivation(chatKey, () => {
+          activate(session).catch((e) => logger.error(e))
+        }, config.mentionedDebounceMs, config.mentionedDebounceMs)
+      }
 	    }
 
-    // Run before Koishi command middleware, so slash-prefixed traffic and Telegram command-shaped
-    // messages are still logged + can trigger activation.
+    // Run before normal Koishi command handling so slash-prefixed traffic is logged consistently,
+    // then dispatch bridge commands through the shared daemon/session command surface.
     ctx.middleware(async (session, next) => {
       disableBareDirectCommandSuggest(session)
       // Some adapters dispatch `message-created` or `interaction/command`; treat them as inbound
       // message-like events for logging + gate.
       if (session.type === 'message' || session.type === 'message-created' || session.type === 'interaction/command') {
         await handleMessageLike(session)
+        if (await maybeHandleBridgeSlashCommand(session)) return ''
       }
       return next()
     }, true)
+
+    ctx.on('ready', () => {
+      syncKoishiBridgeCommands().catch((e) => {
+        const message = safeString(e && (e as any).message ? (e as any).message : e)
+        logger.warn(`bridge command sync failed err=${message}`)
+      })
+    })
 
     // Local control socket: aggregate daemon capabilities (timers/schedules) without spawning extra daemons.
     const ctlSockPath = path.join(root, 'rin-ctl.sock')
@@ -5345,24 +4367,14 @@ const rinBridge = (() => {
                 if (!stale) continue
 
                 try {
-                  const lastSeq = Number(st.lastAgentInboundSeq || 0)
-                  const lastProcessed = Number(st.lastProcessedSeq || 0)
-                  const resetSeq = Number(st.lastResetSeq || 0)
-                  const effectiveProcessed = Math.max(
-                    Number.isFinite(lastProcessed) ? lastProcessed : 0,
-                    Number.isFinite(resetSeq) ? resetSeq : 0,
-                  )
-                  const hasUnprocessed = Number.isFinite(lastSeq) && Number.isFinite(effectiveProcessed) && lastSeq > effectiveProcessed
-                  const keepForceContinue = Boolean(st.forceContinue) || !hasUnprocessed
+                  const summary = summarizeConversationResumeWork({ state: st, platform, chatId })
                   await withChatLock(chatKey, async () => {
                     const parsed = parseChatKey(chatKey)
                     if (!parsed) return
                     const pseudo0 = pseudoSessionFromParsed(parsed, '')
                     const { state, saveState } = getChatCtx(pseudo0)
                     resetEphemeral(chatKey)
-                    clearPersistentRunFlags(state, { keepPendingTrigger: true, keepResetPending: true })
-                    state.pendingWake = true
-                    if (keepForceContinue) state.forceContinue = true
+                    recoverConversationFromStaleProcessing({ state, keepForceContinue: summary.keepForceContinue })
                     saveState()
                   }, { op: 'boot_clear_stale_processing', chatKey })
                   clearedStaleProcessing.push(chatKey)
@@ -5382,37 +4394,10 @@ const rinBridge = (() => {
                 const botId = safeString(entry && entry.botId || '')
 	                const st = readJson(entry.statePath, null)
 	                if (!st || typeof st !== 'object') continue
-	                const lastSeq = Number(st.lastAgentInboundSeq || 0)
-	                const lastProcessed = Number(st.lastProcessedSeq || 0)
-                  const resetSeq = Number(st.lastResetSeq || 0)
-                  const effectiveProcessed = Math.max(
-                    Number.isFinite(lastProcessed) ? lastProcessed : 0,
-                    Number.isFinite(resetSeq) ? resetSeq : 0,
-                  )
-	                const hasUnprocessed = Number.isFinite(lastSeq) && Number.isFinite(effectiveProcessed) && lastSeq > effectiveProcessed
-                  const pending = st.pendingTrigger && typeof st.pendingTrigger === 'object' ? st.pendingTrigger : null
-                  const hasResumeWork = hasUnprocessed || Boolean(st.processing) || Boolean(st.pendingWake) || Boolean(st.forceContinue) || Boolean(pending)
-	                if (!hasResumeWork) continue
-                  let isGroup = true
-                  try {
-                    if (platform === 'onebot') isGroup = !String(chatId).startsWith('private:')
-                    else if (platform === 'telegram') {
-                      const n = Number(chatId)
-                      isGroup = Number.isFinite(n) ? n < 0 : true
-                    }
-                  } catch {}
-
-                  const shouldCatchUp = !isGroup
-                    ? true
-                    : Boolean(st.processing) ||
-                      Boolean(st.pendingWake) ||
-                      Boolean(st.forceContinue) ||
-                      Boolean(pending && (pending as any).isMentioned)
-
-                  if (!shouldCatchUp) continue
+                const summary = summarizeConversationResumeWork({ state: st, platform, chatId })
+	                if (!summary.hasResumeWork || !summary.shouldCatchUp) continue
 	                const chatKey = safeString(st.chatKey || composeRuntimeChatKey(platform, chatId, botId))
-	                const lastText = safeString(st?.pendingTrigger?.content || st?.lastAgentInboundText || '')
-	                catchUp.set(chatKey, lastText)
+	                catchUp.set(chatKey, summary.lastText)
                 }
 	          } catch {}
 
@@ -5424,29 +4409,6 @@ const rinBridge = (() => {
 	            const parsed = parseChatKey(chatKey)
 	            if (!parsed) continue
 	            if (!findBot(parsed.platform, parsed.botId)) continue
-
-	            // On boot, clear stale resume flags so we don't "recover twice".
-	            try {
-		              await withChatLock(chatKey, async () => {
-		                const pseudo0 = pseudoSessionFromParsed(parsed, '')
-		                const { chatDir, state, saveState } = getChatCtx(pseudo0)
-	                    resetEphemeral(chatKey)
-	                    const keepForceContinue = Boolean(state.forceContinue)
-	                    writeCodexThreadId(state, '')
-                      writePiSessionFile(state, '')
-                      try { fs.rmSync(piSessionDirForChat(chatDir), { recursive: true, force: true }) } catch {}
-	                    state.lastThreadIngestedSeq = Math.max(0, Number(state.lastResetSeq || 0) || 0)
-                    const resetSeq = Number(state.lastResetSeq || 0)
-                    if (Number.isFinite(resetSeq) && resetSeq > 0) {
-                      const processed = Number(state.lastProcessedSeq || 0)
-                      if (!Number.isFinite(processed) || processed < resetSeq) state.lastProcessedSeq = resetSeq
-                    }
-                    clearPersistentRunFlags(state, { keepPendingTrigger: true, keepResetPending: true })
-                    if (keepForceContinue) state.forceContinue = true
-	                saveState()
-	              }, { op: 'boot_cleanup', chatKey })
-	            } catch {}
-
 	            let content = safeString(catchUp.get(chatKey) || '')
 	            if (!content) {
 	              try {
@@ -5517,11 +4479,6 @@ const rinBridge = (() => {
 	      try { ctlServer.close() } catch {}
 	      try { fs.rmSync(ctlSockPath, { force: true }) } catch {}
         try { tuiRpcServer && typeof tuiRpcServer.close === 'function' && tuiRpcServer.close() } catch {}
-        try {
-          if (codexAppServerSupervisor && typeof codexAppServerSupervisor.forceRestart === 'function') {
-            codexAppServerSupervisor.forceRestart('daemon_dispose')
-          }
-        } catch {}
 	    })
   }
 
@@ -5843,15 +4800,8 @@ const builtinDaemonLocaleDefinitions = [
     locale: 'en-US',
     store: {
       commands: {
-        help: { description: 'Show help' },
+        new: { description: 'Start a new session' },
         status: { description: 'Show current chat status' },
-        reset: {
-          description: 'Start fresh',
-          messages: {
-            reply: 'Understood. Starting fresh here.',
-            agentPrompt: 'The owner has used /reset. Send a brief, natural message in plain English that marks a fresh start, without mentioning technical details like "reset", "context", or "logs".'
-          },
-        },
         restart: { description: 'Restart' },
       },
       rinDaemon: {
@@ -6182,7 +5132,7 @@ async function createKoishiApp(dataDir: string) {
     ownerDebounceMaxMs: 0,
     mentionedDebounceMs: 0,
     agentMaxRuntimeMs: 3600000,
-    provider: configString(settings.defaultProvider, 'openai-codex'),
+    provider: configString(settings.defaultProvider, 'openai'),
     model: configString(settings.defaultModel, 'gpt-5.4'),
     thinking: configString(settings.defaultThinkingLevel, ''),
   })
@@ -6192,7 +5142,7 @@ async function createKoishiApp(dataDir: string) {
 
 async function main() {
   if (!process.env.TMPDIR) {
-    // Some environments don't set it; Koishi/codex runner uses it for transient files.
+    // Some environments don't set it; the daemon uses it for transient files.
     process.env.TMPDIR = os.tmpdir()
   }
 

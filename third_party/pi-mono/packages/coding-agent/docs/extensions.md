@@ -1968,7 +1968,6 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `hello.ts` | Minimal tool registration | `registerTool` |
 | `question.ts` | Tool with user interaction | `registerTool`, `ui.select` |
 | `questionnaire.ts` | Multi-step wizard tool | `registerTool`, `ui.custom` |
-| `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
 | `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
