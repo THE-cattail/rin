@@ -3067,7 +3067,8 @@ async function runTopLevelInvocation({ argv, launcherOptions, localRun }) {
   }
 
   const currentUser = currentUserRecord()
-  if (!isRuntimeInstalledForUser(currentUser) && (mode === 'tui' || mode === 'restart' || mode === 'update')) {
+  const isOfflineMode = safeString(nextArgv && nextArgv[0]).trim() === 'offline'
+  if (!isRuntimeInstalledForUser(currentUser) && ((mode === 'tui' && !isOfflineMode) || mode === 'restart' || mode === 'update')) {
     throw new Error('rin_not_installed_for_current_user')
   }
 
