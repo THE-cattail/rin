@@ -16,12 +16,19 @@ import {
 } from './web-search-config'
 
 type WebSearchRequest = {
-  query: string
+  q: string
   limit?: number
-  freshness?: string
-  safe?: string
-  provider?: string
-  providers?: string[]
+  categories?: string[]
+  engines?: string[]
+  language?: string
+  pageno?: number
+  time_range?: string
+  safesearch?: number
+  image_proxy?: boolean
+  enabled_plugins?: string[]
+  disabled_plugins?: string[]
+  enabled_engines?: string[]
+  disabled_engines?: string[]
   noCache?: boolean
 }
 
@@ -115,10 +122,6 @@ function dataRootForState(stateRoot: string): string {
   return path.join(path.resolve(stateRoot), 'data', 'web-search')
 }
 
-function configFileForState(stateRoot: string): string {
-  return path.join(dataRootForState(stateRoot), 'config.json')
-}
-
 function stateFileForState(stateRoot: string): string {
   return path.join(dataRootForState(stateRoot), 'state.json')
 }
@@ -139,8 +142,38 @@ function sidecarConfigDirForState(stateRoot: string): string {
   return path.join(dataRootForState(stateRoot), 'searxng')
 }
 
+function sidecarRuntimeDirForState(stateRoot: string): string {
+  return path.join(dataRootForState(stateRoot), 'searxng-runtime')
+}
+
+function sidecarSourceDirForState(stateRoot: string): string {
+  return path.join(sidecarRuntimeDirForState(stateRoot), 'src')
+}
+
+function sidecarVenvDirForState(stateRoot: string): string {
+  return path.join(sidecarRuntimeDirForState(stateRoot), 'venv')
+}
+
+function sidecarTmpDirForState(stateRoot: string): string {
+  return path.join(sidecarRuntimeDirForState(stateRoot), 'tmp')
+}
+
+function sidecarBootstrapStateFileForState(stateRoot: string): string {
+  return path.join(sidecarRuntimeDirForState(stateRoot), 'bootstrap.json')
+}
+
 function sidecarSettingsFileForState(stateRoot: string): string {
   return path.join(sidecarConfigDirForState(stateRoot), 'settings.yml')
+}
+
+function sidecarPythonBinForState(stateRoot: string): string {
+  const dir = sidecarVenvDirForState(stateRoot)
+  return process.platform === 'win32' ? path.join(dir, 'Scripts', 'python.exe') : path.join(dir, 'bin', 'python')
+}
+
+function sidecarPipBinForState(stateRoot: string): string {
+  const dir = sidecarVenvDirForState(stateRoot)
+  return process.platform === 'win32' ? path.join(dir, 'Scripts', 'pip.exe') : path.join(dir, 'bin', 'pip')
 }
 
 function writeSearxngSettingsForState(stateRoot: string, config: any) {
@@ -148,8 +181,12 @@ function writeSearxngSettingsForState(stateRoot: string, config: any) {
   ensurePrivateDir(path.dirname(settingsPath))
   const baseUrl = normalizeBaseUrl(config && config.searxng && config.searxng.baseUrl || managedBaseUrl(config)) || managedBaseUrl(config)
   const secret = crypto.createHash('sha256').update(`${baseUrl}|${stateRoot}|rin-web-search`).digest('hex').slice(0, 32)
+  const port = toPositiveInt(config && config.searxng && config.searxng.hostPort, DEFAULT_CONFIG.searxng.hostPort)
   const yaml = [
     'use_default_settings: true',
+    '',
+    'general:',
+    '  enable_metrics: false',
     '',
     'search:',
     '  formats:',
@@ -157,75 +194,28 @@ function writeSearxngSettingsForState(stateRoot: string, config: any) {
     '    - json',
     '',
     'server:',
+    `  port: ${port}`,
+    '  bind_address: "127.0.0.1"',
     `  base_url: ${JSON.stringify(`${baseUrl}/`)}`,
     `  secret_key: ${JSON.stringify(secret)}`,
     '  limiter: false',
-    '  bind_address: "0.0.0.0"',
+    '  public_instance: false',
+    '',
+    'valkey:',
+    '  url: false',
     '',
   ].join('\n')
   fs.writeFileSync(settingsPath, yaml, { mode: 0o600 })
   return settingsPath
 }
 
-function applyEnv(config: any) {
-  const next = normalizeConfigShape(config)
-  const providerOrder = nonEmpty(process.env.RIN_WEB_SEARCH_PROVIDER_ORDER)
-  if (providerOrder) next.defaultProviders = normalizeProviderList(providerOrder, next.defaultProviders)
-
-  const ttl = toPositiveInt(process.env.RIN_WEB_SEARCH_CACHE_TTL_SECONDS, 0)
-  if (ttl > 0) next.cacheTtlSeconds = ttl
-
-  const searxngUrl = normalizeBaseUrl(process.env.RIN_WEB_SEARCH_SEARXNG_URL)
-  if (searxngUrl) next.searxng.baseUrl = searxngUrl
-  const searxngApiKey = nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_API_KEY)
-  if (searxngApiKey) next.searxng.apiKey = searxngApiKey
-  const searxngPort = toPositiveInt(process.env.RIN_WEB_SEARCH_SEARXNG_PORT, 0)
-  if (searxngPort > 0) next.searxng.hostPort = searxngPort
-  const searxngImage = nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_IMAGE)
-  if (searxngImage) next.searxng.dockerImage = searxngImage
-  const searxngEngines = nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_ENGINES)
-  if (searxngEngines) next.searxng.defaultEngines = normalizeStringList(searxngEngines, next.searxng.defaultEngines)
-  const searxngCategories = nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_CATEGORIES)
-  if (searxngCategories) next.searxng.categories = normalizeStringList(searxngCategories, next.searxng.categories)
-  if (nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_AUTOSTART)) {
-    next.searxng.autoStart = !['0', 'false', 'no', 'off'].includes(nonEmpty(process.env.RIN_WEB_SEARCH_SEARXNG_AUTOSTART).toLowerCase())
-  }
-
-  const serperApiKey = nonEmpty(process.env.RIN_WEB_SEARCH_SERPER_API_KEY || process.env.SERPER_API_KEY)
-  if (serperApiKey) next.serper.apiKey = serperApiKey
-  const serperEndpoint = nonEmpty(process.env.RIN_WEB_SEARCH_SERPER_ENDPOINT)
-  if (serperEndpoint) next.serper.endpoint = serperEndpoint
-  const serperGl = nonEmpty(process.env.RIN_WEB_SEARCH_SERPER_GL)
-  if (serperGl) next.serper.gl = serperGl
-  const serperHl = nonEmpty(process.env.RIN_WEB_SEARCH_SERPER_HL)
-  if (serperHl) next.serper.hl = serperHl
-  const serperMaxFallbacks = Number(process.env.RIN_WEB_SEARCH_SERPER_MAX_FALLBACKS_PER_HOUR)
-  if (Number.isFinite(serperMaxFallbacks) && serperMaxFallbacks >= 0) next.serper.maxFallbacksPerHour = Math.floor(serperMaxFallbacks)
-
-  return normalizeConfigShape(next)
-}
-
-function normalizeStateConfigFile(stateRoot: string) {
-  const configPath = configFileForState(stateRoot)
-  const current = readJson<any>(configPath, null)
-  if (!current || typeof current !== 'object') return { ok: false, updated: false, configPath }
-  const normalized = normalizeConfigShape(current)
-  const currentJson = JSON.stringify(current)
-  const nextJson = JSON.stringify(normalized)
-  if (currentJson === nextJson) return { ok: true, updated: false, configPath, config: normalized }
-  writeJsonAtomic(configPath, normalized)
-  return { ok: true, updated: true, configPath, config: normalized }
-}
-
-function loadConfigResolved(stateRoot: string) {
-  const fileConfig = readJson<any>(configFileForState(stateRoot), null)
-  return applyEnv(fileConfig || {})
+function loadConfigResolved(_stateRoot: string) {
+  return normalizeConfigShape({})
 }
 
 function loadState(stateRoot: string) {
   return readJson(stateFileForState(stateRoot), {
     providers: {},
-    serperFallbackWindow: { hourKey: '', count: 0 },
   })
 }
 
@@ -270,18 +260,6 @@ function isProviderCoolingDown(state: any, provider: string) {
   return until > Date.now() ? until : 0
 }
 
-function reserveSerperFallbackSlot(state: any, config: any) {
-  const limit = Number(config && config.serper && config.serper.maxFallbacksPerHour || 0)
-  if (!Number.isFinite(limit) || limit <= 0) return { ok: true, remaining: Infinity, limit: 0 }
-  const hourKey = new Date().toISOString().slice(0, 13)
-  if (!state.serperFallbackWindow || state.serperFallbackWindow.hourKey !== hourKey) {
-    state.serperFallbackWindow = { hourKey, count: 0 }
-  }
-  if (state.serperFallbackWindow.count >= limit) return { ok: false, remaining: 0, limit }
-  state.serperFallbackWindow.count += 1
-  return { ok: true, remaining: Math.max(0, limit - state.serperFallbackWindow.count), limit }
-}
-
 function cacheKeyFromRequest(payload: unknown): string {
   return sha256(JSON.stringify(payload))
 }
@@ -315,18 +293,37 @@ function safeText(value: unknown): string {
   return String(value).replace(/\s+/g, ' ').trim()
 }
 
-function mapSearxngSafe(safe: string): string {
-  if (safe === 'strict') return '2'
-  if (safe === 'moderate') return '1'
-  return '0'
-}
-
-function mapFreshnessToGoogleTbs(freshness: string): string {
-  if (freshness === 'day') return 'qdr:d'
-  if (freshness === 'week') return 'qdr:w'
-  if (freshness === 'month') return 'qdr:m'
-  if (freshness === 'year') return 'qdr:y'
-  return ''
+function normalizeSearxngToolRequest(raw: WebSearchRequest, config: any) {
+  const q = nonEmpty(raw && raw.q)
+  const limit = Math.max(1, Math.min(10, toPositiveInt(raw && raw.limit, 8)))
+  const categories = normalizeStringList(raw && raw.categories, normalizeStringList(config && config.searxng && config.searxng.categories, DEFAULT_CONFIG.searxng.categories))
+  const engines = normalizeStringList(raw && raw.engines, normalizeStringList(config && config.searxng && config.searxng.defaultEngines, DEFAULT_CONFIG.searxng.defaultEngines))
+  const language = nonEmpty(raw && raw.language) || 'all'
+  const pageno = Math.max(1, toPositiveInt(raw && raw.pageno, 1))
+  const time_range = ['day', 'week', 'month', 'year'].includes(nonEmpty(raw && raw.time_range).toLowerCase()) ? nonEmpty(raw && raw.time_range).toLowerCase() : ''
+  const safesearchRaw = Number(raw && raw.safesearch)
+  const safesearch = [0, 1, 2].includes(safesearchRaw) ? safesearchRaw : 1
+  const image_proxy = raw && typeof raw.image_proxy === 'boolean' ? raw.image_proxy : undefined
+  const enabled_plugins = normalizeStringList(raw && raw.enabled_plugins, [])
+  const disabled_plugins = normalizeStringList(raw && raw.disabled_plugins, [])
+  const enabled_engines = normalizeStringList(raw && raw.enabled_engines, [])
+  const disabled_engines = normalizeStringList(raw && raw.disabled_engines, [])
+  return {
+    q,
+    limit,
+    categories,
+    engines,
+    language,
+    pageno,
+    time_range,
+    safesearch,
+    image_proxy,
+    enabled_plugins,
+    disabled_plugins,
+    enabled_engines,
+    disabled_engines,
+    cacheTtlSeconds: Math.max(60, toPositiveInt(config.cacheTtlSeconds, DEFAULT_CONFIG.cacheTtlSeconds)),
+  }
 }
 
 async function fetchJson(url: string, { method = 'GET', headers = {}, body = undefined, timeoutMs = 10_000 }: any = {}) {
@@ -381,6 +378,78 @@ function writeSidecarState(stateRoot: string, value: any) {
   writeJsonAtomic(sidecarStateFileForState(stateRoot), value)
 }
 
+function readSidecarBootstrapState(stateRoot: string) {
+  return readJson<any>(sidecarBootstrapStateFileForState(stateRoot), null)
+}
+
+function writeSidecarBootstrapState(stateRoot: string, value: any) {
+  writeJsonAtomic(sidecarBootstrapStateFileForState(stateRoot), value)
+}
+
+function runCommandSync(command: string, args: string[], options: any = {}) {
+  const result = spawnSync(command, args, {
+    stdio: 'pipe',
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    ...options,
+  })
+  if (result.status === 0) return result
+  const detail = safeText(result.stderr || result.stdout || result.error && result.error.message || `exit_${result.status}`)
+  throw new Error(`${path.basename(command)}:${detail}`)
+}
+
+function ensureSearxngRuntimeInstalled(stateRoot: string, config: any, logger?: any) {
+  const runtimeDir = sidecarRuntimeDirForState(stateRoot)
+  const sourceDir = sidecarSourceDirForState(stateRoot)
+  const venvDir = sidecarVenvDirForState(stateRoot)
+  const tmpDir = sidecarTmpDirForState(stateRoot)
+  const pythonBin = sidecarPythonBinForState(stateRoot)
+  const pipBin = sidecarPipBinForState(stateRoot)
+  const current = readSidecarBootstrapState(stateRoot)
+  if (current && current.ready && fs.existsSync(sourceDir) && fs.existsSync(pythonBin) && fs.existsSync(pipBin)) {
+    return { ok: true, sourceDir, venvDir, pythonBin, pipBin, reused: true, commit: safeText(current.commit) }
+  }
+
+  ensurePrivateDir(runtimeDir)
+  ensurePrivateDir(tmpDir)
+
+  const python = findExecutableOnPath('python3') || findExecutableOnPath('python')
+  if (!python) throw new Error('python_not_found')
+
+  const git = findExecutableOnPath('git')
+  if (!git) throw new Error('git_not_found')
+
+  if (!fs.existsSync(path.join(sourceDir, '.git'))) {
+    try { fs.rmSync(sourceDir, { recursive: true, force: true }) } catch {}
+    try { logger && typeof logger.info === 'function' && logger.info('web-search: cloning searxng source') } catch {}
+    runCommandSync(git, ['clone', '--depth', '1', 'https://github.com/searxng/searxng.git', sourceDir], { cwd: runtimeDir, env: { ...process.env, TMPDIR: tmpDir } })
+  }
+
+  if (!fs.existsSync(pythonBin)) {
+    try { logger && typeof logger.info === 'function' && logger.info('web-search: creating searxng virtualenv') } catch {}
+    runCommandSync(python, ['-m', 'venv', venvDir], { cwd: runtimeDir, env: { ...process.env, TMPDIR: tmpDir } })
+  }
+
+  try { logger && typeof logger.info === 'function' && logger.info('web-search: installing searxng runtime dependencies') } catch {}
+  runCommandSync(pipBin, ['install', '--upgrade', 'pip', 'wheel', 'setuptools'], { cwd: runtimeDir, env: { ...process.env, TMPDIR: tmpDir } })
+  runCommandSync(pipBin, ['install', '-r', path.join(sourceDir, 'requirements.txt')], { cwd: runtimeDir, env: { ...process.env, TMPDIR: tmpDir } })
+  runCommandSync(pipBin, ['install', '--no-build-isolation', '-e', sourceDir], { cwd: runtimeDir, env: { ...process.env, TMPDIR: tmpDir } })
+
+  const commit = fs.existsSync(path.join(sourceDir, '.git'))
+    ? safeText(runCommandSync(git, ['-C', sourceDir, 'rev-parse', 'HEAD'], { env: { ...process.env, TMPDIR: tmpDir } }).stdout)
+    : ''
+  writeSidecarBootstrapState(stateRoot, {
+    ready: true,
+    sourceDir,
+    venvDir,
+    pythonBin,
+    pipBin,
+    commit,
+    installedAt: new Date().toISOString(),
+  })
+  return { ok: true, sourceDir, venvDir, pythonBin, pipBin, reused: false, commit }
+}
+
 async function acquireSidecarLock(lockPath: string, timeoutMs = 15_000) {
   ensurePrivateDir(path.dirname(lockPath))
   const startedAt = Date.now()
@@ -428,48 +497,42 @@ async function ensureSearxngSidecar(stateRoot: string, options: { logger?: any, 
       return { ok: true, baseUrl, reused: 'locked_healthy' }
     }
 
-    const docker = findExecutableOnPath('docker')
-    if (!docker) {
-      return { ok: false, baseUrl, error: 'docker_not_found' }
-    }
-
+    const runtime = ensureSearxngRuntimeInstalled(stateRoot, config, logger)
     const current = readSidecarState(stateRoot)
-    const containerName = nonEmpty(config.searxng.containerName) || DEFAULT_CONFIG.searxng.containerName
-    const port = toPositiveInt(config.searxng.hostPort, DEFAULT_CONFIG.searxng.hostPort)
-    const image = nonEmpty(config.searxng.dockerImage) || DEFAULT_CONFIG.searxng.dockerImage
     const settingsPath = writeSearxngSettingsForState(stateRoot, config)
+    const port = toPositiveInt(config.searxng.hostPort, DEFAULT_CONFIG.searxng.hostPort)
+    const tmpDir = sidecarTmpDirForState(stateRoot)
+    ensurePrivateDir(tmpDir)
 
     if (current && Number(current.pid) > 1 && isPidAlive(current.pid)) {
       try { process.kill(Number(current.pid), 'SIGTERM') } catch {}
     }
-    try { spawnSync(docker, ['rm', '-f', containerName], { stdio: 'ignore' }) } catch {}
 
-    const args = [
-      'run',
-      '--rm',
-      '--name', containerName,
-      '-p', `127.0.0.1:${port}:8080`,
-      '-v', `${settingsPath}:/etc/searxng/settings.yml:ro`,
-      '-e', 'SEARXNG_BIND_ADDRESS=0.0.0.0',
-      '-e', `SEARXNG_BASE_URL=${baseUrl}/`,
-      '-e', 'SEARXNG_LIMITER=false',
-      image,
-    ]
-
-    try { logger && typeof logger.info === 'function' && logger.info(`web-search: starting searxng sidecar image=${image} baseUrl=${baseUrl}`) } catch {}
-    const child = spawn(docker, args, {
+    try { logger && typeof logger.info === 'function' && logger.info(`web-search: starting managed searxng baseUrl=${baseUrl}`) } catch {}
+    const child = spawn(runtime.pythonBin, ['-m', 'searx.webapp'], {
+      cwd: runtime.sourceDir,
       detached: true,
       stdio: 'ignore',
-      env: process.env,
+      env: {
+        ...process.env,
+        TMPDIR: tmpDir,
+        PYTHONUNBUFFERED: '1',
+        SEARXNG_SETTINGS_PATH: settingsPath,
+        SEARXNG_PORT: String(port),
+        SEARXNG_BIND_ADDRESS: '127.0.0.1',
+        SEARXNG_BASE_URL: `${baseUrl}/`,
+        SEARXNG_LIMITER: 'false',
+      },
     })
     try { child.unref() } catch {}
 
     writeSidecarState(stateRoot, {
       pid: Number(child.pid || 0),
-      containerName,
       port,
       baseUrl,
-      image,
+      pythonBin: runtime.pythonBin,
+      sourceDir: runtime.sourceDir,
+      settingsPath,
       startedAt: new Date().toISOString(),
       ownerPid: process.pid,
     })
@@ -480,15 +543,17 @@ async function ensureSearxngSidecar(stateRoot: string, options: { logger?: any, 
     const deadline = Date.now() + startTimeoutMs
     while (Date.now() < deadline) {
       if (await checkSearxngHealth(baseUrl, healthTimeoutMs)) {
-        return { ok: true, baseUrl, reused: 'started', pid: Number(child.pid || 0) }
+        return { ok: true, baseUrl, reused: runtime.reused ? 'started_reused_runtime' : 'started_bootstrapped_runtime', pid: Number(child.pid || 0) }
       }
       if (Number(child.pid || 0) > 1 && !isPidAlive(child.pid)) break
       await sleep(500)
     }
 
-    try { spawnSync(docker, ['rm', '-f', containerName], { stdio: 'ignore' }) } catch {}
+    try { process.kill(Number(child.pid || 0), 'SIGTERM') } catch {}
     try { fs.rmSync(sidecarStateFileForState(stateRoot), { force: true }) } catch {}
     return { ok: false, baseUrl, error: 'searxng_start_timeout' }
+  } catch (error: any) {
+    return { ok: false, baseUrl, error: safeText(error && (error.message || error) || 'searxng_runtime_error') || 'searxng_runtime_error' }
   } finally {
     try { release() } catch {}
   }
@@ -498,19 +563,13 @@ async function stopSearxngSidecar(stateRoot: string, options: { logger?: any } =
   const logger = options && options.logger
   const release = await acquireSidecarLock(sidecarLockPathForState(stateRoot), 20_000)
   try {
-    const config = loadConfigResolved(stateRoot)
     const current = readSidecarState(stateRoot) || {}
-    const containerName = nonEmpty(current.containerName || config.searxng.containerName) || DEFAULT_CONFIG.searxng.containerName
-    const docker = findExecutableOnPath('docker')
     if (Number(current.pid || 0) > 1 && isPidAlive(current.pid)) {
       try { process.kill(Number(current.pid), 'SIGTERM') } catch {}
     }
-    if (docker) {
-      try { spawnSync(docker, ['rm', '-f', containerName], { stdio: 'ignore' }) } catch {}
-    }
     try { fs.rmSync(sidecarStateFileForState(stateRoot), { force: true }) } catch {}
-    try { logger && typeof logger.info === 'function' && logger.info(`web-search: stopped searxng sidecar container=${containerName}`) } catch {}
-    return { ok: true, containerName }
+    try { logger && typeof logger.info === 'function' && logger.info('web-search: stopped managed searxng runtime') } catch {}
+    return { ok: true, pid: Number(current.pid || 0) }
   } finally {
     try { release() } catch {}
   }
@@ -521,15 +580,19 @@ async function searchViaSearxng(config: any, request: any) {
   if (!baseUrl) return { skipped: true, reason: 'searxng_not_configured' }
 
   const url = new URL('/search', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`)
-  url.searchParams.set('q', request.query)
+  url.searchParams.set('q', request.q)
   url.searchParams.set('format', 'json')
-  url.searchParams.set('language', 'all')
-  url.searchParams.set('safesearch', mapSearxngSafe(request.safe))
-  const defaultEngines = normalizeStringList(config && config.searxng && config.searxng.defaultEngines, DEFAULT_CONFIG.searxng.defaultEngines)
-  const categories = normalizeStringList(config && config.searxng && config.searxng.categories, DEFAULT_CONFIG.searxng.categories)
-  if (defaultEngines.length) url.searchParams.set('engines', defaultEngines.join(','))
-  if (categories.length) url.searchParams.set('categories', categories.join(','))
-  if (request.freshness) url.searchParams.set('time_range', request.freshness)
+  url.searchParams.set('language', request.language || 'all')
+  url.searchParams.set('safesearch', String(request.safesearch))
+  url.searchParams.set('pageno', String(request.pageno || 1))
+  if (Array.isArray(request.engines) && request.engines.length) url.searchParams.set('engines', request.engines.join(','))
+  if (Array.isArray(request.categories) && request.categories.length) url.searchParams.set('categories', request.categories.join(','))
+  if (request.time_range) url.searchParams.set('time_range', request.time_range)
+  if (typeof request.image_proxy === 'boolean') url.searchParams.set('image_proxy', request.image_proxy ? '1' : '0')
+  if (Array.isArray(request.enabled_plugins) && request.enabled_plugins.length) url.searchParams.set('enabled_plugins', request.enabled_plugins.join(','))
+  if (Array.isArray(request.disabled_plugins) && request.disabled_plugins.length) url.searchParams.set('disabled_plugins', request.disabled_plugins.join(','))
+  if (Array.isArray(request.enabled_engines) && request.enabled_engines.length) url.searchParams.set('enabled_engines', request.enabled_engines.join(','))
+  if (Array.isArray(request.disabled_engines) && request.disabled_engines.length) url.searchParams.set('disabled_engines', request.disabled_engines.join(','))
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -569,108 +632,31 @@ async function searchViaSearxng(config: any, request: any) {
   }
 }
 
-async function searchViaSerper(config: any, request: any) {
-  const apiKey = nonEmpty(config && config.serper && config.serper.apiKey)
-  if (!apiKey) return { skipped: true, reason: 'serper_not_configured' }
-
-  const payload: Record<string, any> = {
-    q: request.query,
-    num: Math.max(1, Math.min(10, request.limit || Number(config && config.serper && config.serper.num || 8))),
-    gl: nonEmpty(config && config.serper && config.serper.gl || 'us'),
-    hl: nonEmpty(config && config.serper && config.serper.hl || 'en'),
-    autocorrect: true,
-  }
-  const tbs = mapFreshnessToGoogleTbs(request.freshness)
-  if (tbs) payload.tbs = tbs
-
-  const started = Date.now()
-  const data = await fetchJson(nonEmpty(config && config.serper && config.serper.endpoint) || DEFAULT_CONFIG.serper.endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-KEY': apiKey,
-      'User-Agent': config && config.http && config.http.userAgent || DEFAULT_CONFIG.http.userAgent,
-    },
-    body: JSON.stringify(payload),
-    timeoutMs: toPositiveInt(config && config.serper && config.serper.timeoutMs, DEFAULT_CONFIG.serper.timeoutMs),
-  })
-
-  const organic = Array.isArray(data && data.organic) ? data.organic : []
-  const news = Array.isArray(data && data.news) ? data.news : []
-  const combined: Array<Record<string, any>> = []
-
-  for (const item of organic) {
-    combined.push({
-      type: 'organic',
-      position: Number(item && (item.position || combined.length + 1)),
-      title: safeText(item && item.title),
-      url: safeText(item && item.link),
-      snippet: safeText(item && item.snippet),
-      source: safeText(item && item.source),
-      publishedDate: safeText(item && item.date),
-      provider: 'serper',
-    })
-  }
-  for (const item of news) {
-    if (combined.length >= request.limit) break
-    combined.push({
-      type: 'news',
-      position: Number(item && (item.position || combined.length + 1)),
-      title: safeText(item && item.title),
-      url: safeText(item && item.link),
-      snippet: safeText(item && item.snippet),
-      source: safeText(item && item.source),
-      publishedDate: safeText(item && item.date),
-      provider: 'serper',
-    })
-  }
-
-  return {
-    ok: true,
-    provider: 'serper',
-    durationMs: Date.now() - started,
-    results: combined.slice(0, request.limit).filter((item) => item.url),
-    extras: {
-      answerBox: data && data.answerBox || null,
-      knowledgeGraph: data && data.knowledgeGraph || null,
-      peopleAlsoAsk: Array.isArray(data && data.peopleAlsoAsk) ? data.peopleAlsoAsk : [],
-      relatedSearches: Array.isArray(data && data.relatedSearches) ? data.relatedSearches : [],
-      credits: data && data.credits || null,
-    },
-  }
-}
-
-async function searchWeb({ stateRoot, query, limit = 8, freshness = '', safe = 'moderate', provider = '', providers = [], noCache = false }: { stateRoot: string } & WebSearchRequest): Promise<WebSearchResponse> {
+async function searchWeb({ stateRoot, noCache = false, ...rawRequest }: { stateRoot: string } & WebSearchRequest): Promise<WebSearchResponse> {
   const config = loadConfigResolved(stateRoot)
-  const nextQuery = nonEmpty(query)
-  if (!nextQuery) throw new Error('web_search_query_required')
+  const request = normalizeSearxngToolRequest(rawRequest as WebSearchRequest, config)
+  if (!request.q) throw new Error('web_search_query_required')
 
-  const explicitProvider = nonEmpty(provider).toLowerCase()
-  const selectedProviders = explicitProvider
-    ? normalizeProviderList([explicitProvider], [])
-    : normalizeProviderList(providers && providers.length ? providers : config.defaultProviders, config.defaultProviders)
-  if (!selectedProviders.length) throw new Error('web_search_no_providers_selected')
-
-  if (selectedProviders.includes('searxng') && shouldManageLocalSearxng(config)) {
+  if (shouldManageLocalSearxng(config)) {
     try { await ensureSearxngSidecar(stateRoot) } catch {}
   }
 
-  const request = {
-    query: nextQuery,
-    limit: Math.max(1, Math.min(10, toPositiveInt(limit, 8))),
-    freshness: ['day', 'week', 'month', 'year'].includes(nonEmpty(freshness).toLowerCase()) ? nonEmpty(freshness).toLowerCase() : '',
-    safe: ['off', 'moderate', 'strict'].includes(nonEmpty(safe).toLowerCase()) ? nonEmpty(safe).toLowerCase() : 'moderate',
-    providers: selectedProviders,
-    cacheTtlSeconds: Math.max(60, toPositiveInt(config.cacheTtlSeconds, DEFAULT_CONFIG.cacheTtlSeconds)),
-  }
-
   const state = loadState(stateRoot)
+  const provider = 'searxng'
   const cacheKey = cacheKeyFromRequest({
-    q: request.query,
+    q: request.q,
     limit: request.limit,
-    freshness: request.freshness,
-    safe: request.safe,
-    providers: selectedProviders,
+    categories: request.categories,
+    engines: request.engines,
+    language: request.language,
+    pageno: request.pageno,
+    time_range: request.time_range,
+    safesearch: request.safesearch,
+    image_proxy: request.image_proxy,
+    enabled_plugins: request.enabled_plugins,
+    disabled_plugins: request.disabled_plugins,
+    enabled_engines: request.enabled_engines,
+    disabled_engines: request.disabled_engines,
   })
 
   if (!noCache) {
@@ -684,86 +670,90 @@ async function searchWeb({ stateRoot, query, limit = 8, freshness = '', safe = '
     }
   }
 
-  let lastSuccess: any = null
   const attempts: Array<Record<string, any>> = []
-
-  for (let index = 0; index < selectedProviders.length; index += 1) {
-    const currentProvider = selectedProviders[index]
-    const cooldownUntilMs = isProviderCoolingDown(state, currentProvider)
-    if (cooldownUntilMs > Date.now()) {
-      attempts.push({ provider: currentProvider, status: 'skipped_cooldown', cooldownUntilMs })
-      continue
-    }
-
-    const hasMeaningfulPriorProvider = attempts.some((attempt) => attempt.provider !== 'serper' && attempt.status !== 'skipped')
-    if (currentProvider === 'serper' && index > 0 && hasMeaningfulPriorProvider) {
-      const budget = reserveSerperFallbackSlot(state, config)
-      if (!budget.ok) {
-        attempts.push({ provider: currentProvider, status: 'skipped_local_budget', limit: budget.limit })
-        continue
-      }
-    }
-
-    let result: any = null
-    try {
-      if (currentProvider === 'searxng') result = await searchViaSearxng(config, request)
-      else if (currentProvider === 'serper') result = await searchViaSerper(config, request)
-      else result = { skipped: true, reason: 'unknown_provider' }
-    } catch (error: any) {
-      const errorText = safeText(error && (error.message || error) || 'provider_error')
-      noteProviderFailure(state, currentProvider, errorText)
-      attempts.push({ provider: currentProvider, status: 'error', error: errorText })
-      continue
-    }
-
-    if (result && result.skipped) {
-      attempts.push({ provider: currentProvider, status: 'skipped', reason: result.reason })
-      continue
-    }
-
-    noteProviderSuccess(state, currentProvider)
-    const resultsCount = Array.isArray(result && result.results) ? result.results.length : 0
-    const status = resultsCount > 0 ? 'success' : 'empty'
-    attempts.push({ provider: currentProvider, status, resultsCount, durationMs: Number(result && result.durationMs || 0) })
-
-    lastSuccess = {
-      ok: true,
-      query: request.query,
-      providerUsed: currentProvider,
-      cached: false,
-      cacheKey,
-      request: {
-        limit: request.limit,
-        freshness: request.freshness,
-        safe: request.safe,
-        providers: selectedProviders,
-      },
-      results: result && result.results || [],
-      extras: result && result.extras || {},
-      attempts,
-    }
-
-    if (resultsCount > 0 || index === selectedProviders.length - 1) break
-  }
-
-  saveState(stateRoot, state)
-
-  if (!lastSuccess) {
+  const cooldownUntilMs = isProviderCoolingDown(state, provider)
+  if (cooldownUntilMs > Date.now()) {
+    attempts.push({ provider, status: 'skipped_cooldown', cooldownUntilMs })
     return {
       ok: false,
-      query: request.query,
+      query: request.q,
       providerUsed: '',
       cached: false,
       cacheKey,
       results: [],
       extras: {},
       attempts,
-      error: 'all_providers_failed_or_unconfigured',
+      error: 'provider_cooling_down',
     }
   }
 
-  if (!noCache) saveCacheEntry(stateRoot, cacheKey, lastSuccess, request.cacheTtlSeconds)
-  return lastSuccess
+  try {
+    const result = await searchViaSearxng(config, request)
+    if (result && result.skipped) {
+      attempts.push({ provider, status: 'skipped', reason: result.reason })
+      return {
+        ok: false,
+        query: request.q,
+        providerUsed: '',
+        cached: false,
+        cacheKey,
+        results: [],
+        extras: {},
+        attempts,
+        error: safeText(result.reason || 'searxng_skipped') || 'searxng_skipped',
+      }
+    }
+
+    noteProviderSuccess(state, provider)
+    const resultsCount = Array.isArray(result && result.results) ? result.results.length : 0
+    const status = resultsCount > 0 ? 'success' : 'empty'
+    attempts.push({ provider, status, resultsCount, durationMs: Number(result && result.durationMs || 0) })
+
+    const response = {
+      ok: true,
+      query: request.q,
+      providerUsed: provider,
+      cached: false,
+      cacheKey,
+      request: {
+        limit: request.limit,
+        categories: request.categories,
+        engines: request.engines,
+        language: request.language,
+        pageno: request.pageno,
+        time_range: request.time_range,
+        safesearch: request.safesearch,
+        image_proxy: request.image_proxy,
+        enabled_plugins: request.enabled_plugins,
+        disabled_plugins: request.disabled_plugins,
+        enabled_engines: request.enabled_engines,
+        disabled_engines: request.disabled_engines,
+      },
+      results: result && result.results || [],
+      extras: result && result.extras || {},
+      attempts,
+    }
+
+    saveState(stateRoot, state)
+    if (!noCache) saveCacheEntry(stateRoot, cacheKey, response, request.cacheTtlSeconds)
+    return response
+  } catch (error: any) {
+    const errorText = safeText(error && (error.message || error) || 'provider_error')
+    noteProviderFailure(state, provider, errorText)
+    attempts.push({ provider, status: 'error', error: errorText })
+    saveState(stateRoot, state)
+    return {
+      ok: false,
+      query: request.q,
+      providerUsed: '',
+      cached: false,
+      cacheKey,
+      results: [],
+      extras: {},
+      attempts,
+      error: errorText || 'provider_error',
+    }
+  }
 }
 
 export {
@@ -772,8 +762,8 @@ export {
   normalizeStringList,
   normalizeBaseUrl,
   normalizeConfigShape,
-  reserveSerperFallbackSlot,
   loadConfigResolved,
+  normalizeSearxngToolRequest,
   ensureSearxngSidecar,
   stopSearxngSidecar,
   searchWeb,

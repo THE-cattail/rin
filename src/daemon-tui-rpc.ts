@@ -570,7 +570,7 @@ export function startDaemonTuiRpcServer({ repoRoot, stateRoot, logger, bridge }:
         systemPromptExtra: shouldAutoResume
           ? buildTuiDaemonRestartSystemPromptExtra({ reason: 'daemon_tui_rpc_reconnect' })
           : '',
-        enableBrainHooks: true,
+        enableBrainHooks: false,
       })
       runtime.session = runtime.created.session
       if (!runtime.session) throw new Error('pi_sdk_session_missing')

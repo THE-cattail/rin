@@ -879,6 +879,17 @@ function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = 
     cleaned.push(rel)
   }
 
+  const moveToDisabledIfPresent = (srcRel, dstRel) => {
+    const src = path.join(home, srcRel)
+    if (!fs.existsSync(src)) return
+    const dst = path.join(home, dstRel)
+    ensureDir(path.dirname(dst))
+    let finalDst = dst
+    if (fs.existsSync(finalDst)) finalDst = `${dst}.${Date.now()}`
+    fs.renameSync(src, finalDst)
+    cleaned.push(srcRel)
+  }
+
   const migrateFirstIfMissing = (sources, dstRel) => {
     const dst = path.join(home, dstRel)
     if (fs.existsSync(dst)) return false
@@ -896,10 +907,16 @@ function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = 
     'data',
     'docs',
     'docs/rin',
-    'skills',
+    'memory',
+    'memory/resident',
+    'memory/progressive',
+    'memory/recall',
+    'disabled',
+    'disabled/pi-runtime',
   ].forEach(ensureWorkspaceDir)
 
-  if (writeTextIfMissing(path.join(home, 'AGENTS.md'), DEFAULT_RUNTIME_AGENTS_MD)) written.push('AGENTS.md')
+  moveToDisabledIfPresent('AGENTS.md', 'disabled/pi-runtime/AGENTS.md')
+  moveToDisabledIfPresent('skills', 'disabled/pi-runtime/skills')
 
   const managedManifestPath = path.join(home, 'data', '.managed', 'install-home.json')
   if (syncManagedTree(path.join(assetRoot, 'docs', 'rin'), path.join(home, 'docs', 'rin'), {
@@ -932,6 +949,7 @@ function ensureWorkspaceBaseline(home, { overwriteManaged = false, bundleRoot = 
     'locale/en-US.default.json',
     'skills/web-search',
   ].forEach(removeIfPresent)
+
 
   return {
     workspace: home,
@@ -1105,6 +1123,8 @@ function currentUserRecord() {
 }
 
 function invokingUserRecord(fallback = currentUserRecord()) {
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  if (!isRoot) return fallback
   const sudoUser = safeString(process.env.SUDO_USER).trim()
   if (!sudoUser) return fallback
   return lookupUserRecord(sudoUser) || fallback
@@ -1728,14 +1748,14 @@ async function terminatePids(pids, { timeoutMs = 8_000 } = {}) {
   if (!unique.length) return
   for (const pid of unique) {
     try { process.kill(pid, 'SIGTERM') } catch (e) {
-      if (!e || e.code !== 'ESRCH') throw e
+      if (!e || (e.code !== 'ESRCH' && e.code !== 'EPERM')) throw e
     }
   }
   const stopped = await waitForPidsExit(unique, timeoutMs)
   if (stopped) return
   for (const pid of unique) {
     try { process.kill(pid, 'SIGKILL') } catch (e) {
-      if (!e || e.code !== 'ESRCH') throw e
+      if (!e || (e.code !== 'ESRCH' && e.code !== 'EPERM')) throw e
     }
   }
   await waitForPidsExit(unique, 2_000)

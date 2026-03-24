@@ -61,7 +61,7 @@ async function runRinInteractiveMode({
     provider,
     model,
     thinking,
-    enableBrainHooks: true,
+    enableBrainHooks: false,
   })
 
   const mode = new pi.InteractiveMode(session, {

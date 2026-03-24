@@ -1,9 +1,6 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # Custom Providers
 
-Extensions can register custom model providers via `rin.registerProvider()`. This enables:
+Extensions can register custom model providers via `pi.registerProvider()`. This enables:
 
 - **Proxies** - Route requests through corporate proxies or API gateways
 - **Custom endpoints** - Use self-hosted or private model deployments
@@ -122,7 +119,7 @@ When `models` is provided, it **replaces** all existing models for that provider
 
 ## Unregister Provider
 
-Use `rin.unregisterProvider(name)` to remove a provider that was previously registered via `rin.registerProvider(name, ...)`:
+Use `pi.unregisterProvider(name)` to remove a provider that was previously registered via `pi.registerProvider(name, ...)`:
 
 ```typescript
 // Register
@@ -294,7 +291,7 @@ interface OAuthLoginCallbacks {
 
 ### OAuthCredentials
 
-Credentials are persisted in `~/.rin/auth.json`:
+Credentials are persisted in `~/.pi/agent/auth.json`:
 
 ```typescript
 interface OAuthCredentials {

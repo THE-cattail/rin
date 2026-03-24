@@ -1,9 +1,6 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # Examples
 
-Example code for Rin SDK and extensions.
+Example code for pi-coding-agent SDK and extensions.
 
 ## Directories
 
@@ -12,11 +9,14 @@ Programmatic usage via `createAgentSession()`. Shows how to customize models, pr
 
 ### [extensions/](extensions/)
 Example extensions demonstrating:
-- Lifecycle event handlers, tool interception, and safety gates
-- Custom tools, commands, and keyboard shortcuts
-- Custom UI such as footers, headers, editors, and overlays
-- Git integration, system prompt changes, and custom compaction
-- External integrations and custom providers
+- Lifecycle event handlers (tool interception, safety gates, context modifications)
+- Custom tools (todo lists, questions, subagents, output truncation)
+- Commands and keyboard shortcuts
+- Custom UI (footers, headers, editors, overlays)
+- Git integration (checkpoints, auto-commit)
+- System prompt modifications and custom compaction
+- External integrations (SSH, file watchers, system theme sync)
+- Custom providers (Anthropic with custom streaming, GitLab Duo)
 
 ## Documentation
 

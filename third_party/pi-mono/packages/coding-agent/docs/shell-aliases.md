@@ -1,11 +1,8 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # Shell Aliases
 
-Rin runs bash in non-interactive mode (`bash -c`), which doesn't expand aliases by default.
+Pi runs bash in non-interactive mode (`bash -c`), which doesn't expand aliases by default.
 
-To enable your shell aliases, add to `~/.rin/settings.json`:
+To enable your shell aliases, add to `~/.pi/agent/settings.json`:
 
 ```json
 {

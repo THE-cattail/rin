@@ -5,7 +5,7 @@
  * that lists all available slash commands in the current session.
  *
  * Usage:
- * 1. Copy this file to ~/.rin/extensions/ or your project's .rin/extensions/
+ * 1. Copy this file to ~/.pi/agent/extensions/ or your project's .pi/extensions/
  * 2. Use /commands to see available commands
  * 3. Use /commands extensions to filter by source
  */
@@ -60,10 +60,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
 			if (selected && !selected.startsWith("---")) {
 				const cmdName = selected.split(" - ")[0].slice(1); // Remove leading /
 				const cmd = commands.find((c) => c.name === cmdName);
-				if (cmd?.path) {
-					const showPath = await ctx.ui.confirm(cmd.name, `View source path?\n${cmd.path}`);
+				if (cmd?.sourceInfo.path) {
+					const showPath = await ctx.ui.confirm(cmd.name, `View source path?\n${cmd.sourceInfo.path}`);
 					if (showPath) {
-						ctx.ui.notify(cmd.path, "info");
+						ctx.ui.notify(cmd.sourceInfo.path, "info");
 					}
 				}
 			}

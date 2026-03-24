@@ -93,7 +93,7 @@ test('offline tui host keeps native interactive mode while enabling Rin local ho
   assert.match(source, /import \{ importPiCodingAgentModule, importPiTuiModule \} from '\.\/pi-upstream'/)
   assert.match(source, /import \{ createRinTuiSession \} from '\.\/runtime'/)
   assert.match(source, /new pi\.InteractiveMode\(session/)
-  assert.match(source, /enableBrainHooks: true/)
+  assert.match(source, /enableBrainHooks: false/)
   assert.doesNotMatch(source, /DaemonTuiRpcClient/)
   assert.doesNotMatch(source, /session\.bindExtensions\(/)
 })

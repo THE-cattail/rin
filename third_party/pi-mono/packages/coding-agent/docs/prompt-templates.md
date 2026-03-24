@@ -1,7 +1,4 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
-> rin can create prompt templates. Ask it to build one for your workflow.
+> pi can create prompt templates. Ask it to build one for your workflow.
 
 # Prompt Templates
 
@@ -9,11 +6,11 @@ Prompt templates are Markdown snippets that expand into full prompts. Type `/nam
 
 ## Locations
 
-Rin loads prompt templates from:
+Pi loads prompt templates from:
 
-- Global: `~/.rin/prompts/*.md`
-- Project: `.rin/prompts/*.md`
-- Packages: `prompts/` directories or `rin.prompts` entries in `package.json`
+- Global: `~/.pi/agent/prompts/*.md`
+- Project: `.pi/prompts/*.md`
+- Packages: `prompts/` directories or `pi.prompts` entries in `package.json`
 - Settings: `prompts` array with files or directories
 - CLI: `--prompt-template <path>` (repeatable)
 

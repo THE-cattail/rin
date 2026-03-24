@@ -10,13 +10,13 @@
  *
  * Usage:
  *   # First install dependencies
- *   cd examples/pi/extensions/custom-provider && npm install
+ *   cd packages/coding-agent/examples/extensions/custom-provider && npm install
  *
  *   # With OAuth (run /login custom-anthropic first)
- *   pi -e ./examples/pi/extensions/custom-provider-anthropic
+ *   pi -e ./packages/coding-agent/examples/extensions/custom-provider
  *
  *   # With API key
- *   CUSTOM_ANTHROPIC_API_KEY=sk-ant-... pi -e ./examples/pi/extensions/custom-provider-anthropic
+ *   CUSTOM_ANTHROPIC_API_KEY=sk-ant-... pi -e ./packages/coding-agent/examples/extensions/custom-provider
  *
  * Then use /model to select custom-anthropic/claude-sonnet-4-5
  */

@@ -1,13 +1,10 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
-> rin can create skills. Ask it to build one for your use case.
+> pi can create skills. Ask it to build one for your use case.
 
 # Skills
 
 Skills are self-contained capability packages that the agent loads on-demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
 
-Rin implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient.
+Pi implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient.
 
 ## Table of Contents
 
@@ -24,22 +21,23 @@ Rin implements the [Agent Skills standard](https://agentskills.io/specification)
 
 > **Security:** Skills can instruct the model to perform any action and may include executable code the model invokes. Review skill content before use.
 
-Rin loads skills from:
+Pi loads skills from:
 
 - Global:
-  - `~/.rin/skills/`
+  - `~/.pi/agent/skills/`
+  - `~/.agents/skills/`
 - Project:
-  - `.rin/skills/`
-- Packages: `skills/` directories or `rin.skills` entries in `package.json`
+  - `.pi/skills/`
+  - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
+- Packages: `skills/` directories or `pi.skills` entries in `package.json`
 - Settings: `skills` array with files or directories
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
 
 Discovery rules:
-- Top-level `.md` files in the skills directory
-- `SKILL.md` files in subdirectories (searched recursively)
-- Skills in `skills/.hidden/` are discovered but omitted from `available_skills` by default
+- Direct `.md` files in the skills directory root
+- Recursive `SKILL.md` files under subdirectories
 
-Use `--no-skills` to disable discovery; explicit `--skill` paths remain active.
+Disable discovery with `--no-skills` (explicit `--skill` paths still load).
 
 ### Using Skills from Other Harnesses
 
@@ -54,7 +52,7 @@ To use skills from Claude Code or OpenAI Codex, add their directories to setting
 }
 ```
 
-For project-level Claude Code skills, add to `.rin/settings.json`:
+For project-level Claude Code skills, add to `.pi/settings.json`:
 
 ```json
 {
@@ -64,13 +62,12 @@ For project-level Claude Code skills, add to `.rin/settings.json`:
 
 ## How Skills Work
 
-1. Rin scans skill locations at startup to extract names and descriptions.
-2. Public skills are included in the system prompt (XML format) per the [specification](https://agentskills.io/integrate-skills).
-3. Skills in `skills/.hidden/` are omitted from `available_skills` by default but callable via `/skill:name` or `load_skill`.
-4. When a task matches, the agent invokes `load_skill` to retrieve full instructions.
-5. The agent executes instructions, resolving relative paths for scripts and assets.
+1. At startup, pi scans skill locations and extracts names and descriptions
+2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
+3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
+4. The agent follows the instructions, using relative paths to reference scripts and assets
 
-This provides progressive disclosure: public descriptions stay in context, while full instructions and hidden skills load on-demand.
+This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
 
 ## Skill Commands
 
@@ -81,7 +78,7 @@ Skills register as `/skill:name` commands:
 /skill:pdf-tools extract      # Load skill with arguments
 ```
 
-Arguments after the command are appended to the skill content as `User: <args>`. This works for hidden skills as well.
+Arguments after the command are appended to the skill content as `User: <args>`.
 
 Toggle skill commands via `/settings` in interactive mode or in `settings.json`:
 
@@ -148,7 +145,7 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
-| `disable-model-invocation` | No | If `true`, the skill is hidden from the prompt. Access remains via `/skill:name` or `load_skill`. Paths matching `skills/.hidden/**` are hidden by default. |
+| `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. |
 
 ### Name Rules
 
@@ -177,7 +174,7 @@ description: Helps with PDFs.
 
 ## Validation
 
-Rin validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
+Pi validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
 
 - Name doesn't match parent directory
 - Name exceeds 64 characters or contains invalid characters
@@ -231,4 +228,4 @@ cd /path/to/brave-search && npm install
 ## Skill Repositories
 
 - [Anthropic Skills](https://github.com/anthropics/skills) - Document processing (docx, pdf, pptx, xlsx), web development
-- [Rin Skills](https://github.com/badlogic/rin-skills) - Web search, browser automation, Google APIs, transcription
+- [Pi Skills](https://github.com/badlogic/pi-skills) - Web search, browser automation, Google APIs, transcription

@@ -1,21 +1,18 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
-> rin can create extensions. Ask it to build one for your use case.
+> pi can create extensions. Ask it to build one for your use case.
 
 # Extensions
 
-Extensions are TypeScript modules that extend rin's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
+Extensions are TypeScript modules that extend pi's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
 
-> **Placement for /reload:** Put extensions in `~/.rin/extensions/` (global) or `.rin/extensions/` (project-local) for auto-discovery. Use `rin -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
+> **Placement for /reload:** Put extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) for auto-discovery. Use `pi -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
 
 **Key capabilities:**
-- **Custom tools** - Register tools the LLM can call via `rin.registerTool()`
+- **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
 - **Event interception** - Block or modify tool calls, inject context, customize compaction
 - **User interaction** - Prompt users via `ctx.ui` (select, confirm, input, notify)
 - **Custom UI components** - Full TUI components with keyboard input via `ctx.ui.custom()` for complex interactions
-- **Custom commands** - Register commands like `/mycommand` via `rin.registerCommand()`
-- **Session persistence** - Store state that survives restarts via `rin.appendEntry()`
+- **Custom commands** - Register commands like `/mycommand` via `pi.registerCommand()`
+- **Session persistence** - Store state that survives restarts via `pi.appendEntry()`
 - **Custom rendering** - Control how tool calls/results and messages appear in TUI
 
 **Example use cases:**
@@ -55,7 +52,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 
 ## Quick Start
 
-Create `~/.rin/extensions/my-extension.ts`:
+Create `~/.pi/agent/extensions/my-extension.ts`:
 
 ```typescript
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -114,10 +111,10 @@ Extensions are auto-discovered from:
 
 | Location | Scope |
 |----------|-------|
-| `~/.rin/extensions/*.ts` | Global (all projects) |
-| `~/.rin/extensions/*/index.ts` | Global (subdirectory) |
-| `.rin/extensions/*.ts` | Project-local |
-| `.rin/extensions/*/index.ts` | Project-local (subdirectory) |
+| `~/.pi/agent/extensions/*.ts` | Global (all projects) |
+| `~/.pi/agent/extensions/*/index.ts` | Global (subdirectory) |
+| `.pi/extensions/*.ts` | Project-local |
+| `.pi/extensions/*/index.ts` | Project-local (subdirectory) |
 
 Additional paths via `settings.json`:
 
@@ -134,7 +131,7 @@ Additional paths via `settings.json`:
 }
 ```
 
-To share extensions via npm or git as rin packages, see [packages.md](packages.md).
+To share extensions via npm or git as pi packages, see [packages.md](packages.md).
 
 ## Available Imports
 
@@ -142,8 +139,8 @@ To share extensions via npm or git as rin packages, see [packages.md](packages.m
 |---------|---------|
 | `@mariozechner/pi-coding-agent` | Extension types (`ExtensionAPI`, `ExtensionContext`, events) |
 | `@sinclair/typebox` | Schema definitions for tool parameters |
-| `@mariozechner/rin-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
-| `@mariozechner/rin-tui` | TUI components for custom rendering |
+| `@mariozechner/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
+| `@mariozechner/pi-tui` | TUI components for custom rendering |
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
 
@@ -181,14 +178,14 @@ Extensions are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript wo
 **Single file** - simplest, for small extensions:
 
 ```
-~/.rin/extensions/
+~/.pi/agent/extensions/
 └── my-extension.ts
 ```
 
 **Directory with index.ts** - for multi-file extensions:
 
 ```
-~/.rin/extensions/
+~/.pi/agent/extensions/
 └── my-extension/
     ├── index.ts        # Entry point (exports default function)
     ├── tools.ts        # Helper module
@@ -198,7 +195,7 @@ Extensions are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript wo
 **Package with dependencies** - for extensions that need npm packages:
 
 ```
-~/.rin/extensions/
+~/.pi/agent/extensions/
 └── my-extension/
     ├── package.json    # Declares dependencies and entry points
     ├── package-lock.json
@@ -291,7 +288,7 @@ See [session.md](session.md) for session storage internals and the SessionManage
 
 #### session_directory
 
-Fired by the `rin` CLI during startup session resolution, before the initial session manager is created.
+Fired by the `pi` CLI during startup session resolution, before the initial session manager is created.
 
 This event is:
 - CLI-only. It is not emitted in SDK mode.
@@ -563,7 +560,7 @@ Use this to update UI elements (status bars, footers) or perform model-specific 
 
 Fired after `tool_execution_start`, before the tool executes. **Can block.** Use `isToolCallEventType` to narrow and get typed inputs.
 
-Before `tool_call` runs, rin waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
+Before `tool_call` runs, pi waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
 
 In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
 
@@ -644,6 +641,8 @@ pi.on("tool_result", async (event, ctx) => {
 Fired when user executes `!` or `!!` commands. **Can intercept.**
 
 ```typescript
+import { createLocalBashOperations } from "@mariozechner/pi-coding-agent";
+
 pi.on("user_bash", (event, ctx) => {
   // event.command - the bash command
   // event.excludeFromContext - true if !! prefix
@@ -652,7 +651,17 @@ pi.on("user_bash", (event, ctx) => {
   // Option 1: Provide custom operations (e.g., SSH)
   return { operations: remoteBashOps };
 
-  // Option 2: Full replacement - return result directly
+  // Option 2: Wrap pi's built-in local bash backend
+  const local = createLocalBashOperations();
+  return {
+    operations: {
+      exec(command, cwd, options) {
+        return local.exec(`source ~/.profile\n${command}`, cwd, options);
+      }
+    }
+  };
+
+  // Option 3: Full replacement - return result directly
   return { result: { output: "...", exitCode: 0, cancelled: false, truncated: false } };
 });
 ```
@@ -745,7 +754,7 @@ Control flow helpers.
 
 ### ctx.shutdown()
 
-Request a graceful shutdown of rin.
+Request a graceful shutdown of pi.
 
 - **Interactive mode:** Deferred until the agent becomes idle (after processing all queued steering and follow-up messages).
 - **RPC mode:** Deferred until the next idle state (after completing the current command response, when waiting for the next command).
@@ -925,19 +934,19 @@ export default function (pi: ExtensionAPI) {
 
 ## ExtensionAPI Methods
 
-### rin.on(event, handler)
+### pi.on(event, handler)
 
 Subscribe to events. See [Events](#events) for event types and return values.
 
-### rin.registerTool(definition)
+### pi.registerTool(definition)
 
 Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) for full details.
 
-`rin.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `rin.getAllTools()` and are callable by the LLM without `/reload`.
+`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` and are callable by the LLM without `/reload`.
 
-Use `rin.setActiveTools()` to enable or disable tools (including dynamically added tools) at runtime.
+Use `pi.setActiveTools()` to enable or disable tools (including dynamically added tools) at runtime.
 
-Use `promptSnippet` to customize that tool's one-line entry in `Available tools`, and `promptGuidelines` to append tool-specific bullets to the default `Guidelines` section when the tool is active.
+Use `promptSnippet` to opt a custom tool into a one-line entry in `Available tools`, and `promptGuidelines` to append tool-specific bullets to the default `Guidelines` section when the tool is active.
 
 See [dynamic-tools.ts](../examples/extensions/dynamic-tools.ts) for a full example.
 
@@ -967,12 +976,12 @@ pi.registerTool({
   },
 
   // Optional: Custom rendering
-  renderCall(args, theme) { ... },
-  renderResult(result, options, theme) { ... },
+  renderCall(args, theme, context) { ... },
+  renderResult(result, options, theme, context) { ... },
 });
 ```
 
-### rin.sendMessage(message, options?)
+### pi.sendMessage(message, options?)
 
 Inject a custom message into the session.
 
@@ -990,12 +999,12 @@ pi.sendMessage({
 
 **Options:**
 - `deliverAs` - Delivery mode:
-  - `"steer"` (default) - Interrupts streaming. Delivered after current tool finishes, remaining tools skipped.
+  - `"steer"` (default) - Queues the message while streaming. Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call.
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
 - `triggerTurn: true` - If agent is idle, trigger an LLM response immediately. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
 
-### rin.sendUserMessage(content, options?)
+### pi.sendUserMessage(content, options?)
 
 Send a user message to the agent. Unlike `sendMessage()` which sends custom messages, this sends an actual user message that appears as if typed by the user. Always triggers a turn.
 
@@ -1016,14 +1025,14 @@ pi.sendUserMessage("And then summarize", { deliverAs: "followUp" });
 
 **Options:**
 - `deliverAs` - Required when agent is streaming:
-  - `"steer"` - Interrupts after current tool, remaining tools skipped
+  - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
 
 When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
 
-### rin.appendEntry(customType, data?)
+### pi.appendEntry(customType, data?)
 
 Persist extension state (does NOT participate in LLM context).
 
@@ -1040,7 +1049,7 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-### rin.setSessionName(name)
+### pi.setSessionName(name)
 
 Set the session display name (shown in session selector instead of first message).
 
@@ -1048,7 +1057,7 @@ Set the session display name (shown in session selector instead of first message
 pi.setSessionName("Refactor auth module");
 ```
 
-### rin.getSessionName()
+### pi.getSessionName()
 
 Get the current session name, if set.
 
@@ -1059,7 +1068,7 @@ if (name) {
 }
 ```
 
-### rin.setLabel(entryId, label)
+### pi.setLabel(entryId, label)
 
 Set or clear a label on an entry. Labels are user-defined markers for bookmarking and navigation (shown in `/tree` selector).
 
@@ -1076,9 +1085,11 @@ const label = ctx.sessionManager.getLabel(entryId);
 
 Labels persist in the session and survive restarts. Use them to mark important points (turns, checkpoints) in the conversation tree.
 
-### rin.registerCommand(name, options)
+### pi.registerCommand(name, options)
 
 Register a command.
+
+If multiple extensions register the same command name, pi keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
 
 ```typescript
 pi.registerCommand("stats", {
@@ -1109,7 +1120,7 @@ pi.registerCommand("deploy", {
 });
 ```
 
-### rin.getCommands()
+### pi.getCommands()
 
 Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
 The list matches the RPC `get_commands` ordering: extensions first, then templates, then skills.
@@ -1117,28 +1128,36 @@ The list matches the RPC `get_commands` ordering: extensions first, then templat
 ```typescript
 const commands = pi.getCommands();
 const bySource = commands.filter((command) => command.source === "extension");
+const userScoped = commands.filter((command) => command.sourceInfo.scope === "user");
 ```
 
 Each entry has this shape:
 
 ```typescript
 {
-  name: string; // Command name without the leading slash
+  name: string; // Invokable command name without the leading slash. May be suffixed like "review:1"
   description?: string;
   source: "extension" | "prompt" | "skill";
-  location?: "user" | "project" | "path"; // For templates and skills
-  path?: string; // Files backing templates, skills, and extensions
+  sourceInfo: {
+    path: string;
+    source: string;
+    scope: "user" | "project" | "temporary";
+    origin: "package" | "top-level";
+    baseDir?: string;
+  };
 }
 ```
+
+Use `sourceInfo` as the canonical provenance field. Do not infer ownership from command names or from ad hoc path parsing.
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
 
-### rin.registerMessageRenderer(customType, renderer)
+### pi.registerMessageRenderer(customType, renderer)
 
 Register a custom TUI renderer for messages with your `customType`. See [Custom UI](#custom-ui).
 
-### rin.registerShortcut(shortcut, options)
+### pi.registerShortcut(shortcut, options)
 
 Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
 
@@ -1151,7 +1170,7 @@ pi.registerShortcut("ctrl+shift+p", {
 });
 ```
 
-### rin.registerFlag(name, options)
+### pi.registerFlag(name, options)
 
 Register a CLI flag.
 
@@ -1168,7 +1187,7 @@ if (pi.getFlag("--plan")) {
 }
 ```
 
-### rin.exec(command, args, options?)
+### pi.exec(command, args, options?)
 
 Execute a shell command.
 
@@ -1177,18 +1196,33 @@ const result = await pi.exec("git", ["status"], { signal, timeout: 5000 });
 // result.stdout, result.stderr, result.code, result.killed
 ```
 
-### rin.getActiveTools() / rin.getAllTools() / rin.setActiveTools(names)
+### pi.getActiveTools() / pi.getAllTools() / pi.setActiveTools(names)
 
 Manage active tools. This works for both built-in tools and dynamically registered tools.
 
 ```typescript
-const active = pi.getActiveTools();  // ["read", "bash", "edit", "write"]
-const all = pi.getAllTools();        // [{ name: "read", description: "Read file contents..." }, ...]
-const names = all.map(t => t.name);  // Just names if needed
+const active = pi.getActiveTools();
+const all = pi.getAllTools();
+// [{
+//   name: "read",
+//   description: "Read file contents...",
+//   parameters: ..., 
+//   sourceInfo: { path: "<builtin:read>", source: "builtin", scope: "temporary", origin: "top-level" }
+// }, ...]
+const names = all.map(t => t.name);
+const builtinTools = all.filter((t) => t.sourceInfo.source === "builtin");
+const extensionTools = all.filter((t) => t.sourceInfo.source !== "builtin" && t.sourceInfo.source !== "sdk");
 pi.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-### rin.setModel(model)
+`pi.getAllTools()` returns `name`, `description`, `parameters`, and `sourceInfo`.
+
+Typical `sourceInfo.source` values:
+- `builtin` for built-in tools
+- `sdk` for tools passed via `createAgentSession({ customTools })`
+- extension source metadata for tools registered by extensions
+
+### pi.setModel(model)
 
 Set the current model. Returns `false` if no API key is available for the model. See [models.md](models.md) for configuring custom models.
 
@@ -1202,7 +1236,7 @@ if (model) {
 }
 ```
 
-### rin.getThinkingLevel() / rin.setThinkingLevel(level)
+### pi.getThinkingLevel() / pi.setThinkingLevel(level)
 
 Get or set the thinking level. Level is clamped to model capabilities (non-reasoning models always use "off").
 
@@ -1211,7 +1245,7 @@ const current = pi.getThinkingLevel();  // "off" | "minimal" | "low" | "medium" 
 pi.setThinkingLevel("high");
 ```
 
-### rin.events
+### pi.events
 
 Shared event bus for communication between extensions:
 
@@ -1220,7 +1254,7 @@ pi.events.on("my:event", (data) => { ... });
 pi.events.emit("my:event", { ... });
 ```
 
-### rin.registerProvider(name, config)
+### pi.registerProvider(name, config)
 
 Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations.
 
@@ -1286,7 +1320,7 @@ pi.registerProvider("corporate-ai", {
 
 See [custom-provider.md](custom-provider.md) for advanced topics: custom streaming APIs, OAuth details, model definition reference.
 
-### rin.unregisterProvider(name)
+### pi.unregisterProvider(name)
 
 Remove a previously registered provider and its models. Built-in models that were overridden by the provider are restored. Has no effect if the provider was not registered.
 
@@ -1337,13 +1371,43 @@ export default function (pi: ExtensionAPI) {
 
 ## Custom Tools
 
-Register tools the LLM can call via `rin.registerTool()`. Tools appear in the system prompt and can have custom rendering.
+Register tools the LLM can call via `pi.registerTool()`. Tools appear in the system prompt and can have custom rendering.
 
-Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, rin falls back to `description`.
+Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
 
-Use `promptGuidelines` to add tool-specific bullets to the default system prompt `Guidelines` section. These bullets are included only while the tool is active (for example, after `rin.setActiveTools([...])`).
+Use `promptGuidelines` to add tool-specific bullets to the default system prompt `Guidelines` section. These bullets are included only while the tool is active (for example, after `pi.setActiveTools([...])`).
 
 Note: Some models are idiots and include the @ prefix in tool path arguments. Built-in tools strip a leading @ before resolving paths. If your custom tool accepts a path, normalize a leading @ as well.
+
+If your custom tool mutates files, use `withFileMutationQueue()` so it participates in the same per-file queue as built-in `edit` and `write`. This matters because tool calls run in parallel by default. Without the queue, two tools can read the same old file contents, compute different updates, and then whichever write lands last overwrites the other.
+
+Example failure case: your custom tool edits `foo.ts` while built-in `edit` also changes `foo.ts` in the same assistant turn. If your tool does not participate in the queue, both can read the original `foo.ts`, apply separate changes, and one of those changes is lost.
+
+Pass the real target file path to `withFileMutationQueue()`, not the raw user argument. Resolve it to an absolute path first, relative to `ctx.cwd` or your tool's working directory. For existing files, the helper canonicalizes through `realpath()`, so symlink aliases for the same file share one queue. For new files, it falls back to the resolved absolute path because there is nothing to `realpath()` yet.
+
+Queue the entire mutation window on that target path. That includes read-modify-write logic, not just the final write.
+
+```typescript
+import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+
+async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+  const absolutePath = resolve(ctx.cwd, params.path);
+
+  return withFileMutationQueue(absolutePath, async () => {
+    await mkdir(dirname(absolutePath), { recursive: true });
+    const current = await readFile(absolutePath, "utf8");
+    const next = current.replace(params.oldText, params.newText);
+    await writeFile(absolutePath, next, "utf8");
+
+    return {
+      content: [{ type: "text", text: `Updated ${params.path}` }],
+      details: {},
+    };
+  });
+}
+```
 
 ### Tool Definition
 
@@ -1388,8 +1452,8 @@ pi.registerTool({
   },
 
   // Optional: Custom rendering
-  renderCall(args, theme) { ... },
-  renderResult(result, options, theme) { ... },
+  renderCall(args, theme, context) { ... },
+  renderResult(result, options, theme, context) { ... },
 });
 ```
 
@@ -1405,7 +1469,7 @@ async execute(toolCallId, params) {
 }
 ```
 
-**Important:** Use `StringEnum` from `@mariozechner/rin-ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
+**Important:** Use `StringEnum` from `@mariozechner/pi-ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
 
 ### Overriding Built-in Tools
 
@@ -1424,7 +1488,9 @@ pi --no-tools -e ./my-extension.ts
 
 See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.ts) for a complete example that overrides `read` with logging and access control.
 
-**Rendering:** If your override doesn't provide custom `renderCall`/`renderResult` functions, the built-in renderer is used automatically (syntax highlighting, diffs, etc.). This lets you wrap built-in tools for logging or access control without reimplementing the UI.
+**Rendering:** Built-in renderer inheritance is resolved per slot. Execution override and rendering override are independent. If your override omits `renderCall`, the built-in `renderCall` is used. If your override omits `renderResult`, the built-in `renderResult` is used. If your override omits both, the built-in renderer is used automatically (syntax highlighting, diffs, etc.). This lets you wrap built-in tools for logging or access control without reimplementing the UI.
+
+**Prompt metadata:** `promptSnippet` and `promptGuidelines` are not inherited from the built-in tool. If your override should keep those prompt instructions, define them on the override explicitly.
 
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
@@ -1467,6 +1533,8 @@ pi.registerTool({
 ```
 
 **Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
+
+For `user_bash`, extensions can reuse pi's local shell backend via `createLocalBashOperations()` instead of reimplementing local process spawning, shell resolution, and process-tree termination.
 
 The bash tool also supports a spawn hook to adjust the command, cwd, or env before execution:
 
@@ -1556,44 +1624,52 @@ export default function (pi: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how built-in tools render.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
-Tool output is wrapped in a `Box` that handles padding and background. Your render methods return `Component` instances (typically `Text`).
+Tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+
+`renderCall` and `renderResult` each receive a `context` object with:
+- `args` - the current tool call arguments
+- `state` - shared row-local state across `renderCall` and `renderResult`
+- `lastComponent` - the previously returned component for that slot, if any
+- `invalidate()` - request a rerender of this tool row
+- `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+
+Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 
 #### renderCall
 
-Renders the tool call (before/during execution):
+Renders the tool call or header:
 
 ```typescript
 import { Text } from "@mariozechner/pi-tui";
 
-renderCall(args, theme) {
-  let text = theme.fg("toolTitle", theme.bold("my_tool "));
-  text += theme.fg("muted", args.action);
+renderCall(args, theme, context) {
+  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  let content = theme.fg("toolTitle", theme.bold("my_tool "));
+  content += theme.fg("muted", args.action);
   if (args.text) {
-    text += " " + theme.fg("dim", `"${args.text}"`);
+    content += " " + theme.fg("dim", `"${args.text}"`);
   }
-  return new Text(text, 0, 0);  // 0,0 padding - Box handles it
+  text.setText(content);
+  return text;
 }
 ```
 
 #### renderResult
 
-Renders the tool result:
+Renders the tool result or output:
 
 ```typescript
-renderResult(result, { expanded, isPartial }, theme) {
-  // Handle streaming
+renderResult(result, { expanded, isPartial }, theme, context) {
   if (isPartial) {
     return new Text(theme.fg("warning", "Processing..."), 0, 0);
   }
 
-  // Handle errors
   if (result.details?.error) {
     return new Text(theme.fg("error", `Error: ${result.details.error}`), 0, 0);
   }
 
-  // Normal result - support expanded view (Ctrl+O)
   let text = theme.fg("success", "✓ Done");
   if (expanded && result.details?.items) {
     for (const item of result.details.items) {
@@ -1604,40 +1680,52 @@ renderResult(result, { expanded, isPartial }, theme) {
 }
 ```
 
+If a slot intentionally has no visible content, return an empty `Component` such as an empty `Container`.
+
 #### Keybinding Hints
 
-Use `keyHint()` to display keybinding hints that respect user's keybinding configuration:
+Use `keyHint()` to display keybinding hints that respect the active keybinding configuration:
 
 ```typescript
 import { keyHint } from "@mariozechner/pi-coding-agent";
 
-renderResult(result, { expanded }, theme) {
+renderResult(result, { expanded }, theme, context) {
   let text = theme.fg("success", "✓ Done");
   if (!expanded) {
-    text += ` (${keyHint("expandTools", "to expand")})`;
+    text += ` (${keyHint("app.tools.expand", "to expand")})`;
   }
   return new Text(text, 0, 0);
 }
 ```
 
 Available functions:
-- `keyHint(action, description)` - Editor actions (e.g., `"expandTools"`, `"selectConfirm"`)
-- `appKeyHint(keybindings, action, description)` - App actions (requires `KeybindingsManager`)
-- `editorKey(action)` - Get raw key string for editor action
+- `keyHint(keybinding, description)` - Formats a configured keybinding id such as `"app.tools.expand"` or `"tui.select.confirm"`
+- `keyText(keybinding)` - Returns the raw configured key text for a keybinding id
 - `rawKeyHint(key, description)` - Format a raw key string
+
+Use namespaced keybinding ids:
+- Coding-agent ids use the `app.*` namespace, for example `app.tools.expand`, `app.editor.external`, `app.session.rename`
+- Shared TUI ids use the `tui.*` namespace, for example `tui.select.confirm`, `tui.select.cancel`, `tui.input.tab`
+
+For the exhaustive list of keybinding ids and defaults, see [keybindings.md](keybindings.md). `keybindings.json` uses those same namespaced ids.
+
+Custom editors and `ctx.ui.custom()` components receive `keybindings: KeybindingsManager` as an injected argument. They should use that injected manager directly instead of calling `getKeybindings()` or `setKeybindings()`.
 
 #### Best Practices
 
-- Use `Text` with padding `(0, 0)` - the Box handles padding
-- Use `\n` for multi-line content
-- Handle `isPartial` for streaming progress
-- Support `expanded` for detail on demand
-- Keep default view compact
+- Use `Text` with padding `(0, 0)`. The Box handles padding.
+- Use `\n` for multi-line content.
+- Handle `isPartial` for streaming progress.
+- Support `expanded` for detail on demand.
+- Keep default view compact.
+- Read `context.args` in `renderResult` instead of copying args into `context.state`.
+- Use `context.state` only for data that must be shared across call and result slots.
+- Reuse `context.lastComponent` when the same component instance can be updated in place.
 
 #### Fallback
 
-If `renderCall`/`renderResult` is not defined or throws:
-- `renderCall`: Shows tool name
+If a slot renderer is not defined or throws:
+- `renderCall`: Shows the tool name
 - `renderResult`: Shows raw text from `content`
 
 ## Custom UI
@@ -1897,7 +1985,7 @@ pi.registerMessageRenderer("my-extension", (message, options, theme) => {
 });
 ```
 
-Messages are sent via `rin.sendMessage()`:
+Messages are sent via `pi.sendMessage()`:
 
 ```typescript
 pi.sendMessage({
@@ -1968,6 +2056,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `hello.ts` | Minimal tool registration | `registerTool` |
 | `question.ts` | Tool with user interaction | `registerTool`, `ui.select` |
 | `questionnaire.ts` | Multi-step wizard tool | `registerTool`, `ui.custom` |
+| `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
 | `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
@@ -2025,7 +2114,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
 | **Messages & Communication** |||
 | `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
-| `event-bus.ts` | Inter-extension events | `rin.events` |
+| `event-bus.ts` | Inter-extension events | `pi.events` |
 | **Session Metadata** |||
 | `session-name.ts` | Name sessions for selector | `setSessionName`, `getSessionName` |
 | `bookmark.ts` | Bookmark entries for /tree | `setLabel` |

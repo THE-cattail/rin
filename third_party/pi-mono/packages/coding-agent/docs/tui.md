@@ -1,13 +1,10 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
-> rin can create TUI components. Ask it to build one for your use case.
+> pi can create TUI components. Ask it to build one for your use case.
 
 # TUI Components
 
 Extensions and custom tools can render custom TUI components for interactive user interfaces. This page covers the component system and available building blocks.
 
-**Source:** [`@mariozechner/rin-tui`](https://github.com/badlogic/pi-mono/tree/main/packages/tui)
+**Source:** [`@mariozechner/pi-tui`](https://github.com/badlogic/pi-mono/tree/main/packages/tui)
 
 ## Component Interface
 
@@ -99,7 +96,7 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-**In custom tools** via `rin.ui.custom()`:
+**In custom tools** via `pi.ui.custom()`:
 
 ```typescript
 async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -182,7 +179,7 @@ See [overlay-qa-tests.ts](../examples/extensions/overlay-qa-tests.ts) for compre
 
 ## Built-in Components
 
-Import from `@mariozechner/rin-tui`:
+Import from `@mariozechner/pi-tui`:
 
 ```typescript
 import { Text, Box, Container, Spacer, Markdown } from "@mariozechner/pi-tui";
@@ -397,7 +394,7 @@ Components accept theme objects for styling.
 **In `renderCall`/`renderResult`**, use the `theme` parameter:
 
 ```typescript
-renderResult(result, options, theme) {
+renderResult(result, options, theme, context) {
   // Use theme.fg() for foreground colors
   return new Text(theme.fg("success", "Done!"), 0, 0);
   
@@ -431,7 +428,7 @@ renderResult(result, options, theme) {
 import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Markdown } from "@mariozechner/pi-tui";
 
-renderResult(result, options, theme) {
+renderResult(result, options, theme, context) {
   const mdTheme = getMarkdownTheme();
   return new Markdown(result.details.markdown, 0, 0, mdTheme);
 }
@@ -590,7 +587,7 @@ These patterns cover the most common UI needs in extensions. **Copy these patter
 
 ### Pattern 1: Selection Dialog (SelectList)
 
-For letting users pick from a list of options. Use `SelectList` from `@mariozechner/rin-tui` with `DynamicBorder` for framing.
+For letting users pick from a list of options. Use `SelectList` from `@mariozechner/pi-tui` with `DynamicBorder` for framing.
 
 ```typescript
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -682,7 +679,7 @@ pi.registerCommand("fetch", {
 
 ### Pattern 3: Settings/Toggles (SettingsList)
 
-For toggling multiple settings. Use `SettingsList` from `@mariozechner/rin-tui` with `getSettingsListTheme()`.
+For toggling multiple settings. Use `SettingsList` from `@mariozechner/pi-tui` with `getSettingsListTheme()`.
 
 ```typescript
 import { getSettingsListTheme } from "@mariozechner/pi-coding-agent";
@@ -887,3 +884,4 @@ export default function (pi: ExtensionAPI) {
 - **Custom footer**: [examples/extensions/custom-footer.ts](../examples/extensions/custom-footer.ts) - setFooter with stats
 - **Custom editor**: [examples/extensions/modal-editor.ts](../examples/extensions/modal-editor.ts) - Vim-like modal editing
 - **Snake game**: [examples/extensions/snake.ts](../examples/extensions/snake.ts) - Full game with keyboard input, game loop
+- **Custom tool rendering**: [examples/extensions/todo.ts](../examples/extensions/todo.ts) - renderCall and renderResult

@@ -1,6 +1,3 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # Development
 
 See [AGENTS.md](../../../AGENTS.md) for additional guidelines.
@@ -49,7 +46,7 @@ Never use `__dirname` directly for package assets.
 
 ## Debug Command
 
-`/debug` (hidden) writes to `~/.rin/rin-debug.log`:
+`/debug` (hidden) writes to `~/.pi/agent/pi-debug.log`:
 - Rendered TUI lines with ANSI codes
 - Last messages sent to the LLM
 

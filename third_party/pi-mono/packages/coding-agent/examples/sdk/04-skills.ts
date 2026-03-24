@@ -5,7 +5,13 @@
  * Discover, filter, merge, or replace them.
  */
 
-import { createAgentSession, DefaultResourceLoader, SessionManager, type Skill } from "@mariozechner/pi-coding-agent";
+import {
+	createAgentSession,
+	createSyntheticSourceInfo,
+	DefaultResourceLoader,
+	SessionManager,
+	type Skill,
+} from "@mariozechner/pi-coding-agent";
 
 // Or define custom skills inline
 const customSkill: Skill = {
@@ -13,7 +19,7 @@ const customSkill: Skill = {
 	description: "Custom project instructions",
 	filePath: "/virtual/SKILL.md",
 	baseDir: "/virtual",
-	source: "path",
+	sourceInfo: createSyntheticSourceInfo("/virtual/SKILL.md", { source: "sdk" }),
 	disableModelInvocation: false,
 };
 
@@ -28,7 +34,7 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Discover all skills from cwd/.rin/skills, ~/.rin/skills, etc.
+// Discover all skills from cwd/.pi/skills, ~/.pi/agent/skills, etc.
 const { skills: allSkills, diagnostics } = loader.getSkills();
 console.log(
 	"Discovered skills:",

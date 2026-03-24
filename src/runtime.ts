@@ -22,6 +22,9 @@ import {
 } from './runtime-paths'
 import { importPiCodingAgentModule } from './pi-upstream'
 import { runBrainCli } from './brain'
+import { compileMemorySync, executeMemoryAction } from './memory'
+import { createProviderContinuationExtension } from './provider-continuation-extension'
+import { createProviderUsageExtension } from './provider-usage-extension'
 import { promptSessionWithRetry } from './session-prompt'
 import { searchWeb } from './web-search'
 
@@ -41,6 +44,127 @@ const INTERNALIZED_SKILL_NAMES = new Set([
 function safeString(value: any): string {
   if (value == null) return ''
   return String(value)
+}
+
+function resolveContextInspectionDirectory(targetPath: any) {
+  const raw = safeString(targetPath).trim()
+  const resolvedTarget = path.resolve(raw || process.cwd())
+  let currentDir = resolvedTarget
+  try {
+    const stat = fs.statSync(resolvedTarget)
+    if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
+  } catch {
+    currentDir = path.dirname(resolvedTarget)
+  }
+  return { targetPath: resolvedTarget, directory: currentDir }
+}
+
+function findGitRepoRootForContext(startDir: string): string | null {
+  let dir = path.resolve(startDir)
+  while (true) {
+    if (fs.existsSync(path.join(dir, '.git'))) return dir
+    const parent = path.dirname(dir)
+    if (!parent || parent === dir) return null
+    dir = parent
+  }
+}
+
+function collectPiSkillEntriesFromRoot(skillRoot: string) {
+  const results: Array<any> = []
+  if (!skillRoot || !fs.existsSync(skillRoot)) return results
+
+  const visit = (dir: string, includeRootMarkdownFiles: boolean) => {
+    let entries: Array<fs.Dirent> = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    const hasSkillFile = entries.some((entry) => {
+      if (entry.name !== 'SKILL.md') return false
+      const fullPath = path.join(dir, entry.name)
+      try {
+        return entry.isFile() || (entry.isSymbolicLink() && fs.statSync(fullPath).isFile())
+      } catch {
+        return false
+      }
+    })
+    if (hasSkillFile) {
+      results.push({ path: dir, exists: true, kind: 'directory', rootPath: skillRoot })
+      return
+    }
+
+    for (const entry of entries.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry || !entry.name || entry.name.startsWith('.')) continue
+      if (entry.name === 'node_modules') continue
+      const fullPath = path.join(dir, entry.name)
+      let isDirectory = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        try {
+          const stat = fs.statSync(fullPath)
+          isDirectory = stat.isDirectory()
+          isFile = stat.isFile()
+        } catch {
+          continue
+        }
+      }
+      if (isDirectory) {
+        visit(fullPath, false)
+        continue
+      }
+      if (includeRootMarkdownFiles && isFile && entry.name.endsWith('.md')) {
+        results.push({ path: fullPath, exists: true, kind: 'file', rootPath: skillRoot })
+      }
+    }
+  }
+
+  visit(skillRoot, true)
+  return results
+}
+
+function collectPiContextInspection(targetPath: any) {
+  const { targetPath: resolvedTarget, directory } = resolveContextInspectionDirectory(targetPath)
+
+  const agentsFiles: Array<any> = []
+  let cursor = directory
+  while (true) {
+    const filePath = path.join(cursor, 'AGENTS.md')
+    if (fs.existsSync(filePath)) agentsFiles.push({ path: filePath })
+    const parent = path.dirname(cursor)
+    if (!parent || parent === cursor) break
+    cursor = parent
+  }
+
+  const skillRoots: Array<any> = []
+  const seenSkillRoots = new Set<string>()
+  const pushSkillRoot = (rootPath: string, scope: string) => {
+    const resolvedRoot = path.resolve(rootPath)
+    if (seenSkillRoots.has(resolvedRoot) || !fs.existsSync(resolvedRoot)) return
+    seenSkillRoots.add(resolvedRoot)
+    skillRoots.push({ path: resolvedRoot, scope })
+  }
+
+  const gitRepoRoot = findGitRepoRootForContext(directory)
+  cursor = directory
+  while (true) {
+    pushSkillRoot(path.join(cursor, '.agents', 'skills'), cursor === directory ? 'target' : 'ancestor')
+    if (gitRepoRoot && cursor === gitRepoRoot) break
+    const parent = path.dirname(cursor)
+    if (!parent || parent === cursor) break
+    cursor = parent
+  }
+
+  const skills = skillRoots.flatMap((entry) => collectPiSkillEntriesFromRoot(safeString(entry && entry.path)))
+
+  return {
+    targetPath: resolvedTarget,
+    directory,
+    agentsFiles,
+    skillRoots,
+    skills,
+  }
 }
 
 function trimText(value: any, limit = 64_000): string {
@@ -1175,6 +1299,19 @@ function toolResultFromText(text: string, details: any = {}, isError = false) {
   }
 }
 
+function literalEnumSchema(values: string[], description = '') {
+  const uniqueValues = Array.from(new Set((Array.isArray(values) ? values : []).map((value) => safeString(value).trim()).filter(Boolean)))
+  return Type.Union(uniqueValues.map((value) => Type.Literal(value)), {
+    ...(description ? { description } : {}),
+  })
+}
+
+function describeEnumParam(label: string, values: string[]) {
+  const uniqueValues = Array.from(new Set((Array.isArray(values) ? values : []).map((value) => safeString(value).trim()).filter(Boolean)))
+  const joined = uniqueValues.join(', ')
+  return `${label} One of: ${joined}.`
+}
+
 function createRinBuiltinExtensionTools({
   repoRoot,
   stateRoot,
@@ -1202,184 +1339,66 @@ function createRinBuiltinExtensionTools({
   sessionManager?: any
   sessionRef?: { current: any }
 }) {
-  function isHiddenSkillPathLocal(filePath: any): boolean {
-    const raw = safeString(filePath).trim()
-    if (!raw) return false
-    return path.resolve(raw).split(path.sep).filter(Boolean).includes('.hidden')
-  }
-
-  function normalizeSkillRecordLocal(skill: any): any {
-    if (!skill || typeof skill !== 'object') return null
-    const filePath = safeString(skill && skill.filePath).trim()
-    const baseDir = safeString(skill && skill.baseDir).trim() || (filePath ? path.dirname(filePath) : '')
-    const hidden = Boolean(skill && skill.disableModelInvocation) || isHiddenSkillPathLocal(filePath) || isHiddenSkillPathLocal(baseDir)
-    return {
-      ...skill,
-      name: safeString(skill && skill.name).trim(),
-      description: safeString(skill && skill.description).trim(),
-      filePath,
-      baseDir,
-      disableModelInvocation: hidden,
-    }
-  }
-
-  function stripSkillFrontmatterLocal(text: string): string {
-    if (!text.startsWith('---')) return text.trim()
-    const end = text.indexOf('\n---', 3)
-    if (end < 0) return text.trim()
-    return text.slice(end + 4).trim()
-  }
-
-  function listRuntimeSkills() {
-    const loaded = resourceLoader && typeof resourceLoader.getSkills === 'function'
-      ? resourceLoader.getSkills()
-      : { skills: [] }
-    const skills = Array.isArray(loaded && loaded.skills) ? loaded.skills : []
-    return skills
-      .map((skill: any) => normalizeSkillRecordLocal(skill))
-      .filter((skill: any) => skill && safeString(skill.name).trim() && !INTERNALIZED_SKILL_NAMES.has(safeString(skill.name).trim()))
-      .sort((a: any, b: any) => safeString(a && a.name).trim().localeCompare(safeString(b && b.name).trim()))
-  }
-
-  function resolveSkillLinkTarget(rawTarget: string): string {
-    let target = safeString(rawTarget).trim()
-    if (!target) return ''
-    if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1).trim()
-    if (!target || target.startsWith('#')) return ''
-    if (/^(?:[a-z]+:)?\/\//i.test(target) || /^(?:mailto|data|javascript):/i.test(target)) return ''
-    target = target.replace(/[?#].*$/, '').trim()
-    return target
-  }
-
-  function collectSkillReferences(skillBody: string, baseDir: string) {
-    const matches = new Map<string, any>()
-    const linkPattern = /\[[^\]]*\]\(([^)]+)\)/g
-    for (const match of skillBody.matchAll(linkPattern)) {
-      const rawTarget = safeString(match && match[1]).trim()
-      const target = resolveSkillLinkTarget(rawTarget)
-      if (!target) continue
-      const resolvedPath = path.resolve(baseDir || process.cwd(), target)
-      if (matches.has(resolvedPath)) continue
-      let exists = false
-      let stat: fs.Stats | null = null
-      try {
-        stat = fs.statSync(resolvedPath)
-        exists = true
-      } catch {}
-      matches.set(resolvedPath, {
-        path: resolvedPath,
-        relativePath: baseDir ? path.relative(baseDir, resolvedPath) || path.basename(resolvedPath) : target,
-        exists,
-        kind: exists && stat
-          ? stat.isDirectory()
-            ? 'directory'
-            : path.extname(resolvedPath).slice(1).toLowerCase() || 'file'
-          : 'missing',
-      })
-    }
-    return [...matches.values()]
-  }
-
-  function collectContextFilesForTool(targetPath: string) {
-    const raw = safeString(targetPath).trim()
-    const resolvedTarget = path.resolve(raw || process.cwd())
-    let currentDir = resolvedTarget
-    try {
-      const stat = fs.statSync(resolvedTarget)
-      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
-    } catch {
-      currentDir = path.dirname(resolvedTarget)
-    }
-
-    const agentsFiles: Array<any> = []
-    const seen = new Set<string>()
-    let cursor = currentDir
-    while (true) {
-      const agentsPath = path.join(cursor, 'AGENTS.md')
-      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
-        seen.add(agentsPath)
-        agentsFiles.push({ path: agentsPath, content: readTextIfExists(agentsPath) })
-      }
-      const parent = path.dirname(cursor)
-      if (!parent || parent === cursor) break
-      cursor = parent
-    }
-
-    const localRinDir = path.join(currentDir, '.rin')
-    let localRinEntries: Array<any> = []
-    if (fs.existsSync(localRinDir)) {
-      try {
-        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
-          const entryPath = path.join(localRinDir, name)
-          let kind = 'missing'
-          try {
-            const stat = fs.statSync(entryPath)
-            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
-          } catch {}
-          return { name, path: entryPath, kind }
-        })
-      } catch {}
-    }
-
-    return {
-      targetPath: resolvedTarget,
-      directory: currentDir,
-      agentsFiles,
-      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
-      localRinEntries,
-    }
-  }
-
-  const brainTool = {
-    name: 'rin_brain',
-    label: 'Rin Brain',
-    description: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge. Do not use this for verbatim transcript reads.',
-    promptSnippet: 'Retrieve or store long-term memory, summarized past events, and indexed knowledge.',
+  const memoryTool = {
+    name: 'rin_memory',
+    label: 'Rin Memory',
+    description: 'Manage the markdown-backed long-term memory library. Prefer recall or progressive memory before resident; use rin_history for verbatim recent transcript.',
+    promptSnippet: 'Manage the markdown-backed long-term memory library.',
     promptGuidelines: [
-      'Use this for long-term memory, summarized past events, and indexed knowledge, not for verbatim transcript reads.',
+      'Use rin_memory for long-term reusable memory, not for verbatim recent transcript; use rin_history for exact recent wording.',
+      'Default to caution, but actively store information when it has stable cross-session value.',
+      'Do not skip memory just because resident is too strict: prefer recall first, then progressive, and resident only for the fixed core slots.',
+      'Never create new resident slots. Allowed resident slots: agent_identity, owner_identity, core_voice_style, core_methodology, core_values.',
+      'Do not store transient task state, one-off plans, casual small talk, unconfirmed guesses, or information that only matters in the current turn.',
+      'Before adding a new memory, search for an existing entry and prefer updating or replacing it instead of creating duplicates.',
+      'Resident memory is tiny and global. Progressive memory should expose a short summary plus a file path. Recall memory is the default landing zone.',
     ],
     parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal('show'),
-        Type.Literal('search'),
-        Type.Literal('recall'),
-        Type.Literal('history_recent'),
-        Type.Literal('history_search'),
-        Type.Literal('remember'),
-        Type.Literal('finalize'),
-        Type.Literal('knowledge_search'),
-        Type.Literal('knowledge_index'),
-      ]),
+      action: literalEnumSchema([
+        'list',
+        'search',
+        'get',
+        'save',
+        'delete',
+        'compile',
+        'doctor',
+      ], describeEnumParam('Action.', [
+        'list',
+        'search',
+        'get',
+        'save',
+        'delete',
+        'compile',
+        'doctor',
+      ])),
       query: Type.Optional(Type.String()),
-      hours: Type.Optional(Type.Number({ minimum: 1 })),
+      id: Type.Optional(Type.String()),
+      path: Type.Optional(Type.String()),
+      title: Type.Optional(Type.String()),
+      content: Type.Optional(Type.String()),
+      summary: Type.Optional(Type.String()),
+      exposure: Type.Optional(literalEnumSchema(['resident', 'progressive', 'recall'])),
+      fidelity: Type.Optional(literalEnumSchema(['exact', 'fuzzy'])),
+      residentSlot: Type.Optional(Type.String()),
+      tags: Type.Optional(Type.Array(Type.String())),
+      aliases: Type.Optional(Type.Array(Type.String())),
+      sensitivity: Type.Optional(Type.String()),
+      source: Type.Optional(Type.String()),
+      section: Type.Optional(literalEnumSchema(['resident', 'progressive', 'all'])),
       limit: Type.Optional(Type.Number({ minimum: 1 })),
-      chatKey: Type.Optional(Type.String()),
-      scope: Type.Optional(Type.String()),
-      reason: Type.Optional(Type.String()),
-      mode: Type.Optional(Type.String()),
     }),
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
-      const action = safeString(params && params.action).trim()
-      const args: string[] = []
-      if (action === 'knowledge_search' || action === 'knowledge_index') args.push('knowledge')
-      else args.push('brain')
-      if (action === 'show') args.push('show')
-      if (action === 'search') args.push('search', safeString(params.query || ''))
-      if (action === 'recall') args.push('recall', safeString(params.query || ''))
-      if (action === 'history_recent') args.push('history', 'recent')
-      if (action === 'history_search') args.push('history', 'search', safeString(params.query || ''))
-      if (action === 'remember') args.push('remember', safeString(params.query || ''))
-      if (action === 'finalize') args.push('finalize')
-      if (action === 'knowledge_search') args.push('search', safeString(params.query || ''))
-      if (action === 'knowledge_index') args.push('index')
-      if (params && params.limit != null) args.push('--limit', String(params.limit))
-      if (params && params.hours != null && action === 'history_recent') args.push('--hours', String(params.hours))
-      if (params && params.chatKey) args.push('--chatKey', safeString(params.chatKey))
-      if (params && params.scope && action !== 'knowledge_search' && action !== 'knowledge_index' && action !== 'history_recent' && action !== 'history_search') args.push('--scope', safeString(params.scope))
-      if (params && params.reason && action === 'finalize') args.push('--reason', safeString(params.reason))
-      if (params && params.mode && action === 'knowledge_search') args.push('--mode', safeString(params.mode))
-      const result = await runRinBrainCommand({ repoRoot, stateRoot, args, signal })
-      return toolResultFromCommand(result)
+      void repoRoot
+      if (signal?.aborted) return toolResultFromText('aborted', {}, true)
+      try {
+        const result = await executeMemoryAction(params || {}, stateRoot)
+        const text = typeof result?.content === 'string'
+          ? result.content
+          : JSON.stringify(result, null, 2)
+        return toolResultFromText(text, result, false)
+      } catch (e: any) {
+        return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
+      }
     },
   }
 
@@ -1392,14 +1411,21 @@ function createRinBuiltinExtensionTools({
       'Use this when the user explicitly wants to send a bridge message, inspect one bridged message, or manage trusted identities.',
     ],
     parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal('send'),
-        Type.Literal('history_get'),
-        Type.Literal('trusted_list'),
-        Type.Literal('trusted_add'),
-        Type.Literal('trusted_del'),
-        Type.Literal('trusted_check'),
-      ]),
+      action: literalEnumSchema([
+        'send',
+        'history_get',
+        'trusted_list',
+        'trusted_add',
+        'trusted_del',
+        'trusted_check',
+      ], describeEnumParam('Action.', [
+        'send',
+        'history_get',
+        'trusted_list',
+        'trusted_add',
+        'trusted_del',
+        'trusted_check',
+      ])),
       chatKey: Type.Optional(Type.String()),
       text: Type.Optional(Type.String()),
       atIds: Type.Optional(Type.Array(Type.String())),
@@ -1467,17 +1493,24 @@ function createRinBuiltinExtensionTools({
       'Use this when exact recent wording or raw transcript/log inspection matters.',
     ],
     parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal('recent'),
-        Type.Literal('search'),
-      ]),
+      action: literalEnumSchema([
+        'recent',
+        'search',
+      ], describeEnumParam('Action.', [
+        'recent',
+        'search',
+      ])),
       query: Type.Optional(Type.String()),
       limit: Type.Optional(Type.Number({ minimum: 1 })),
-      source: Type.Optional(Type.Union([
-        Type.Literal('auto'),
-        Type.Literal('session'),
-        Type.Literal('chat'),
-      ])),
+      source: Type.Optional(literalEnumSchema([
+        'auto',
+        'session',
+        'chat',
+      ], describeEnumParam('Transcript source.', [
+        'auto',
+        'session',
+        'chat',
+      ]))),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       const action = safeString(params && params.action).trim()
@@ -1526,15 +1559,22 @@ function createRinBuiltinExtensionTools({
       'Use this when the user asks to inspect or manage timers, routines, or scheduled inspect jobs.',
     ],
     parameters: Type.Object({
-      kind: Type.Union([Type.Literal('timer'), Type.Literal('inspect')]),
-      action: Type.Union([
-        Type.Literal('list'),
-        Type.Literal('create'),
-        Type.Literal('enable'),
-        Type.Literal('disable'),
-        Type.Literal('delete'),
-        Type.Literal('run'),
-      ]),
+      kind: literalEnumSchema(['timer', 'inspect'], describeEnumParam('Schedule kind.', ['timer', 'inspect'])),
+      action: literalEnumSchema([
+        'list',
+        'create',
+        'enable',
+        'disable',
+        'delete',
+        'run',
+      ], describeEnumParam('Action.', [
+        'list',
+        'create',
+        'enable',
+        'disable',
+        'delete',
+        'run',
+      ])),
       name: Type.Optional(Type.String()),
       chatKey: Type.Optional(Type.String()),
       routineFile: Type.Optional(Type.String()),
@@ -1570,39 +1610,59 @@ function createRinBuiltinExtensionTools({
   const webSearchTool = {
     name: 'rin_web_search',
     label: 'Web Search',
-    description: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
-    promptSnippet: 'Search the live public web for current information, official documentation, release notes, pricing, or source-backed verification.',
+    description: 'Search the live public web through the managed SearXNG backend, exposing SearXNG search controls directly while returning normalized JSON results.',
+    promptSnippet: 'Search the live public web through the managed SearXNG backend using explicit SearXNG-style parameters.',
     promptGuidelines: [
-      'Use this for current or source-backed public-web facts instead of guessing.',
+      'Treat this tool as a direct SearXNG search surface: prefer explicit engines/categories/language/pageno/time_range/safesearch controls when the request depends on them.',
+      'This tool always consumes JSON search results; do not request alternate response formats such as csv or rss.',
     ],
     parameters: Type.Object({
-      query: Type.String(),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
-      freshness: Type.Optional(Type.Union([
-        Type.Literal('day'),
-        Type.Literal('week'),
-        Type.Literal('month'),
-        Type.Literal('year'),
-      ])),
-      safe: Type.Optional(Type.Union([
-        Type.Literal('off'),
-        Type.Literal('moderate'),
-        Type.Literal('strict'),
-      ])),
-      provider: Type.Optional(Type.String()),
-      providers: Type.Optional(Type.Array(Type.String())),
+      q: Type.String({ description: 'SearXNG search query (`q`).' }),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10, description: 'Maximum number of normalized results to return.' })),
+      categories: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `categories` list.' })),
+      engines: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `engines` list.' })),
+      language: Type.Optional(Type.String({ description: 'SearXNG `language` code, e.g. `all`, `en`, `ja`, `zh`.' })),
+      pageno: Type.Optional(Type.Number({ minimum: 1, description: 'SearXNG `pageno` value.' })),
+      time_range: Type.Optional(literalEnumSchema([
+        'day',
+        'week',
+        'month',
+        'year',
+      ], describeEnumParam('SearXNG `time_range`.', [
+        'day',
+        'week',
+        'month',
+        'year',
+      ]))),
+      safesearch: Type.Optional(Type.Union([
+        Type.Literal(0),
+        Type.Literal(1),
+        Type.Literal(2),
+      ], { description: 'SearXNG `safesearch`. One of: 0, 1, 2.' })),
+      image_proxy: Type.Optional(Type.Boolean({ description: 'SearXNG `image_proxy` flag.' })),
+      enabled_plugins: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `enabled_plugins` list.' })),
+      disabled_plugins: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `disabled_plugins` list.' })),
+      enabled_engines: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `enabled_engines` list.' })),
+      disabled_engines: Type.Optional(Type.Array(Type.String(), { description: 'SearXNG `disabled_engines` list.' })),
       noCache: Type.Optional(Type.Boolean()),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
       try {
         const result = await searchWeb({
           stateRoot,
-          query: safeString(params && params.query || ''),
+          q: safeString(params && params.q || ''),
           limit: params && params.limit != null ? Number(params.limit) : undefined,
-          freshness: safeString(params && params.freshness || ''),
-          safe: safeString(params && params.safe || ''),
-          provider: safeString(params && params.provider || ''),
-          providers: Array.isArray(params && params.providers) ? params.providers.map((item: any) => safeString(item)) : undefined,
+          categories: Array.isArray(params && params.categories) ? params.categories.map((item: any) => safeString(item)) : undefined,
+          engines: Array.isArray(params && params.engines) ? params.engines.map((item: any) => safeString(item)) : undefined,
+          language: safeString(params && params.language || ''),
+          pageno: params && params.pageno != null ? Number(params.pageno) : undefined,
+          time_range: safeString(params && params.time_range || ''),
+          safesearch: params && params.safesearch != null ? Number(params.safesearch) : undefined,
+          image_proxy: params && typeof params.image_proxy === 'boolean' ? params.image_proxy : undefined,
+          enabled_plugins: Array.isArray(params && params.enabled_plugins) ? params.enabled_plugins.map((item: any) => safeString(item)) : undefined,
+          disabled_plugins: Array.isArray(params && params.disabled_plugins) ? params.disabled_plugins.map((item: any) => safeString(item)) : undefined,
+          enabled_engines: Array.isArray(params && params.enabled_engines) ? params.enabled_engines.map((item: any) => safeString(item)) : undefined,
+          disabled_engines: Array.isArray(params && params.disabled_engines) ? params.disabled_engines.map((item: any) => safeString(item)) : undefined,
           noCache: Boolean(params && params.noCache),
         })
         return toolResultFromText(JSON.stringify(result, null, 2), result, !result.ok)
@@ -2081,56 +2141,6 @@ function createRinBuiltinExtensionTools({
     }
   }
 
-  function collectContextFiles(targetPath: string) {
-    const raw = safeString(targetPath).trim()
-    const resolvedTarget = path.resolve(raw || process.cwd())
-    let currentDir = resolvedTarget
-    try {
-      const stat = fs.statSync(resolvedTarget)
-      if (!stat.isDirectory()) currentDir = path.dirname(resolvedTarget)
-    } catch {
-      currentDir = path.dirname(resolvedTarget)
-    }
-
-    const agentsFiles: Array<any> = []
-    const seen = new Set<string>()
-    let cursor = currentDir
-    while (true) {
-      const agentsPath = path.join(cursor, 'AGENTS.md')
-      if (!seen.has(agentsPath) && fs.existsSync(agentsPath)) {
-        seen.add(agentsPath)
-        agentsFiles.push({ path: agentsPath, content: readTextIfExistsLocal(agentsPath) })
-      }
-      const parent = path.dirname(cursor)
-      if (!parent || parent === cursor) break
-      cursor = parent
-    }
-
-    const localRinDir = path.join(currentDir, '.rin')
-    let localRinEntries: Array<any> = []
-    if (fs.existsSync(localRinDir)) {
-      try {
-        localRinEntries = fs.readdirSync(localRinDir).sort().map((name) => {
-          const entryPath = path.join(localRinDir, name)
-          let kind = 'missing'
-          try {
-            const stat = fs.statSync(entryPath)
-            kind = stat.isDirectory() ? 'directory' : path.extname(entryPath).slice(1).toLowerCase() || 'file'
-          } catch {}
-          return { name, path: entryPath, kind }
-        })
-      } catch {}
-    }
-
-    return {
-      targetPath: resolvedTarget,
-      directory: currentDir,
-      agentsFiles,
-      localRinDir: fs.existsSync(localRinDir) ? localRinDir : '',
-      localRinEntries,
-    }
-  }
-
   function normalizeModelToolLimit(value: any) {
     const n = Math.floor(Number(value))
     if (!Number.isFinite(n) || n <= 0) return 100
@@ -2284,19 +2294,30 @@ function createRinBuiltinExtensionTools({
   }
 
 
-  const subagentContextModeSchema = Type.Union([
-    Type.Literal('full'),
-    Type.Literal('summary'),
-    Type.Literal('empty'),
-  ])
-  const subagentThinkingSchema = Type.Union([
-    Type.Literal('off'),
-    Type.Literal('minimal'),
-    Type.Literal('low'),
-    Type.Literal('medium'),
-    Type.Literal('high'),
-    Type.Literal('xhigh'),
-  ])
+  const subagentContextModeSchema = literalEnumSchema([
+    'full',
+    'summary',
+    'empty',
+  ], describeEnumParam('Context mode.', [
+    'full',
+    'summary',
+    'empty',
+  ]))
+  const subagentThinkingSchema = literalEnumSchema([
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+  ], describeEnumParam('Thinking level.', [
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+  ]))
   const subagentStepSchema = Type.Object({
     provider: Type.Optional(Type.String({ description: 'Provider ID for this delegated step.' })),
     model: Type.Optional(Type.String({ description: 'Model ID for this delegated step.' })),
@@ -2587,19 +2608,25 @@ function createRinBuiltinExtensionTools({
       'Prefer direct delegated work over temporary main-model switching; the result comes back as tool output for the parent session to use.',
     ],
     parameters: Type.Object({
-      action: Type.Optional(Type.Union([
-        Type.Literal('run'),
-        Type.Literal('list_models'),
-      ])),
+      action: Type.Optional(literalEnumSchema([
+        'run',
+        'list_models',
+      ], describeEnumParam('Action.', [
+        'run',
+        'list_models',
+      ]))),
       provider: Type.Optional(Type.String({ description: 'Provider ID to use for the worker session, or to filter model listing results.' })),
       model: Type.Optional(Type.String({ description: 'Model ID to use for the worker session.' })),
       task: Type.Optional(Type.String({ description: 'Task for the delegated worker.' })),
       tasks: Type.Optional(Type.Array(subagentStepSchema, { description: 'Parallel subtasks. Each item can override provider/model/task/contextMode/thinking.' })),
       chain: Type.Optional(Type.Array(subagentStepSchema, { description: 'Sequential subtasks. `{previous}` in task text is replaced with the previous step output.' })),
-      scope: Type.Optional(Type.Union([
-        Type.Literal('available'),
-        Type.Literal('all'),
-      ])),
+      scope: Type.Optional(literalEnumSchema([
+        'available',
+        'all',
+      ], describeEnumParam('Model listing scope.', [
+        'available',
+        'all',
+      ]))),
       search: Type.Optional(Type.String({ description: 'Case-insensitive search when action is `list_models`.' })),
       limit: Type.Optional(Type.Number({ description: 'Maximum models to return when action is `list_models`. Default 100, max 500.' })),
       contextMode: Type.Optional(subagentContextModeSchema),
@@ -2748,35 +2775,34 @@ function createRinBuiltinExtensionTools({
       'Use this when you need to inspect available skills or read one skill body instead of guessing its contents.',
     ],
     parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal('list'),
-        Type.Literal('get'),
-      ]),
+      action: literalEnumSchema([
+        'list',
+        'get',
+      ], describeEnumParam('Action.', [
+        'list',
+        'get',
+      ])),
       name: Type.Optional(Type.String({ description: 'Skill name for get.' })),
       includeReferences: Type.Optional(Type.Boolean({ description: 'Include resolved local markdown-link references for get. Default: true.' })),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
       try {
         const action = safeString(params && params.action).trim()
+        const skills = Array.isArray(resourceLoader && resourceLoader.getSkills && resourceLoader.getSkills().skills)
+          ? resourceLoader.getSkills().skills.map((skill: any) => normalizeSkillRecord(skill)).filter(Boolean)
+          : []
         if (action === 'list') {
-          const skills = listRuntimeSkills().map((skill: any) => ({
-            name: skill.name,
-            description: skill.description,
-            hidden: Boolean(skill.disableModelInvocation),
-          }))
           return toolResultFromText(JSON.stringify(skills, null, 2), { count: skills.length, skills }, false)
         }
         if (action === 'get') {
           const requestedName = safeString(params && params.name).trim()
-          if (!requestedName) throw new Error('missing_skill_name')
-          const skill = listRuntimeSkills().find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
+          if (!requestedName) throw new Error('skill_name_required')
+          const skill = skills.find((entry: any) => safeString(entry && entry.name).trim() === requestedName)
           if (!skill) throw new Error(`skill_not_found:${requestedName}`)
           let content = ''
           try { content = fs.readFileSync(skill.filePath, 'utf8') } catch {}
           if (!content.trim()) throw new Error(`skill_read_failed:${requestedName}`)
-          const body = stripSkillFrontmatterLocal(content)
-          const includeReferences = params && params.includeReferences !== false
-          const references = includeReferences ? collectSkillReferences(body, skill.baseDir) : []
+          const body = stripSkillFrontmatter(content)
           const result = {
             name: skill.name,
             description: skill.description,
@@ -2785,7 +2811,7 @@ function createRinBuiltinExtensionTools({
             body,
             baseDir: skill.baseDir,
             filePath: skill.filePath,
-            references,
+            references: [],
           }
           return toolResultFromText(JSON.stringify(result, null, 2), result, false)
         }
@@ -2799,17 +2825,17 @@ function createRinBuiltinExtensionTools({
   const contextTool = {
     name: 'rin_context',
     label: 'Rin Context',
-    description: 'Inspect the AGENTS.md chain and local .rin resources that apply to a target file or directory.',
-    promptSnippet: 'Inspect the AGENTS.md chain and local .rin resources for a target path.',
+    description: 'Inspect Pi-style project context for a target file or directory by listing ancestor AGENTS.md files and discovered project skill paths.',
+    promptSnippet: 'Inspect Pi-style project context for a target path by listing ancestor AGENTS.md files and discovered project skill paths.',
     promptGuidelines: [
-      'Use this when a task depends on AGENTS.md or local .rin resources for a target path.',
+      'Use this when a task depends on Pi-style AGENTS.md context files or discovered project skill paths for a target path.',
     ],
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
     }),
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
       try {
-        const result = collectContextFilesForTool(safeString(params && params.path))
+        const result = collectPiContextInspection(safeString(params && params.path))
         return toolResultFromText(JSON.stringify(result, null, 2), result, false)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
@@ -2817,7 +2843,123 @@ function createRinBuiltinExtensionTools({
     },
   }
 
-  return [brainTool, koishiTool, historyTool, scheduleTool, webSearchTool, subagentTool, skillTool, contextTool]
+  return [memoryTool, koishiTool, historyTool, scheduleTool, webSearchTool, subagentTool, skillTool, contextTool]
+}
+
+function setSessionSystemPromptLocal(session: any, systemPrompt: string) {
+  const next = safeString(systemPrompt).trim()
+  if (!next || !session) return
+  try { session._baseSystemPrompt = next } catch {}
+  try {
+    if (session.agent && session.agent.state && typeof session.agent.state === 'object') {
+      session.agent.state.systemPrompt = next
+    }
+  } catch {}
+  try {
+    if (session.agent && typeof session.agent.setSystemPrompt === 'function') session.agent.setSystemPrompt(next)
+  } catch {}
+}
+
+function parseFirstJsonBlock(text: string): any {
+  const raw = safeString(text).trim()
+  if (!raw) return null
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidate = fenced ? fenced[1].trim() : raw
+  try { return JSON.parse(candidate) } catch {}
+  const startObj = candidate.indexOf('{')
+  const endObj = candidate.lastIndexOf('}')
+  if (startObj >= 0 && endObj > startObj) {
+    try { return JSON.parse(candidate.slice(startObj, endObj + 1)) } catch {}
+  }
+  const startArr = candidate.indexOf('[')
+  const endArr = candidate.lastIndexOf(']')
+  if (startArr >= 0 && endArr > startArr) {
+    try { return JSON.parse(candidate.slice(startArr, endArr + 1)) } catch {}
+  }
+  return null
+}
+
+async function judgeMemoryCandidatesWithLlm({
+  repoRoot,
+  stateRoot,
+  chatKey,
+  text,
+}: {
+  repoRoot: string
+  stateRoot: string
+  chatKey: string
+  text: string
+}): Promise<Array<Record<string, any>>> {
+  const content = safeString(text).trim()
+  if (!content || content.length > 8000) return []
+  const created = await createRinPiSession({
+    repoRoot,
+    workspaceRoot: stateRoot,
+    sessionCwd: stateRoot,
+    resourceCwd: stateRoot,
+    settingsCwd: stateRoot,
+    sessionPolicy: 'new',
+    inMemorySession: true,
+    currentChatKey: chatKey,
+    enableBrainHooks: false,
+    enableMemoryHooks: false,
+  })
+  const session = created && created.session
+  if (!session || typeof session.prompt !== 'function') return []
+  try {
+    if (typeof session.setActiveToolsByName === 'function') session.setActiveToolsByName([])
+    setSessionSystemPromptLocal(session, [
+      'You are a memory judge for Rin.',
+      'Return JSON only. No prose.',
+      'Be conservative but not passive: store long-term reusable information; ignore transient context.',
+      'Prefer recall by default, progressive for reusable manuals, resident only for the fixed slots: agent_identity, owner_identity, core_voice_style, core_methodology, core_values.',
+      'Never invent new resident slots.',
+      'If nothing should be stored, return {"items":[]}.',
+      'If something should be stored, return {"items":[...]} where each item may contain title, exposure, fidelity, residentSlot, summary, content, tags, aliases, sensitivity, source.',
+      'Use exact only when wording should be preserved. Use fuzzy when summarization is better.',
+      'Do not store one-off task state, drafts, casual small talk, or unconfirmed guesses.',
+    ].join('\n'))
+    await promptSessionWithRetry(session, session.prompt.bind(session), [
+      'Decide whether the following user message contains stable cross-session memory worth storing.',
+      'Return JSON only with shape {"items":[...]}.',
+      `chatKey: ${chatKey || 'local:default'}`,
+      'user_message:',
+      content,
+    ].join('\n'))
+    const parsed = parseFirstJsonBlock(safeString(session.getLastAssistantText && session.getLastAssistantText() || ''))
+    const items = Array.isArray(parsed && parsed.items) ? parsed.items : []
+    return items
+      .filter((item: any) => item && typeof item === 'object' && safeString(item.content || '').trim())
+      .slice(0, 3)
+      .map((item: any) => ({
+        ...item,
+        source: safeString(item.source || 'auto:memory-judge').trim() || 'auto:memory-judge',
+      }))
+  } catch {
+    return []
+  } finally {
+    try { session.dispose && session.dispose() } catch {}
+  }
+}
+
+async function autoCaptureMemoriesWithLlm({
+  repoRoot,
+  stateRoot,
+  chatKey,
+  text,
+}: {
+  repoRoot: string
+  stateRoot: string
+  chatKey: string
+  text: string
+}) {
+  const items = await judgeMemoryCandidatesWithLlm({ repoRoot, stateRoot, chatKey, text })
+  for (const item of items) {
+    try {
+      await executeMemoryAction({ action: 'save', ...item }, stateRoot)
+    } catch {}
+  }
+  return items
 }
 
 function createRinBuiltinExtensionFactory({
@@ -2825,16 +2967,22 @@ function createRinBuiltinExtensionFactory({
   stateRoot,
   brainChatKey = 'local:default',
   getTools = () => [],
-  enableBrainHooks = true,
+  enableBrainHooks = false,
+  enableMemoryHooks = true,
+  sessionRef = { current: null as any },
 }: {
   repoRoot: string
   stateRoot: string
   brainChatKey?: string
   getTools?: () => Array<any>
   enableBrainHooks?: boolean
+  enableMemoryHooks?: boolean
+  sessionRef?: { current: any }
 }) {
   return (pi: any) => {
-    try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
+    if (enableBrainHooks) {
+      try { ensureBrainQueueRuntime({ repoRoot, stateRoot }) } catch {}
+    }
 
     const rawTools = getTools()
     const providedTools = Array.isArray(rawTools) ? rawTools : []
@@ -2849,11 +2997,28 @@ function createRinBuiltinExtensionFactory({
         modelRegistry: {},
         resourceLoader: { getSkills: () => ({ skills: [] }) },
         sessionManager: {},
-        sessionRef: { current: null },
+        sessionRef,
       })
     for (const tool of tools) {
       if (!tool || typeof tool !== 'object' || !safeString(tool.name).trim()) continue
       pi.registerTool(tool)
+    }
+
+    if (enableMemoryHooks) {
+      pi.on('message_start', async (event: any) => {
+        const message = event && event.message
+        if (safeString(message && message.role) !== 'user') return
+        const text = collectMessageText(message)
+        if (!text) return
+        try {
+          await autoCaptureMemoriesWithLlm({
+            repoRoot,
+            stateRoot,
+            chatKey: brainChatKey,
+            text,
+          })
+        } catch {}
+      })
     }
 
     if (!enableBrainHooks) return
@@ -2934,6 +3099,7 @@ type CreateRinPiSessionOptions = {
   toolSessionFile?: string
   systemPromptExtra?: string
   enableBrainHooks?: boolean
+  enableMemoryHooks?: boolean
 }
 
 type CreateRinPiSessionResult = {
@@ -2953,7 +3119,14 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 let piSdkModulePromise: Promise<PiSdkModule> | null = null
 
 const PI_DEFAULT_OPENING = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.'
-const RIN_OPENING = "You are Rin, the user's general assistant. Carry out the request directly. Do the work yourself unless the task is beyond your capabilities."
+const RIN_OPENING = "You have an independent identity and the freedom to think for yourself. At the same time, you are here to assist the user, whose needs are your highest priority. Carry out the request directly. Do the work yourself unless the task is beyond your capabilities."
+const RIN_RESPONSE_SHAPE = [
+  'Reply naturally, like a real person, not a manual.',
+  'Be brief almost all the time: prefer 1-3 sentences.',
+  'Only expand when the user explicitly asks for more detail.',
+  'For status or result questions, give the answer first.',
+  'Do not pad with workflow narration, repeated context, or mechanical bullet lists unless they are genuinely useful.',
+].join('\n')
 
 function safeString(value: any): string {
   if (value == null) return ''
@@ -2990,6 +3163,21 @@ function seedPiAgentDirFromStock(agentDir: string) {
   }
 }
 
+function archiveInactiveRuntimePiResources(agentDir: string) {
+  const disabledRoot = path.join(agentDir, 'disabled', 'pi-runtime')
+  const moveIfPresent = (srcRel: string, dstRel: string) => {
+    const src = path.join(agentDir, srcRel)
+    if (!fs.existsSync(src)) return
+    const dst = path.join(disabledRoot, dstRel)
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
+    let finalDst = dst
+    if (fs.existsSync(finalDst)) finalDst = `${dst}.${Date.now()}`
+    try { fs.renameSync(src, finalDst) } catch {}
+  }
+  moveIfPresent('AGENTS.md', 'AGENTS.md')
+  moveIfPresent('skills', 'skills')
+}
+
 function normalizeThinkingLevel(value: any): string | undefined {
   const next = safeString(value).trim().toLowerCase()
   if (!next) return undefined
@@ -3024,8 +3212,8 @@ function isUnderPath(targetPath: string, rootPath: string): boolean {
   return target.startsWith(prefix)
 }
 
-function runtimeAgentsFiles(agentDir: string): Array<{ path: string, content: string }> {
-  return appendUniqueAgentFile([], path.join(agentDir, 'AGENTS.md'))
+function runtimeAgentsFiles(_agentDir: string): Array<{ path: string, content: string }> {
+  return []
 }
 
 function resourceMetadataForPath(resourceLoader: any, filePath: string): any {
@@ -3155,6 +3343,7 @@ function createRinResourceLoader({
   settingsManager,
   brainChatKey,
   enableBrainHooks,
+  enableMemoryHooks,
   currentChatKey,
   effectiveToolSessionDir,
   effectiveToolSessionFile,
@@ -3171,6 +3360,7 @@ function createRinResourceLoader({
   settingsManager: any
   brainChatKey: string
   enableBrainHooks: boolean
+  enableMemoryHooks: boolean
   currentChatKey: string
   effectiveToolSessionDir: string
   effectiveToolSessionFile: string
@@ -3179,18 +3369,20 @@ function createRinResourceLoader({
   sessionManager: any
   sessionRef: { current: any }
 }) {
-  const manualSkills = collectManualSkills([path.join(agentDir, 'skills')])
+  const manualSkills: Array<any> = []
   const baseResourceLoader = new pi.DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
-    additionalSkillPaths: [path.join(agentDir, 'skills')],
+    additionalSkillPaths: [],
     extensionFactories: [
       createRinBuiltinExtensionFactory({
         repoRoot,
         stateRoot,
         brainChatKey,
         enableBrainHooks,
+        enableMemoryHooks,
+        sessionRef,
         getTools: () => createRinBuiltinExtensionTools({
           repoRoot,
           stateRoot,
@@ -3206,6 +3398,8 @@ function createRinResourceLoader({
           sessionRef,
         }),
       }),
+      createProviderContinuationExtension(),
+      createProviderUsageExtension(),
     ],
     appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
   })
@@ -3316,16 +3510,16 @@ function createRinResourceLoader({
 
 function decorateRinSession(session: any, {
   repoRoot,
+  stateRoot,
   systemPromptExtra = '',
 }: {
   repoRoot: string
+  stateRoot: string
   systemPromptExtra?: string
 }) {
-  applyRinSystemPromptPatch(session, repoRoot, systemPromptExtra)
+  applyRinSystemPromptPatch(session, repoRoot, stateRoot, systemPromptExtra)
   patchSessionAssistantMessageNormalization(session)
 }
-
-const HIDDEN_SKILL_DIR = '.hidden'
 
 function escapeXml(text: string): string {
   return text
@@ -3336,31 +3530,23 @@ function escapeXml(text: string): string {
     .replace(/'/g, '&apos;')
 }
 
-function isHiddenSkillPath(filePath: any): boolean {
-  const raw = safeString(filePath).trim()
-  if (!raw) return false
-  return path.resolve(raw).split(path.sep).filter(Boolean).includes(HIDDEN_SKILL_DIR)
-}
-
 function normalizeSkillRecord(skill: any): any {
   if (!skill || typeof skill !== 'object') return null
   const filePath = safeString(skill && skill.filePath).trim()
   const baseDir = safeString(skill && skill.baseDir).trim() || (filePath ? path.dirname(filePath) : '')
-  const hidden = Boolean(skill && skill.disableModelInvocation) || isHiddenSkillPath(filePath) || isHiddenSkillPath(baseDir)
   return {
     ...skill,
     name: safeString(skill && skill.name).trim(),
     description: safeString(skill && skill.description).trim(),
     filePath,
     baseDir,
-    disableModelInvocation: hidden,
   }
 }
 
 function formatSkillsForPrompt(skills: Array<any>): string {
   const visibleSkills = (Array.isArray(skills) ? skills : [])
     .map((skill) => normalizeSkillRecord(skill))
-    .filter((skill) => skill && !skill.disableModelInvocation)
+    .filter((skill) => skill)
   if (!visibleSkills.length) return ''
   const lines = [
     'Available skills provide specialized instructions for specific tasks.',
@@ -3377,7 +3563,7 @@ function formatSkillsForPrompt(skills: Array<any>): string {
   return lines.join('\n')
 }
 
-function parseSkillFrontmatter(filePath: string): { name: string, description: string, disableModelInvocation: boolean } | null {
+function parseSkillFrontmatter(filePath: string): { name: string, description: string } | null {
   const text = readTextIfExists(filePath)
   if (!text.startsWith('---')) return null
   const end = text.indexOf('\n---', 3)
@@ -3385,7 +3571,6 @@ function parseSkillFrontmatter(filePath: string): { name: string, description: s
   const frontmatter = text.slice(3, end).trim()
   let name = ''
   let description = ''
-  let disableModelInvocation = false
   for (const line of frontmatter.split(/\r?\n/)) {
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
     if (!match) continue
@@ -3394,10 +3579,9 @@ function parseSkillFrontmatter(filePath: string): { name: string, description: s
     value = value.replace(/^['"]|['"]$/g, '')
     if (key === 'name') name = value
     if (key === 'description') description = value
-    if (key === 'disable-model-invocation') disableModelInvocation = value.toLowerCase() === 'true'
   }
   if (!name) return null
-  return { name, description, disableModelInvocation }
+  return { name, description }
 }
 
 function stripSkillFrontmatter(text: string): string {
@@ -3427,7 +3611,6 @@ function collectManualSkills(skillDirs: string[]): Array<any> {
       filePath,
       baseDir,
       source: 'manual',
-      disableModelInvocation: Boolean(parsed && parsed.disableModelInvocation),
     })
   }
 
@@ -3445,7 +3628,7 @@ function collectManualSkills(skillDirs: string[]): Array<any> {
     try { names = fs.readdirSync(dir) } catch {}
     for (const name of names.sort()) {
       if (!name || name === '.' || name === '..') continue
-      if (name.startsWith('.') && name !== HIDDEN_SKILL_DIR) continue
+      if (name.startsWith('.')) continue
       const entryPath = path.join(dir, name)
       let stat: fs.Stats | null = null
       try { stat = fs.statSync(entryPath) } catch {}
@@ -3464,13 +3647,35 @@ function collectManualSkills(skillDirs: string[]): Array<any> {
   return out
 }
 
-function rewriteRinSystemPrompt(base: any, _repoRoot: string, systemPromptExtra = ''): string | undefined {
+function buildCompiledMemoryPrompt(stateRoot: string): string {
+  try {
+    const compiled = compileMemorySync({ section: 'all', progressiveLimit: 12 }, stateRoot)
+    const blocks: string[] = []
+    const resident = safeString(compiled && compiled.resident || '').trim()
+    const progressive = safeString(compiled && compiled.progressive || '').trim()
+    if (resident) blocks.push(['## Resident Memory', resident].join('\n'))
+    if (progressive) blocks.push(['## Progressive Memory Index', progressive].join('\n'))
+    return blocks.join('\n\n').trim()
+  } catch {
+    return ''
+  }
+}
+
+function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string, systemPromptExtra = ''): string | undefined {
   const text = safeString(base)
   if (!text) return undefined
 
   let next = text
   if (next.includes(PI_DEFAULT_OPENING)) {
     next = next.replace(PI_DEFAULT_OPENING, RIN_OPENING)
+  }
+  if (!next.includes(RIN_RESPONSE_SHAPE)) {
+    next = `${next.trimEnd()}\n\n${RIN_RESPONSE_SHAPE}`
+  }
+
+  const memoryBlock = buildCompiledMemoryPrompt(stateRoot)
+  if (memoryBlock && !next.includes(memoryBlock)) {
+    next = `${next.trimEnd()}\n\n${memoryBlock}`
   }
 
   const extraBlock = safeString(systemPromptExtra).trim()
@@ -3481,14 +3686,14 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, systemPromptExtra 
   return next.trimEnd()
 }
 
-function applyRinSystemPromptPatch(session: any, repoRoot: string, systemPromptExtra = '') {
+function applyRinSystemPromptPatch(session: any, repoRoot: string, stateRoot: string, systemPromptExtra = '') {
   if (!session || typeof session !== 'object') return
   const originalRebuild = typeof session._rebuildSystemPrompt === 'function'
     ? session._rebuildSystemPrompt.bind(session)
     : null
   if (!originalRebuild) return
 
-  session._rebuildSystemPrompt = (...args: any[]) => rewriteRinSystemPrompt(originalRebuild(...args), repoRoot, systemPromptExtra) || originalRebuild(...args)
+  session._rebuildSystemPrompt = (...args: any[]) => rewriteRinSystemPrompt(originalRebuild(...args), repoRoot, stateRoot, systemPromptExtra) || originalRebuild(...args)
 
   let activeToolNames: string[] = []
   try {
@@ -3639,12 +3844,14 @@ async function createRinPiSession({
   toolSessionFile = '',
   systemPromptExtra = '',
   enableBrainHooks = false,
+  enableMemoryHooks = true,
 }: CreateRinPiSessionOptions): Promise<CreateRinPiSessionResult> {
   const pi = await loadPiSdkModule()
   const stateRoot = path.resolve(workspaceRoot)
   const agentDir = resolvePiAgentDir(stateRoot)
   seedPiAgentDirFromStock(agentDir)
   ensureDir(agentDir)
+  archiveInactiveRuntimePiResources(agentDir)
   syncRinPiSettings(agentDir)
 
   const authStorage = pi.AuthStorage.create(path.join(agentDir, 'auth.json'))
@@ -3672,6 +3879,7 @@ async function createRinPiSession({
     settingsManager,
     brainChatKey,
     enableBrainHooks,
+    enableMemoryHooks,
     currentChatKey,
     effectiveToolSessionDir,
     effectiveToolSessionFile,
@@ -3710,6 +3918,7 @@ async function createRinPiSession({
 
   decorateRinSession(created.session, {
     repoRoot,
+    stateRoot,
     systemPromptExtra,
   })
 
@@ -3741,7 +3950,7 @@ async function createRinTuiSession({
   model = '',
   thinking = '',
   systemPromptExtra = '',
-  enableBrainHooks = true,
+  enableBrainHooks = false,
 }: {
   repoRoot: string
   workspaceRoot: string
@@ -3918,7 +4127,7 @@ async function runPiSdkTurn({
       thinking,
       currentChatKey,
       systemPromptExtra,
-      enableBrainHooks: true,
+      enableBrainHooks: false,
     })
     session = created.session
     if (!session) throw new Error('pi_sdk_session_missing')

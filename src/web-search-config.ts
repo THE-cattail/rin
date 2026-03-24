@@ -1,5 +1,5 @@
 const DEFAULT_CONFIG = {
-  version: 3,
+  version: 5,
   defaultProviders: ['searxng'],
   cacheTtlSeconds: 6 * 60 * 60,
   http: {
@@ -11,21 +11,10 @@ const DEFAULT_CONFIG = {
     timeoutMs: 8_000,
     autoStart: true,
     hostPort: 18080,
-    dockerImage: 'ghcr.io/searxng/searxng:latest',
-    containerName: 'rin-searxng',
     healthTimeoutMs: 5_000,
     startTimeoutMs: 90_000,
     defaultEngines: ['google'],
     categories: ['general'],
-  },
-  serper: {
-    apiKey: '',
-    endpoint: 'https://google.serper.dev/search',
-    gl: 'us',
-    hl: 'en',
-    num: 8,
-    timeoutMs: 12_000,
-    maxFallbacksPerHour: 60,
   },
 }
 
@@ -55,7 +44,7 @@ function normalizeProviderList(value: unknown, fallback: string[] = []): string[
   for (const item of items) {
     const next = safeString(item).trim().toLowerCase()
     if (!next) continue
-    if (!['searxng', 'serper'].includes(next)) continue
+    if (next !== 'searxng') continue
     if (!out.includes(next)) out.push(next)
   }
   return out.length ? out : fallback.slice()
@@ -115,19 +104,16 @@ function normalizeConfigShape(config: any) {
   const raw = config && typeof config === 'object' ? config : {}
   const next = mergeConfig(DEFAULT_CONFIG, raw)
   const rawVersion = toPositiveInt(raw.version, 0)
-  const rawDefaultProviders = normalizeProviderList(raw.defaultProviders, [])
-  const usingLegacyDefaultProviders = rawDefaultProviders.length === 2 && rawDefaultProviders[0] === 'searxng' && rawDefaultProviders[1] === 'serper'
   next.version = DEFAULT_CONFIG.version
-  next.defaultProviders = normalizeProviderList(next.defaultProviders, DEFAULT_CONFIG.defaultProviders)
-  if (rawVersion > 0 && rawVersion < DEFAULT_CONFIG.version && usingLegacyDefaultProviders) {
-    next.defaultProviders = DEFAULT_CONFIG.defaultProviders.slice()
-  }
+  next.defaultProviders = DEFAULT_CONFIG.defaultProviders.slice()
   next.cacheTtlSeconds = Math.max(60, toPositiveInt(next.cacheTtlSeconds, DEFAULT_CONFIG.cacheTtlSeconds))
   if (rawVersion > 0 && rawVersion < DEFAULT_CONFIG.version && safeString(next.http && next.http.userAgent).trim() === 'Rin web-search skill/1.0') {
     next.http.userAgent = DEFAULT_CONFIG.http.userAgent
   }
   next.searxng.baseUrl = normalizeBaseUrl(next.searxng.baseUrl || managedBaseUrl(next)) || managedBaseUrl(next)
   next.searxng.hostPort = toPositiveInt(next.searxng.hostPort, DEFAULT_CONFIG.searxng.hostPort)
+  delete next.searxng.dockerImage
+  delete next.searxng.containerName
   next.searxng.timeoutMs = toPositiveInt(next.searxng.timeoutMs, DEFAULT_CONFIG.searxng.timeoutMs)
   next.searxng.healthTimeoutMs = toPositiveInt(next.searxng.healthTimeoutMs, DEFAULT_CONFIG.searxng.healthTimeoutMs)
   if (rawVersion > 0 && rawVersion < DEFAULT_CONFIG.version && next.searxng.healthTimeoutMs === 2500) {
@@ -136,12 +122,7 @@ function normalizeConfigShape(config: any) {
   next.searxng.startTimeoutMs = toPositiveInt(next.searxng.startTimeoutMs, DEFAULT_CONFIG.searxng.startTimeoutMs)
   next.searxng.defaultEngines = normalizeStringList(next.searxng.defaultEngines, DEFAULT_CONFIG.searxng.defaultEngines)
   next.searxng.categories = normalizeStringList(next.searxng.categories, DEFAULT_CONFIG.searxng.categories)
-  next.serper.timeoutMs = toPositiveInt(next.serper.timeoutMs, DEFAULT_CONFIG.serper.timeoutMs)
-  next.serper.num = Math.max(1, Math.min(10, toPositiveInt(next.serper.num, DEFAULT_CONFIG.serper.num)))
-  const serperMaxFallbacks = Number(next.serper.maxFallbacksPerHour)
-  next.serper.maxFallbacksPerHour = Number.isFinite(serperMaxFallbacks) && serperMaxFallbacks >= 0
-    ? Math.floor(serperMaxFallbacks)
-    : DEFAULT_CONFIG.serper.maxFallbacksPerHour
+  delete next.serper
   return next
 }
 

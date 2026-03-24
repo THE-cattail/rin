@@ -1,13 +1,10 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # Subagent Example
 
 Delegate tasks to specialized subagents with isolated context windows.
 
 ## Features
 
-- **Isolated context**: Each subagent runs in a separate `rin` process
+- **Isolated context**: Each subagent runs in a separate `pi` process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
@@ -38,30 +35,30 @@ From the repository root, symlink the files:
 
 ```bash
 # Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.rin/extensions/subagent
-ln -sf "$(pwd)/examples/pi/extensions/subagent/index.ts" ~/.rin/extensions/subagent/index.ts
-ln -sf "$(pwd)/examples/pi/extensions/subagent/agents.ts" ~/.rin/extensions/subagent/agents.ts
+mkdir -p ~/.pi/agent/extensions/subagent
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/index.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
 
 # Symlink agents
-mkdir -p ~/.rin/agents
-for f in examples/pi/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.rin/agents/$(basename "$f")
+mkdir -p ~/.pi/agent/agents
+for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
+  ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
 done
 
 # Symlink workflow prompts
-mkdir -p ~/.rin/prompts
-for f in examples/pi/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.rin/prompts/$(basename "$f")
+mkdir -p ~/.pi/agent/prompts
+for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
+  ln -sf "$(pwd)/$f" ~/.pi/agent/prompts/$(basename "$f")
 done
 ```
 
 ## Security Model
 
-This tool executes a separate `rin` subprocess with a delegated system prompt and tool/model configuration.
+This tool executes a separate `pi` subprocess with a delegated system prompt and tool/model configuration.
 
-**Project-local agents** (`.rins/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
+**Project-local agents** (`.pi/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
 
-**Default behavior:** Only loads **user-level agents** from `~/.rin/agents`.
+**Default behavior:** Only loads **user-level agents** from `~/.pi/agent/agents`.
 
 To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
@@ -139,8 +136,8 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.rin/agents/*.md` - User-level (always loaded)
-- `.rins/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.pi/agent/agents/*.md` - User-level (always loaded)
+- `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 

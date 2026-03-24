@@ -121,6 +121,42 @@ test('install.sh supports local source installation via --local --path', () => {
   assert.equal(path.resolve(installMeta.installSource.repo), path.resolve(bundleRoot))
 })
 
+test('current-user install ignores SUDO_USER when the process is not root', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-ignore-sudo-user-'))
+  const bundleRoot = path.join(tempRoot, 'bundle')
+  const homeDir = path.join(tempRoot, 'home')
+  const stateRoot = path.join(homeDir, '.rin')
+  fs.mkdirSync(homeDir, { recursive: true })
+  makeBundleFixture(bundleRoot)
+
+  const cliEntry = path.join(__dirname, '..', 'dist', 'index.js')
+  const result = spawnSync(process.execPath, [
+    cliEntry,
+    '__install',
+    '--current-user',
+    '--yes',
+    '--upgrade-existing',
+    '--state-root',
+    stateRoot,
+    '--path',
+    bundleRoot,
+  ], {
+    encoding: 'utf8',
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      HOME: homeDir,
+      USER: '',
+      LOGNAME: '',
+      SUDO_USER: 'root',
+    },
+  })
+
+  assert.equal(result.status, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`)
+  assert.equal(fs.existsSync(path.join(homeDir, '.local', 'bin', 'rin')), true)
+  assert.equal(fs.existsSync(path.join('/root', '.local', 'bin', 'rin')), false)
+})
+
 test('install.sh refuses to act as update transport', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rin-install-sh-refuse-update-'))
   const bundleRoot = path.join(tempRoot, 'bundle')

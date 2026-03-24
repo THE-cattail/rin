@@ -6,10 +6,10 @@
  * bubblewrap on Linux).
  *
  * Config files (merged, project takes precedence):
- * - ~/.rin/sandbox.json (global)
- * - <cwd>/.rin/sandbox.json (project-local)
+ * - ~/.pi/agent/sandbox.json (global)
+ * - <cwd>/.pi/sandbox.json (project-local)
  *
- * Example .rin/sandbox.json:
+ * Example .pi/sandbox.json:
  * ```json
  * {
  *   "enabled": true,
@@ -31,8 +31,8 @@
  * - `/sandbox` - show current sandbox configuration
  *
  * Setup:
- * 1. Copy sandbox/ directory to ~/.rin/extensions/
- * 2. Run `npm install` in ~/.rin/extensions/sandbox/
+ * 1. Copy sandbox/ directory to ~/.pi/agent/extensions/
+ * 2. Run `npm install` in ~/.pi/agent/extensions/sandbox/
  *
  * Linux also requires: bubblewrap, socat, ripgrep
  */

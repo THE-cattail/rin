@@ -1,13 +1,10 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # JSON Event Stream Mode
 
 ```bash
 pi --mode json "Your prompt"
 ```
 
-Outputs all session events as JSON lines to stdout. Useful for integrating rin into other tools or custom UIs.
+Outputs all session events as JSON lines to stdout. Useful for integrating pi into other tools or custom UIs.
 
 ## Event Types
 

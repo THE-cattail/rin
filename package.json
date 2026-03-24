@@ -40,6 +40,8 @@
     "test:unit": "node --test test/**/*.test.js",
     "test:repo": "node scripts/check-repo.mjs",
     "metrics": "node scripts/measure-baselines.mjs",
+    "observability:usage": "node scripts/token-usage-report.mjs",
+    "observability:usage:daily": "node scripts/token-usage-report.mjs --days 1 --write-latest",
     "test": "npm run build && npm run test:unit && npm run test:repo",
     "check": "npm run test",
     "check:container": "sh scripts/check-in-container.sh",

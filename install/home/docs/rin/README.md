@@ -38,10 +38,10 @@ Execution State:
 ## 4. Auto-Loaded Content
 
 Rin discovers content exclusively within the configured runtime root.
-- **Config:** `AGENTS.md`, `auth.json`, `settings.json`, `models.json`
-- **Logic:** `skills/**`
+- **Config:** `auth.json`, `settings.json`, `models.json`
 - **Reference:** `docs/rin/**`
-- **State:** `data/**`
+- **State:** `data/**`, `memory/**`
+- **Inactive by default:** runtime-root `AGENTS.md` and `skills/**` are archived under `disabled/pi-runtime/**` and are not auto-loaded.
 
 Settings:
 - Use global `<runtime-root>/settings.json`.
@@ -50,7 +50,7 @@ Settings:
 ## 5. Non-Discovered Content
 
 The following are NOT auto-discovered:
-- `AGENTS.md` outside the runtime root.
+- Runtime-root `AGENTS.md` and `skills/**` (these are intentionally inactive for Rin runtime sessions).
 - Project-local `.pi/` resources (skills, prompts, etc.).
 - `~/.agents/skills`.
 - Legacy resource chains.
@@ -73,9 +73,8 @@ Operation:
 ## 7. Tool Surface
 
 Core Tools: `read`, `bash`, `edit`, `write`.
-Rin Tools: `rin_brain`, `rin_koishi`, `rin_history`, `rin_schedule`, `rin_subagent`, `rin_skills`, `rin_context`, `rin_web_search`.
-Web search runtime config lives under `<runtime-root>/data/web-search/config.json`.
-Default web search uses the built-in vanilla SearxNG sidecar against Google Web. Users can point SearxNG at another base URL/API key or add their own Serper API in that config file.
+Rin Tools: `rin_memory`, `rin_koishi`, `rin_history`, `rin_schedule`, `rin_subagent`, `rin_context`, `rin_web_search`.
+Default web search uses a Rin-managed local SearXNG runtime against Google Web. Users do not need Docker; Rin bootstraps and starts the local runtime itself.
 
 Constraints:
 - Follow tool schemas for parameters.

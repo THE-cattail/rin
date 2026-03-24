@@ -20,7 +20,7 @@ import {
   sendTextToChatKey,
   sendTextToOwners,
 } from './daemon-support'
-import { createRinPiSession, loadPiSdkModule, manageSchedule, queueBrainFinalizeAsync, runPiSdkTurn } from './runtime'
+import { createRinPiSession, loadPiSdkModule, manageSchedule, runPiSdkTurn } from './runtime'
 import { startDaemonTuiRpcServer } from './daemon-tui-rpc'
 import {
   applyInboundRecord,
@@ -1798,39 +1798,6 @@ const rinBridge = (() => {
       return inputs
     }
 
-    function buildBatchInputItemsFromRecords(records: Array<any>, {
-      maxImages = 6,
-    }: any = {}) {
-      const textBlocks: Array<string> = []
-      const images: Array<any> = []
-      const seenImagePaths = new Set<string>()
-      const items = Array.isArray(records) ? records : []
-
-      for (const record of items) {
-        if (shouldSkipThreadHistoryRecord(record)) continue
-        const inputs = buildThreadHistoryInputsFromRecord(record)
-        for (const input of inputs) {
-          if (!input || typeof input !== 'object') continue
-          if (safeString(input.type) === 'text') {
-            const text = safeString(input.text).trim()
-            if (text) textBlocks.push(text)
-            continue
-          }
-          if (safeString(input.type) === 'localImage') {
-            const localPath = safeString(input.path).trim()
-            if (!localPath || seenImagePaths.has(localPath) || images.length >= Number(maxImages || 0)) continue
-            seenImagePaths.add(localPath)
-            images.push({ type: 'localImage', path: localPath })
-          }
-        }
-      }
-
-      const out: Array<any> = []
-      const text = textBlocks.join('\n\n').trim()
-      if (text) out.push({ type: 'text', text })
-      return out.concat(images)
-    }
-
     function collectRecordAttachmentContext(record: any, {
       maxImages = 6,
       maxAttachments = 12,
@@ -2622,7 +2589,7 @@ const rinBridge = (() => {
         sessionPolicy: readPiSessionFile(state) ? 'continueRecent' : 'new',
         brainChatKey: chatKey,
         currentChatKey: chatKey,
-        enableBrainHooks: true,
+        enableBrainHooks: false,
       })
       const session = created && created.session
       if (!session) throw new Error('bridge_command_session_missing')
@@ -3090,21 +3057,6 @@ const rinBridge = (() => {
       }
     }
 
-    function queueBrainFinalize({ chatKey, reason = 'manual' }: any = {}) {
-      try {
-        return queueBrainFinalizeAsync({
-          repoRoot,
-          stateRoot: workspaceRoot,
-          chatKey: safeString(chatKey || '').trim() || 'local:default',
-          reason: safeString(reason || 'manual'),
-        })
-      } catch (e) {
-        const message = safeString(e && (e as any).message ? (e as any).message : e)
-        logger.warn(`brain finalize queue failed chatKey=${chatKey} err=${message}`)
-        return { ok: false, error: message }
-      }
-    }
-
     function defaultChatTypeFromParsed(parsed: any) {
       const platform = safeString(parsed && parsed.platform || '')
       const chatId = safeString(parsed && parsed.chatId || '')
@@ -3302,7 +3254,6 @@ const rinBridge = (() => {
       })
       reconcilePiSessionFile(state, nextSessionFile, chatKey)
       saveState()
-      queueBrainFinalize({ chatKey, reason: 'new' })
 
       await sendBridgeCommandText({
         chatKey,
@@ -3851,14 +3802,6 @@ const rinBridge = (() => {
             liveInputItems.push({ type: 'localImage', path: localPath })
           }
         }
-        const batchedRecords = readChatLogRecordsInSeqRange(chatDir, {
-          minSeqInclusive: fromSeq,
-          maxSeqInclusive: toSeq,
-          inboundOnly: true,
-        })
-        const batchInputItems = buildBatchInputItemsFromRecords(batchedRecords, {
-          maxImages: 6,
-        })
 	        const runnerName = 'pi-sdk'
 	        logger.info(`activate chatKey=${chatKey} seq=${fromSeq}..${toSeq} runner=${runnerName} thread=${activeThreadId || '(new)'}`)
 
@@ -3873,7 +3816,7 @@ const rinBridge = (() => {
           observedToSeq: state.batchEndSeq,
           allowInterrupt: true,
           prompt: '',
-	          inputItems: batchInputItems,
+	          inputItems: liveInputItems,
 	          resumeThreadId: readPiSessionFile(state) || null,
           timeoutMs: config.agentMaxRuntimeMs || 0,
           replyToMessageId: safeString(currentRecord && currentRecord.messageId || trigger?.messageId || ''),

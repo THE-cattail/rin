@@ -6,6 +6,7 @@
 
 import {
 	createAgentSession,
+	createSyntheticSourceInfo,
 	DefaultResourceLoader,
 	type PromptTemplate,
 	SessionManager,
@@ -15,8 +16,8 @@ import {
 const deployTemplate: PromptTemplate = {
 	name: "deploy",
 	description: "Deploy the application",
-	source: "path",
 	filePath: "/virtual/prompts/deploy.md",
+	sourceInfo: createSyntheticSourceInfo("/virtual/prompts/deploy.md", { source: "sdk" }),
 	content: `# Deploy Instructions
 
 1. Build: npm run build
@@ -32,7 +33,7 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Discover templates from cwd/.rin/prompts/ and ~/.rin/prompts/
+// Discover templates from cwd/.pi/prompts/ and ~/.pi/agent/prompts/
 const discovered = loader.getPrompts().prompts;
 console.log("Discovered prompt templates:");
 for (const template of discovered) {

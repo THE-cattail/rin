@@ -1,14 +1,11 @@
-> Adapted for Rin. Keep the original Pi name only when it refers to the upstream Pi SDK, package, or standalone CLI.
-> In this local documentation set, read references to the runtime as Rin unless a quoted upstream package name, path, or command is being preserved verbatim.
-
 # DOOM Overlay Demo
 
-Play DOOM as an overlay in rin. Demonstrates that the overlay system can handle real-time game rendering at 35 FPS.
+Play DOOM as an overlay in pi. Demonstrates that the overlay system can handle real-time game rendering at 35 FPS.
 
 ## Usage
 
 ```bash
-pi --extension ./examples/pi/extensions/doom-overlay
+pi --extension ./examples/extensions/doom-overlay
 ```
 
 Then run:
@@ -46,4 +43,4 @@ Height is calculated from width to maintain DOOM's 3.2:1 aspect ratio (accountin
 
 - [id Software](https://github.com/id-Software/DOOM) for the original DOOM
 - [doomgeneric](https://github.com/ozkl/doomgeneric) for the portable DOOM implementation
-- [rin-doom](https://github.com/badlogic/rin-doom) for the original rin integration
+- [pi-doom](https://github.com/badlogic/pi-doom) for the original pi integration

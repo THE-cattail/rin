@@ -37,7 +37,6 @@ Rin loads skills from:
 Discovery rules:
 - Top-level `.md` files in the skills directory
 - `SKILL.md` files in subdirectories (searched recursively)
-- Skills in `skills/.hidden/` are discovered but omitted from `available_skills` by default
 
 Use `--no-skills` to disable discovery; explicit `--skill` paths remain active.
 
@@ -65,12 +64,11 @@ For project-level Claude Code skills, add to `.rin/settings.json`:
 ## How Skills Work
 
 1. Rin scans skill locations at startup to extract names and descriptions.
-2. Public skills are included in the system prompt (XML format) per the [specification](https://agentskills.io/integrate-skills).
-3. Skills in `skills/.hidden/` are omitted from `available_skills` by default but callable via `/skill:name` or `load_skill`.
-4. When a task matches, the agent invokes `load_skill` to retrieve full instructions.
-5. The agent executes instructions, resolving relative paths for scripts and assets.
+2. Skills are included in the system prompt (XML format) per the [specification](https://agentskills.io/integrate-skills).
+3. When a task matches, the agent invokes `load_skill` to retrieve full instructions.
+4. The agent executes instructions, resolving relative paths for scripts and assets.
 
-This provides progressive disclosure: public descriptions stay in context, while full instructions and hidden skills load on-demand.
+This provides progressive disclosure: descriptions stay in context, while full instructions load on-demand.
 
 ## Skill Commands
 
@@ -81,7 +79,7 @@ Skills register as `/skill:name` commands:
 /skill:pdf-tools extract      # Load skill with arguments
 ```
 
-Arguments after the command are appended to the skill content as `User: <args>`. This works for hidden skills as well.
+Arguments after the command are appended to the skill content as `User: <args>`.
 
 Toggle skill commands via `/settings` in interactive mode or in `settings.json`:
 
@@ -148,7 +146,6 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
-| `disable-model-invocation` | No | If `true`, the skill is hidden from the prompt. Access remains via `/skill:name` or `load_skill`. Paths matching `skills/.hidden/**` are hidden by default. |
 
 ### Name Rules
 

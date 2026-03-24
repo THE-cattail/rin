@@ -6,8 +6,8 @@
  * and can be activated via CLI flag, /preset command, or Ctrl+Shift+U to cycle.
  *
  * Config files (merged, project takes precedence):
- * - ~/.rin/presets.json (global)
- * - <cwd>/.rin/presets.json (project-local)
+ * - ~/.pi/agent/presets.json (global)
+ * - <cwd>/.pi/presets.json (project-local)
  *
  * Example presets.json:
  * ```json
@@ -183,7 +183,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const presetNames = Object.keys(presets);
 
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.rin/presets.json or .rin/presets.json", "warning");
+			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
 			return;
 		}
 
@@ -283,7 +283,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 	async function cyclePreset(ctx: ExtensionContext): Promise<void> {
 		const presetNames = getPresetOrder();
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.rin/presets.json or .rin/presets.json", "warning");
+			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
 			return;
 		}
 
