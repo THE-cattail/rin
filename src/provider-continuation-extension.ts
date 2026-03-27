@@ -11,12 +11,40 @@ import {
 } from './provider-continuation'
 
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth'
+const CONTINUATION_ENTRY_TYPE = 'rin_provider_continuation'
 
 function latestCompactionEntry(sessionManager: any): any {
-  const entries = sessionManager && typeof sessionManager.getEntries === 'function' ? sessionManager.getEntries() : []
+  const entries = sessionManager && typeof sessionManager.getBranch === 'function'
+    ? sessionManager.getBranch()
+    : sessionManager && typeof sessionManager.getEntries === 'function'
+      ? sessionManager.getEntries()
+      : []
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const entry = entries[i]
     if (entry && entry.type === 'compaction') return entry
+  }
+  return null
+}
+
+function latestContinuationEntry(sessionManager: any): any {
+  const entries = sessionManager && typeof sessionManager.getBranch === 'function'
+    ? sessionManager.getBranch()
+    : sessionManager && typeof sessionManager.getEntries === 'function'
+      ? sessionManager.getEntries()
+      : []
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i]
+    if (!entry || entry.type !== 'custom' || safeString(entry.customType).trim() !== CONTINUATION_ENTRY_TYPE) continue
+    const data = entry && entry.data && typeof entry.data === 'object' ? entry.data : null
+    if (!data) continue
+    if (!safeString(data.responseId).trim()) continue
+    if (!(Number(data.inputCount) > 0) || !Array.isArray(data.inputHashes)) continue
+    return {
+      responseId: safeString(data.responseId).trim(),
+      model: safeString(data.model).trim(),
+      inputCount: Number(data.inputCount) || 0,
+      inputHashes: data.inputHashes.map((item: any) => safeString(item)),
+    }
   }
   return null
 }
@@ -108,6 +136,7 @@ async function tryRemoteCompaction({
   previousSummary,
   customInstructions,
   isSplitTurn,
+  inputOverride,
 }: {
   model: any
   apiKey: string
@@ -115,21 +144,24 @@ async function tryRemoteCompaction({
   previousSummary?: string
   customInstructions?: string
   isSplitTurn?: boolean
+  inputOverride?: any[]
 }) {
   if (!isDirectOpenAiResponsesModel(model)) return null
   const endpoint = remoteCompactionEndpoint(model)
   if (!endpoint) return null
 
-  const input = []
-  if (safeString(previousSummary).trim()) {
-    input.push({
-      type: 'message',
-      role: 'assistant',
-      status: 'completed',
-      content: [{ type: 'output_text', text: safeString(previousSummary).trim(), annotations: [] }],
-    })
+  const input = Array.isArray(inputOverride) ? inputOverride.slice() : []
+  if (!input.length) {
+    if (safeString(previousSummary).trim()) {
+      input.push({
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text: safeString(previousSummary).trim(), annotations: [] }],
+      })
+    }
+    input.push(...convertAgentMessagesToResponsesInput(conversationMessages))
   }
-  input.push(...convertAgentMessagesToResponsesInput(conversationMessages))
   if (!input.length) return null
 
   const body: Record<string, any> = {
@@ -170,36 +202,165 @@ async function tryRemoteCompaction({
   }
 }
 
-function createProviderContinuationExtension() {
+function safeNumber(value: any, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function codexAutoCompactLimitForModel(model: any): number {
+  const contextWindow = safeNumber(model && model.contextWindow)
+  const configLimit = safeNumber(model && model.autoCompactTokenLimit)
+  if (contextWindow > 0) {
+    const contextLimit = Math.floor(contextWindow * 0.8)
+    return configLimit > 0 ? Math.min(configLimit, contextLimit) : contextLimit
+  }
+  return configLimit > 0 ? configLimit : 0
+}
+
+function applyCodexLikeCompactionThreshold(settingsManager: any, model: any) {
+  if (!settingsManager || typeof settingsManager.applyOverrides !== 'function') return
+  const contextWindow = safeNumber(model && model.contextWindow)
+  const autoCompactLimit = codexAutoCompactLimitForModel(model)
+  if (!(contextWindow > 0) || !(autoCompactLimit > 0)) return
+  const reserveTokens = Math.max(0, contextWindow - autoCompactLimit)
+  settingsManager.applyOverrides({
+    compaction: {
+      enabled: true,
+      reserveTokens,
+    },
+  })
+}
+
+function estimatePayloadTokens(payload: any): number {
+  return Math.ceil(safeString(JSON.stringify(payload || null)).length / 4)
+}
+
+function isCodexGeneratedPayloadItem(item: any): boolean {
+  if (!item || typeof item !== 'object') return false
+  const type = safeString(item.type).trim()
+  const role = safeString(item.role).trim()
+  if (type === 'message') return role === 'assistant' || role === 'tool' || role === 'system' || role === 'developer'
+  return [
+    'reasoning',
+    'function_call',
+    'function_call_output',
+    'custom_tool_call',
+    'custom_tool_call_output',
+    'mcp_tool_call',
+    'mcp_tool_call_output',
+    'tool_search_call',
+    'tool_search_output',
+    'local_shell_call',
+    'local_shell_call_output',
+    'computer_call',
+    'computer_call_output',
+    'web_search_call',
+    'image_generation_call',
+  ].includes(type)
+}
+
+function trimPayloadTailForRemoteCompaction(payload: any, model: any) {
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.input)) return { payload, changed: false, deletedItems: 0 }
+  const contextWindow = safeNumber(model && model.contextWindow)
+  if (!(contextWindow > 0)) return { payload, changed: false, deletedItems: 0 }
+  const next = cloneJsonLocal(payload)
+  const input = Array.isArray(next.input) ? next.input : []
+  let deletedItems = 0
+  while (input.length > 0 && estimatePayloadTokens({ ...next, input }) > contextWindow) {
+    const last = input[input.length - 1]
+    if (!isCodexGeneratedPayloadItem(last)) break
+    input.pop()
+    deletedItems += 1
+  }
+  next.input = input
+  return { payload: deletedItems > 0 ? next : payload, changed: deletedItems > 0, deletedItems }
+}
+
+function cloneJsonLocal(value: any) {
+  return value == null ? value : JSON.parse(JSON.stringify(value))
+}
+
+function createProviderContinuationExtension({ settingsManager = null }: { settingsManager?: any } = {}) {
   return function providerContinuationExtension(pi: any) {
+    let pendingContinuationState: any = null
+
+    const syncThreshold = (model: any) => {
+      applyCodexLikeCompactionThreshold(settingsManager, model)
+    }
+
+    pi.on('session_start', async (_event: any, ctx: any) => {
+      syncThreshold(ctx && ctx.model)
+    })
+
+    pi.on('model_select', async (event: any) => {
+      syncThreshold(event && event.model)
+    })
+
     pi.on('before_provider_request', async (event: any, ctx: any) => {
+      syncThreshold(ctx && ctx.model)
       const model = ctx && ctx.model
       const originalPayload = event && event.payload
+      pendingContinuationState = null
       if (!model || !isResponsesApi(model.api) || !isDirectOpenAiResponsesModel(model)) return
 
       let nextPayload = originalPayload
+
+      const replay = compactionReplayStateFromSession(ctx && ctx.sessionManager)
+      if (replay && (replay.encryptedContent || Array.isArray(replay.rawOutput))) {
+        const rewritten = rewritePayloadWithRemoteCompaction({
+          payload: nextPayload,
+          summary: replay.summary,
+          encryptedContent: replay.encryptedContent,
+          rawOutput: replay.rawOutput,
+          dropFollowingHistoricalItems: true,
+        })
+        if (rewritten.changed) nextPayload = rewritten.payload
+      }
+
       const optimized = applyProviderOptimizations({
         payload: nextPayload,
         model,
         sessionId: ctx && ctx.sessionManager && typeof ctx.sessionManager.getSessionId === 'function' ? ctx.sessionManager.getSessionId() : '',
+        state: {
+          previousResponseState: latestContinuationEntry(ctx && ctx.sessionManager),
+        },
       })
       nextPayload = optimized && optimized.payload ? optimized.payload : nextPayload
+      pendingContinuationState = optimized && optimized.continuationState
+        ? {
+            ...optimized.continuationState,
+            provider: safeString(model && model.provider).trim(),
+            api: safeString(model && model.api).trim(),
+            usedPreviousResponse: Boolean(optimized && optimized.usedPreviousResponse),
+          }
+        : null
 
-      const replay = compactionReplayStateFromSession(ctx && ctx.sessionManager)
-      if (!replay || (!replay.encryptedContent && !Array.isArray(replay.rawOutput))) {
-        if (nextPayload !== originalPayload) return nextPayload
-        return
-      }
-      const rewritten = rewritePayloadWithRemoteCompaction({
-        payload: nextPayload,
-        summary: replay.summary,
-        encryptedContent: replay.encryptedContent,
-        rawOutput: replay.rawOutput,
-        dropFollowingHistoricalItems: !replay.isSplitTurn,
-      })
-      if (rewritten.changed) return rewritten.payload
       if (nextPayload !== originalPayload) return nextPayload
       return
+    })
+
+    pi.on('message_end', async (event: any) => {
+      const message = event && event.message
+      if (!message || safeString(message.role).trim() !== 'assistant') {
+        pendingContinuationState = null
+        return
+      }
+      const responseId = safeString(message && message.responseId).trim()
+      if (!responseId || !pendingContinuationState || !(Number(pendingContinuationState.inputCount) > 0)) {
+        pendingContinuationState = null
+        return
+      }
+      pi.appendEntry(CONTINUATION_ENTRY_TYPE, {
+        responseId,
+        model: safeString(pendingContinuationState.model).trim(),
+        inputCount: Number(pendingContinuationState.inputCount) || 0,
+        inputHashes: Array.isArray(pendingContinuationState.inputHashes) ? pendingContinuationState.inputHashes.map((item: any) => safeString(item)) : [],
+        provider: safeString(pendingContinuationState.provider).trim(),
+        api: safeString(pendingContinuationState.api).trim(),
+        usedPreviousResponse: Boolean(pendingContinuationState.usedPreviousResponse),
+        savedAt: new Date().toISOString(),
+      })
+      pendingContinuationState = null
     })
 
     pi.on('session_before_compact', async (event: any, ctx: any) => {
@@ -216,6 +377,32 @@ function createProviderContinuationExtension() {
       if (!conversationMessages.length && !previousSummary) return
       let remoteResult: any = null
       try {
+        const remotePayloadInput = convertAgentMessagesToResponsesInput(conversationMessages)
+        const compactPayload = {
+          model: safeString(model.id).trim(),
+          input: [
+            ...(
+              safeString(previousSummary).trim()
+                ? [{
+                    type: 'message',
+                    role: 'assistant',
+                    status: 'completed',
+                    content: [{ type: 'output_text', text: safeString(previousSummary).trim(), annotations: [] }],
+                  }]
+                : []
+            ),
+            ...remotePayloadInput,
+          ],
+          instructions: buildCodexLikeCompactionInstructions({
+            customInstructions: safeString(event && event.customInstructions).trim(),
+            isSplitTurn: Boolean(preparation && preparation.isSplitTurn),
+          }),
+          tools: [],
+          parallel_tool_calls: true,
+          text: { format: { type: 'text' }, verbosity: 'low' },
+          ...(model && model.reasoning ? { reasoning: { effort: 'medium', summary: 'auto' } } : {}),
+        }
+        const trimmed = trimPayloadTailForRemoteCompaction(compactPayload, model)
         remoteResult = await tryRemoteCompaction({
           model,
           apiKey,
@@ -223,6 +410,7 @@ function createProviderContinuationExtension() {
           previousSummary,
           customInstructions: safeString(event && event.customInstructions).trim(),
           isSplitTurn: Boolean(preparation && preparation.isSplitTurn),
+          inputOverride: Array.isArray(trimmed && trimmed.payload && trimmed.payload.input) ? trimmed.payload.input : undefined,
         })
       } catch {
         return

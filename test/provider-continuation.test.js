@@ -4,13 +4,14 @@ const assert = require('node:assert/strict')
 const {
   applyProviderOptimizations,
   canUsePreviousResponse,
+  createPreviousResponseContinuationState,
   extractComparablePayload,
   rewritePayloadWithRemoteCompaction,
   convertAgentMessagesToResponsesInput,
   buildRemoteCompactionReplayItems,
 } = require('../dist/provider-continuation.js')
 
-test('continuation leaves provider payload untouched', () => {
+test('continuation enables store without rewriting input by default', () => {
   const payload = {
     model: 'gpt-5',
     instructions: 'sys',
@@ -30,11 +31,51 @@ test('continuation leaves provider payload untouched', () => {
     sessionId: 'sess-1',
     state: { lastResponseId: 'resp-1', lastComparable: null },
   })
-  assert.deepEqual(optimized.payload, payload)
+  assert.equal(optimized.payload.store, true)
+  assert.deepEqual(optimized.payload.input, payload.input)
   assert.equal(optimized.usedPreviousResponse, false)
+  assert.equal(optimized.continuationState.model, 'gpt-5')
 })
 
-test('rewritePayloadWithRemoteCompaction replaces summary envelope with assistant summary plus compaction item', () => {
+test('continuation rewrites to previous_response_id when input grows from the same prefix', () => {
+  const previousPayload = {
+    model: 'gpt-5',
+    instructions: 'sys-v1',
+    store: true,
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    ],
+    stream: true,
+  }
+  const currentPayload = {
+    model: 'gpt-5',
+    instructions: 'sys-v2',
+    store: false,
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'follow up' }] },
+    ],
+    stream: true,
+  }
+  const previousResponseState = createPreviousResponseContinuationState({
+    payload: previousPayload,
+    model: { api: 'openai-responses', provider: 'openai', baseUrl: 'https://api.openai.com/v1', id: 'gpt-5' },
+    responseId: 'resp-1',
+  })
+  const optimized = applyProviderOptimizations({
+    payload: currentPayload,
+    model: { api: 'openai-responses', provider: 'openai', baseUrl: 'https://api.openai.com/v1', id: 'gpt-5' },
+    state: { previousResponseState },
+  })
+  assert.equal(optimized.usedPreviousResponse, true)
+  assert.equal(optimized.payload.store, true)
+  assert.equal(optimized.payload.previous_response_id, 'resp-1')
+  assert.deepEqual(optimized.payload.input, [
+    { role: 'user', content: [{ type: 'input_text', text: 'follow up' }] },
+  ])
+})
+
+test('rewritePayloadWithRemoteCompaction replaces summary envelope with user summary plus compaction item', () => {
   const payload = {
     model: 'gpt-5',
     input: [
@@ -58,13 +99,13 @@ test('rewritePayloadWithRemoteCompaction replaces summary envelope with assistan
   })
   assert.equal(rewritten.changed, true)
   assert.equal(rewritten.payload.input[0].type, 'message')
-  assert.equal(rewritten.payload.input[0].role, 'assistant')
+  assert.equal(rewritten.payload.input[0].role, 'user')
   assert.equal(rewritten.payload.input[0].content[0].text, 'remote summary')
   assert.deepEqual(rewritten.payload.input[1], { type: 'compaction', encrypted_content: 'ENCRYPTED' })
   assert.equal(rewritten.payload.input[2].content[0].text, 'next turn')
 })
 
-test('rewritePayloadWithRemoteCompaction prefers remote output items when available', () => {
+test('rewritePayloadWithRemoteCompaction drops developer/system remote output items and keeps compaction output', () => {
   const payload = {
     model: 'gpt-5',
     input: [
@@ -98,10 +139,8 @@ test('rewritePayloadWithRemoteCompaction prefers remote output items when availa
     ],
   })
   assert.equal(rewritten.changed, true)
-  assert.equal(rewritten.payload.input[0].role, 'developer')
-  assert.equal(rewritten.payload.input[0].content[0].text, 'fresh developer instructions')
-  assert.deepEqual(rewritten.payload.input[1], { type: 'compaction', encrypted_content: 'ENCRYPTED' })
-  assert.equal(rewritten.payload.input[2].content[0].text, 'after compact')
+  assert.deepEqual(rewritten.payload.input[0], { type: 'compaction', encrypted_content: 'ENCRYPTED' })
+  assert.equal(rewritten.payload.input[1].content[0].text, 'after compact')
 })
 
 test('rewritePayloadWithRemoteCompaction drops kept historical suffix for non-split compaction', () => {

@@ -28,6 +28,26 @@ function emptyContentStats() {
   }
 }
 
+function approxJsonChars(value: any) {
+  try {
+    return safeString(JSON.stringify(value == null ? null : value)).length
+  } catch {
+    return safeString(value).length
+  }
+}
+
+function countMessageBlockText(stats: any, text: any) {
+  const value = safeString(text)
+  stats.textChars += value.length
+  if (value.trim()) stats.textBlocks += 1
+}
+
+function countThinkingText(stats: any, text: any) {
+  const value = safeString(text)
+  stats.thinkingChars += value.length
+  if (value.trim()) stats.thinkingBlocks += 1
+}
+
 function mergeContentStats(target: any, extra: any) {
   target.textChars += safeNumber(extra && extra.textChars)
   target.textBlocks += safeNumber(extra && extra.textBlocks)
@@ -71,31 +91,35 @@ function collectContentStats(content: any) {
     if (!block || typeof block !== 'object') continue
     const type = safeString(block.type).trim() || 'unknown'
     pushCount(blockTypes, type)
-    if (type === 'text') {
-      const text = safeString(block.text)
-      stats.textChars += text.length
-      if (text.trim()) stats.textBlocks += 1
+    if (type === 'text' || type === 'input_text' || type === 'output_text') {
+      countMessageBlockText(stats, (block as any).text)
+      continue
+    }
+    if (type === 'refusal') {
+      countMessageBlockText(stats, (block as any).refusal || (block as any).text)
       continue
     }
     if (type === 'thinking') {
-      const thinking = safeString(block.thinking)
-      stats.thinkingChars += thinking.length
-      if (thinking.trim()) stats.thinkingBlocks += 1
+      countThinkingText(stats, (block as any).thinking)
       continue
     }
-    if (type === 'image') {
+    if (type === 'reasoning') {
+      countThinkingText(stats, (block as any).summary || (block as any).text || (block as any).encrypted_content)
+      continue
+    }
+    if (type === 'image' || type === 'input_image' || type === 'output_image') {
       stats.imageBlocks += 1
       continue
     }
-    if (type === 'toolCall') {
+    if (type === 'toolCall' || type === 'function_call' || type === 'custom_tool_call' || type === 'mcp_tool_call') {
       stats.toolCallBlocks += 1
-      stats.toolCallArgChars += safeString(JSON.stringify(block.arguments || {})).length
-      pushCount(toolNames, block.name)
+      stats.toolCallArgChars += approxJsonChars((block as any).arguments || (block as any).input || {})
+      pushCount(toolNames, (block as any).name)
       continue
     }
-    if (type === 'toolResult') {
+    if (type === 'toolResult' || type === 'function_call_output' || type === 'custom_tool_call_output' || type === 'mcp_tool_call_output' || type === 'tool_search_output') {
       stats.toolResultBlocks += 1
-      stats.toolResultChars += safeString(block.text || JSON.stringify(block)).length
+      stats.toolResultChars += approxJsonChars((block as any).output ?? (block as any).content ?? (block as any).text ?? block)
       continue
     }
     stats.otherBlocks += 1
@@ -188,6 +212,7 @@ function derivePayloadStats(payload: any) {
     user: emptyRoleStats(),
     assistant: emptyRoleStats(),
     tool: emptyRoleStats(),
+    developer: emptyRoleStats(),
     unknown: emptyRoleStats(),
   }
   const itemTypes: Record<string, number> = {}
@@ -197,14 +222,36 @@ function derivePayloadStats(payload: any) {
   let messageItems = 0
   let nonMessageItems = 0
   let inputApproxChars = 0
+  let reasoningChars = 0
+  let functionCallArgChars = 0
+  let functionCallOutputChars = 0
 
   for (const item of input) {
     if (!item || typeof item !== 'object') continue
     const itemType = safeString(item.type).trim() || 'unknown'
     pushCount(itemTypes, itemType)
-    inputApproxChars += safeString(JSON.stringify(item)).length
+    inputApproxChars += approxJsonChars(item)
     if (itemType === 'compaction') {
       compactionItems += 1
+      continue
+    }
+    if (itemType === 'reasoning') {
+      nonMessageItems += 1
+      pushCount(nonMessageItemTypes, itemType)
+      reasoningChars += approxJsonChars(item.summary || item.text || item.encrypted_content || item)
+      continue
+    }
+    if (itemType === 'function_call' || itemType === 'custom_tool_call' || itemType === 'mcp_tool_call') {
+      nonMessageItems += 1
+      pushCount(nonMessageItemTypes, itemType)
+      functionCallArgChars += approxJsonChars(item.arguments || item.input || item)
+      pushCount(toolNames, item.name)
+      continue
+    }
+    if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output' || itemType === 'mcp_tool_call_output' || itemType === 'tool_search_output') {
+      nonMessageItems += 1
+      pushCount(nonMessageItemTypes, itemType)
+      functionCallOutputChars += approxJsonChars(item.output ?? item.content ?? item.text ?? item)
       continue
     }
     if (itemType !== 'message') {
@@ -221,6 +268,8 @@ function derivePayloadStats(payload: any) {
     for (const [toolName, count] of Object.entries(contentStats.toolNameCounts || {})) pushCount(toolNames, toolName, count)
   }
 
+  const instructionsChars = approxJsonChars(payload && payload.instructions)
+  const toolsChars = approxJsonChars(payload && payload.tools)
   return {
     inputItems: input.length,
     messageItems,
@@ -229,17 +278,25 @@ function derivePayloadStats(payload: any) {
     assistantMessages: byRole.assistant.messages,
     userMessages: byRole.user.messages,
     systemMessages: byRole.system.messages,
+    developerMessages: byRole.developer.messages,
     toolMessages: byRole.tool.messages,
     inputApproxChars,
+    instructionsChars,
+    toolsChars,
     itemTypes: sortedCountEntries(itemTypes),
     nonMessageItemTypes: sortedCountEntries(nonMessageItemTypes),
     toolNames: sortedCountEntries(toolNames),
     byRole,
     totals: {
-      textChars: safeNumber(byRole.system.textChars) + safeNumber(byRole.user.textChars) + safeNumber(byRole.assistant.textChars) + safeNumber(byRole.tool.textChars) + safeNumber(byRole.unknown.textChars),
-      thinkingChars: safeNumber(byRole.assistant.thinkingChars),
-      toolCallArgChars: safeNumber(byRole.assistant.toolCallArgChars),
-      toolResultChars: safeNumber(byRole.tool.toolResultChars) + safeNumber(byRole.unknown.toolResultChars),
+      textChars: safeNumber(byRole.system.textChars) + safeNumber(byRole.user.textChars) + safeNumber(byRole.assistant.textChars) + safeNumber(byRole.tool.textChars) + safeNumber(byRole.developer.textChars) + safeNumber(byRole.unknown.textChars),
+      thinkingChars: safeNumber(byRole.assistant.thinkingChars) + safeNumber(byRole.unknown.thinkingChars),
+      toolCallArgChars: safeNumber(byRole.assistant.toolCallArgChars) + functionCallArgChars,
+      toolResultChars: safeNumber(byRole.tool.toolResultChars) + safeNumber(byRole.unknown.toolResultChars) + functionCallOutputChars,
+      reasoningChars,
+      functionCallArgChars,
+      functionCallOutputChars,
+      instructionsChars,
+      toolsChars,
     },
   }
 }
@@ -311,6 +368,9 @@ function computeDerivedUsage(observation: any) {
   const toolResultChars = safeNumber(prompt && prompt.totals && prompt.totals.toolResultChars)
   const toolCallArgChars = safeNumber(prompt && prompt.totals && prompt.totals.toolCallArgChars)
   const thinkingChars = safeNumber(prompt && prompt.totals && prompt.totals.thinkingChars)
+  const instructionsChars = safeNumber(prompt && prompt.totals && prompt.totals.instructionsChars)
+  const toolsChars = safeNumber(prompt && prompt.totals && prompt.totals.toolsChars)
+  const reasoningChars = safeNumber(prompt && prompt.totals && prompt.totals.reasoningChars)
   const reserveTokens = safeNumber(compaction.reserveTokens, 16384)
   const contextWindow = safeNumber(modelContext.contextWindow)
   const compactionThreshold = contextWindow > 0 ? Math.max(0, contextWindow - reserveTokens) : 0
@@ -324,6 +384,9 @@ function computeDerivedUsage(observation: any) {
     inputPerToolResultChar: toolResultChars > 0 ? input / toolResultChars : 0,
     inputPerToolCallArgChar: toolCallArgChars > 0 ? input / toolCallArgChars : 0,
     inputPerThinkingChar: thinkingChars > 0 ? input / thinkingChars : 0,
+    inputPerInstructionChar: instructionsChars > 0 ? input / instructionsChars : 0,
+    inputPerToolSchemaChar: toolsChars > 0 ? input / toolsChars : 0,
+    inputPerReasoningChar: reasoningChars > 0 ? input / reasoningChars : 0,
     cacheWriteShare: input > 0 ? cacheWrite / input : 0,
     contextTokens: total,
     compactionThreshold,

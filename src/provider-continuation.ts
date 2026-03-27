@@ -8,6 +8,13 @@ type ContinuationComparable = {
   envelope: Record<string, any>
 }
 
+type PreviousResponseContinuationState = {
+  responseId: string
+  model: string
+  inputCount: number
+  inputHashes: string[]
+}
+
 function safeString(value: any): string {
   if (value == null) return ''
   return String(value)
@@ -71,6 +78,78 @@ function canUsePreviousResponse({ previous, current }: { previous: ContinuationC
   return true
 }
 
+function shortStableHash(value: any): string {
+  const text = safeString(value)
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+function extractPayloadModelId(payload: any, model?: any): string {
+  const payloadModel = safeString(payload && payload.model).trim()
+  if (payloadModel) return payloadModel
+  return safeString(model && model.id).trim()
+}
+
+function createPreviousResponseContinuationState({ payload, model, responseId }: { payload: any, model?: any, responseId?: string }): PreviousResponseContinuationState | null {
+  const comparable = extractComparablePayload(payload)
+  if (!comparable) return null
+  const input = Array.isArray(comparable.input) ? comparable.input : []
+  if (!input.length) return null
+  const modelId = extractPayloadModelId(payload, model)
+  if (!modelId) return null
+  const normalizedResponseId = safeString(responseId).trim()
+  return {
+    responseId: normalizedResponseId,
+    model: modelId,
+    inputCount: input.length,
+    inputHashes: input.map((item) => shortStableHash(stableJson(item))),
+  }
+}
+
+function canUsePreviousResponseState({
+  previousState,
+  currentState,
+}: {
+  previousState: PreviousResponseContinuationState | null
+  currentState: PreviousResponseContinuationState | null
+}): boolean {
+  if (!previousState || !currentState) return false
+  if (!safeString(previousState.responseId).trim()) return false
+  if (!safeString(previousState.model).trim() || !safeString(currentState.model).trim()) return false
+  if (safeString(previousState.model).trim() !== safeString(currentState.model).trim()) return false
+  if (!(previousState.inputCount > 0) || previousState.inputCount >= currentState.inputCount) return false
+  const previousHashes = Array.isArray(previousState.inputHashes) ? previousState.inputHashes : []
+  const currentHashes = Array.isArray(currentState.inputHashes) ? currentState.inputHashes : []
+  if (previousHashes.length !== previousState.inputCount) return false
+  if (currentHashes.length !== currentState.inputCount) return false
+  for (let i = 0; i < previousHashes.length; i += 1) {
+    if (safeString(previousHashes[i]) !== safeString(currentHashes[i])) return false
+  }
+  return true
+}
+
+function rewritePayloadWithPreviousResponse({
+  payload,
+  previousState,
+}: {
+  payload: any
+  previousState: PreviousResponseContinuationState | null
+}) {
+  if (!isContinuationPayload(payload)) return { payload, changed: false }
+  if (!previousState || !safeString(previousState.responseId).trim()) return { payload, changed: false }
+  const next = cloneJson(payload)
+  const input = Array.isArray(next.input) ? next.input : []
+  if (!(previousState.inputCount > 0) || previousState.inputCount >= input.length) return { payload, changed: false }
+  next.store = true
+  next.previous_response_id = safeString(previousState.responseId).trim()
+  next.input = input.slice(previousState.inputCount)
+  return { payload: next, changed: true }
+}
+
 function approxTokenCount(text: any) {
   return Math.ceil(safeString(text).length / 4)
 }
@@ -130,32 +209,29 @@ function truncateHistoricalOutputItem(item: any, maxTokens = 10_000) {
   return next
 }
 
-function pruneHistoricalReplayItems(payload: any) {
-  if (!isContinuationPayload(payload)) return { payload, changed: false }
-  const input = Array.isArray(payload.input) ? payload.input : []
-  if (input.length < 60) return { payload, changed: false }
-
-  let changed = false
-  const nextInput = input.map((item) => {
-    if (isReasoningItem(item)) {
-      changed = true
-      return null
-    }
-    if (isFunctionCallOutputItem(item)) {
-      const next = truncateHistoricalOutputItem(item)
-      if (!deepEqualJson(next, item)) changed = true
-      return next
-    }
-    return item
-  }).filter(Boolean)
-
-  if (!changed) return { payload, changed: false }
-  return { payload: { ...cloneJson(payload), input: nextInput }, changed: true }
-}
-
-function applyProviderOptimizations({ payload }: { payload: any, model?: any, sessionId?: string, state?: any }) {
-  const pruned = pruneHistoricalReplayItems(payload)
-  return { payload: pruned.payload, comparable: extractComparablePayload(pruned.payload), usedPreviousResponse: false }
+function applyProviderOptimizations({ payload, model, state }: { payload: any, model?: any, sessionId?: string, state?: any }) {
+  const nextPayload = cloneJson(payload)
+  if (nextPayload && typeof nextPayload === 'object') nextPayload.store = true
+  const continuationState = createPreviousResponseContinuationState({
+    payload: nextPayload,
+    model,
+  })
+  const previousState = state && typeof state === 'object'
+    ? state.previousResponseState || state.lastContinuationState || null
+    : null
+  const canContinue = canUsePreviousResponseState({
+    previousState,
+    currentState: continuationState,
+  })
+  const rewritten = canContinue
+    ? rewritePayloadWithPreviousResponse({ payload: nextPayload, previousState })
+    : { payload: nextPayload, changed: false }
+  return {
+    payload: rewritten.payload,
+    comparable: extractComparablePayload(rewritten.payload),
+    usedPreviousResponse: rewritten.changed,
+    continuationState,
+  }
 }
 
 function extractSummaryTextFromCompactionEnvelope(text: any): string {
@@ -224,7 +300,8 @@ function sanitizeRemoteCompactionOutputItem(item: any): any | null {
   }
   if (item.type !== 'message') return null
   const role = safeString(item.role).trim()
-  if (!['user', 'assistant', 'developer', 'system'].includes(role)) return null
+  if (role === 'developer' || role === 'system') return null
+  if (!['user', 'assistant'].includes(role)) return null
   const content = sanitizeRemoteMessageContent(role, Array.isArray(item.content) ? item.content : [])
   if (!content.length) return null
   const next: any = {
@@ -257,9 +334,16 @@ function buildRemoteCompactionReplayItems({
     if (normalizedEncrypted && !hasCompaction) replayItems.push(createEncryptedCompactionItem(normalizedEncrypted))
     return replayItems
   }
-  const summaryText = safeString(summary).trim() || safeString(fallbackSummary).trim()
   const fallbackItems: any[] = []
-  if (summaryText) fallbackItems.push(createAssistantSummaryItem(summaryText))
+  const summaryText = safeString(summary).trim() || safeString(fallbackSummary).trim()
+  if (summaryText) {
+    fallbackItems.push({
+      type: 'message',
+      role: 'user',
+      status: 'completed',
+      content: [{ type: 'input_text', text: summaryText }],
+    })
+  }
   if (normalizedEncrypted) fallbackItems.push(createEncryptedCompactionItem(normalizedEncrypted))
   return fallbackItems
 }
@@ -548,6 +632,9 @@ export {
   isDirectOpenAiResponsesModel,
   extractComparablePayload,
   canUsePreviousResponse,
+  createPreviousResponseContinuationState,
+  canUsePreviousResponseState,
+  rewritePayloadWithPreviousResponse,
   applyProviderOptimizations,
   extractSummaryTextFromCompactionEnvelope,
   buildRemoteCompactionReplayItems,

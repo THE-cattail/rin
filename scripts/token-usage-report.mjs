@@ -100,6 +100,12 @@ function emptyTotals() {
     reasoningItems: 0,
     functionCallItems: 0,
     functionCallOutputItems: 0,
+    instructionsChars: 0,
+    toolsChars: 0,
+    reasoningChars: 0,
+    functionCallArgChars: 0,
+    functionCallOutputChars: 0,
+    observedTextChars: 0,
   }
 }
 
@@ -132,6 +138,12 @@ function addTotals(target, row) {
   target.reasoningItems += countEntry(prompt.itemTypes, 'reasoning')
   target.functionCallItems += countEntry(prompt.itemTypes, 'function_call')
   target.functionCallOutputItems += countEntry(prompt.itemTypes, 'function_call_output')
+  target.instructionsChars += safeNumber(prompt && prompt.totals && prompt.totals.instructionsChars)
+  target.toolsChars += safeNumber(prompt && prompt.totals && prompt.totals.toolsChars)
+  target.reasoningChars += safeNumber(prompt && prompt.totals && prompt.totals.reasoningChars)
+  target.functionCallArgChars += safeNumber(prompt && prompt.totals && prompt.totals.functionCallArgChars)
+  target.functionCallOutputChars += safeNumber(prompt && prompt.totals && prompt.totals.functionCallOutputChars)
+  target.observedTextChars += safeNumber(prompt && prompt.totals && prompt.totals.textChars)
   return target
 }
 
@@ -153,6 +165,12 @@ function finalizeTotals(totals) {
     avgReasoningItems: totals.reasoningItems / requests,
     avgFunctionCallItems: totals.functionCallItems / requests,
     avgFunctionCallOutputItems: totals.functionCallOutputItems / requests,
+    avgInstructionsChars: totals.instructionsChars / requests,
+    avgToolsChars: totals.toolsChars / requests,
+    avgReasoningChars: totals.reasoningChars / requests,
+    avgFunctionCallArgChars: totals.functionCallArgChars / requests,
+    avgFunctionCallOutputChars: totals.functionCallOutputChars / requests,
+    avgObservedTextChars: totals.observedTextChars / requests,
   }
 }
 
@@ -194,6 +212,12 @@ function summarizeRows(rows, limit) {
       functionCallItems: countEntry(row && row.prompt && row.prompt.itemTypes, 'function_call'),
       functionCallOutputItems: countEntry(row && row.prompt && row.prompt.itemTypes, 'function_call_output'),
       promptApproxBytes: safeNumber(row && row.payloadApproxBytes),
+      instructionsChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.instructionsChars),
+      toolsChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.toolsChars),
+      observedTextChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.textChars),
+      reasoningChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.reasoningChars),
+      functionCallArgChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.functionCallArgChars),
+      functionCallOutputChars: safeNumber(row && row.prompt && row.prompt.totals && row.prompt.totals.functionCallOutputChars),
       hasHeavyPrompt: Boolean(row && row.derived && row.derived.hasHeavyPrompt),
     }))
     .sort((a, b) => b.input - a.input || b.promptApproxBytes - a.promptApproxBytes)
@@ -201,6 +225,19 @@ function summarizeRows(rows, limit) {
 
   const daily = groupTop(rows, (row) => safeString(row.observedAt).slice(0, 10), limit * 3)
   return { totals, topModels, topSessions, suspicious, daily }
+}
+
+function componentBreakdown(totals) {
+  const parts = [
+    { key: 'functionCallOutputChars', label: 'function_call_output bytes', value: safeNumber(totals.functionCallOutputChars) },
+    { key: 'functionCallArgChars', label: 'function_call arg bytes', value: safeNumber(totals.functionCallArgChars) },
+    { key: 'toolsChars', label: 'tool schema bytes', value: safeNumber(totals.toolsChars) },
+    { key: 'instructionsChars', label: 'instructions bytes', value: safeNumber(totals.instructionsChars) },
+    { key: 'observedTextChars', label: 'message text bytes', value: safeNumber(totals.observedTextChars) },
+    { key: 'reasoningChars', label: 'reasoning bytes', value: safeNumber(totals.reasoningChars) },
+  ]
+  const total = parts.reduce((sum, part) => sum + safeNumber(part.value), 0)
+  return parts.map((part) => ({ ...part, share: total > 0 ? part.value / total : 0 }))
 }
 
 function formatInt(n) {
@@ -228,7 +265,13 @@ function renderText(summary, opts) {
   lines.push(`- avg/request: in ${formatInt(summary.totals.avgInput)}, out ${formatInt(summary.totals.avgOutput)}, total ${formatInt(summary.totals.avgTotalTokens)}`)
   lines.push(`- avg prompt shape: ${formatInt(summary.totals.avgInputItems)} items, ${formatInt(summary.totals.avgMessageItems)} message items, ${formatInt(summary.totals.avgNonMessageItems)} non-message items`)
   lines.push(`- avg tool/reasoning items: calls ${formatInt(summary.totals.avgFunctionCallItems)}, outputs ${formatInt(summary.totals.avgFunctionCallOutputItems)}, reasoning ${formatInt(summary.totals.avgReasoningItems)}`)
+  lines.push(`- avg prompt bytes: instructions ${formatInt(summary.totals.avgInstructionsChars)}, tools ${formatInt(summary.totals.avgToolsChars)}, msg-text ${formatInt(summary.totals.avgObservedTextChars)}, fc-args ${formatInt(summary.totals.avgFunctionCallArgChars)}, fc-output ${formatInt(summary.totals.avgFunctionCallOutputChars)}, reasoning ${formatInt(summary.totals.avgReasoningChars)}`)
   lines.push(`- heavy prompts: ${formatInt(summary.totals.heavyPromptRequests)}`)
+  lines.push('')
+  lines.push('## Prompt component breakdown')
+  for (const item of componentBreakdown(summary.totals)) {
+    lines.push(`- ${item.label}: ${formatInt(item.value)} (${formatPct(item.share)})`)
+  }
   lines.push('')
   lines.push('## Top models')
   for (const item of summary.topModels) {
@@ -247,7 +290,7 @@ function renderText(summary, opts) {
   lines.push('')
   lines.push('## Largest prompts')
   for (const item of summary.suspicious) {
-    lines.push(`- ${item.observedAt} ${item.provider}/${item.model} ${item.sessionFile || '-'} | in ${formatInt(item.input)}, out ${formatInt(item.output)}, cache ${formatInt(item.cacheRead)}, items ${formatInt(item.inputItems)} (${formatInt(item.messageItems)} msg/${formatInt(item.nonMessageItems)} non-msg), calls ${formatInt(item.functionCallItems)}/${formatInt(item.functionCallOutputItems)}, reasoning ${formatInt(item.reasoningItems)}, compactions ${formatInt(item.compactionItems)}, bytes ${formatInt(item.promptApproxBytes)}`)
+    lines.push(`- ${item.observedAt} ${item.provider}/${item.model} ${item.sessionFile || '-'} | in ${formatInt(item.input)}, out ${formatInt(item.output)}, cache ${formatInt(item.cacheRead)}, items ${formatInt(item.inputItems)} (${formatInt(item.messageItems)} msg/${formatInt(item.nonMessageItems)} non-msg), calls ${formatInt(item.functionCallItems)}/${formatInt(item.functionCallOutputItems)}, reasoning ${formatInt(item.reasoningItems)}, compactions ${formatInt(item.compactionItems)}, bytes ${formatInt(item.promptApproxBytes)}, instr ${formatInt(item.instructionsChars)}, tools ${formatInt(item.toolsChars)}, msg ${formatInt(item.observedTextChars)}, fc-args ${formatInt(item.functionCallArgChars)}, fc-out ${formatInt(item.functionCallOutputChars)}`)
   }
   return `${lines.join('\n')}\n`
 }

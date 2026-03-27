@@ -42,6 +42,7 @@ async function main() {
   let session: any = null
   let unsubscribe: (() => void) | null = null
   let lastAssistantText = ''
+  let lastAssistantUsage: any = null
   let aborted = false
 
   try {
@@ -87,6 +88,7 @@ async function main() {
             if (safeString(message && message.role) !== 'assistant') return
             const text = extractAssistantText(message)
             if (text) lastAssistantText = text
+            if (message && message.usage) lastAssistantUsage = message.usage
             return
           }
           if (eventType === 'agent_end') {
@@ -95,9 +97,9 @@ async function main() {
               const message = messages[i]
               if (safeString(message && message.role) !== 'assistant') continue
               const text = extractAssistantText(message)
-              if (!text) continue
-              lastAssistantText = text
-              break
+              if (text) lastAssistantText = text
+              if (message && message.usage && !lastAssistantUsage) lastAssistantUsage = message.usage
+              if (text || lastAssistantUsage) break
             }
           }
         })
@@ -105,11 +107,11 @@ async function main() {
 
     if (typeof session.prompt !== 'function') throw new Error('subagent_prompt_unavailable')
     await session.prompt(safeString(payload && payload.prompt))
-    emit({ type: 'runner_result', lastAssistantText, aborted: false })
+    emit({ type: 'runner_result', lastAssistantText, lastAssistantUsage, aborted: false })
   } catch (error: any) {
     const message = safeString(error && error.message ? error.message : error) || 'subagent_runner_failed'
     aborted = /abort/i.test(message)
-    emit({ type: 'runner_result', lastAssistantText, aborted, error: message })
+    emit({ type: 'runner_result', lastAssistantText, lastAssistantUsage, aborted, error: message })
     process.exitCode = aborted ? 130 : 1
   } finally {
     if (unsubscribe) {

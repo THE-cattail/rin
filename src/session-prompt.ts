@@ -39,6 +39,7 @@ async function promptSessionWithRetry(session: SessionLike, prompt: SessionPromp
   const nextOptions = options && typeof options === 'object' ? { ...options } : {}
   try {
     await prompt(text, nextOptions)
+    await waitForSessionIdle(session)
     return { mode: 'direct' as const }
   } catch (error) {
     if (!isStreamingBehaviorRequiredError(error)) throw error

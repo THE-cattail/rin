@@ -23,8 +23,7 @@ import {
 import { importPiCodingAgentModule } from './pi-upstream'
 import { runBrainCli } from './brain'
 import { compileMemorySync, executeMemoryAction } from './memory'
-import { createProviderContinuationExtension } from './provider-continuation-extension'
-import { createProviderUsageExtension } from './provider-usage-extension'
+import { createFrozenSystemPromptExtension } from './frozen-system-prompt-extension'
 import { promptSessionWithRetry } from './session-prompt'
 import { searchWeb } from './web-search'
 
@@ -1299,6 +1298,101 @@ function toolResultFromText(text: string, details: any = {}, isError = false) {
   }
 }
 
+function formatUsageInlineLocal(usage: any) {
+  const value = usage && typeof usage === 'object' ? usage : {}
+  const turns = Number(value.turns) || 0
+  const input = Number(value.input) || 0
+  const output = Number(value.output) || 0
+  const cacheRead = Number(value.cacheRead) || 0
+  const cacheWrite = Number(value.cacheWrite) || 0
+  const totalTokens = Number(value.totalTokens) || 0
+  const costTotal = Number(value.costTotal) || 0
+  return `turns=${turns}, input=${input}, cached_input=${cacheRead}, cache_write=${cacheWrite}, output=${output}, total=${totalTokens}, cost=${costTotal.toFixed(6)}`
+}
+
+function formatBridgeMessageSummary(message: any) {
+  if (!message || typeof message !== 'object') return 'No bridged message found.'
+  const platform = safeString(message.platform || message.provider || '').trim()
+  const chatKey = safeString(message.chatKey || '').trim()
+  const messageId = safeString(message.messageId || message.id || '').trim()
+  const sender = safeString((message.sender && (message.sender.name || message.sender.id)) || message.userId || '').trim()
+  const text = safeString(message.text || message.content || '').trim()
+  const images = Array.isArray(message.images) ? message.images.length : 0
+  const files = Array.isArray(message.files) ? message.files.length : 0
+  const lines = [
+    `messageId: ${messageId || '-'}`,
+    `platform: ${platform || '-'}`,
+    `chatKey: ${chatKey || '-'}`,
+    `sender: ${sender || '-'}`,
+  ]
+  if (text) lines.push(`text: ${truncateMiddleTextLocal(text, 1000)}`)
+  if (images || files) lines.push(`attachments: images=${images}, files=${files}`)
+  return lines.join('\n')
+}
+
+function formatModelListSummary(result: any) {
+  const items = Array.isArray(result && result.models) ? result.models : []
+  if (!items.length) return 'No models found.'
+  const head = items.slice(0, 40).map((entry: any) => {
+    const provider = safeString(entry && entry.provider).trim()
+    const id = safeString(entry && entry.id).trim()
+    const name = safeString(entry && entry.name).trim()
+    return `- ${provider}/${id}${name ? ` — ${name}` : ''}`
+  })
+  const extra = Number(result && result.totalCount || 0) - items.length
+  const lines = [
+    `Found ${Number(result && result.totalCount || items.length)} model(s)${safeString(result && result.scope).trim() ? ` in scope=${safeString(result.scope).trim()}` : ''}.`,
+    ...head,
+  ]
+  if (extra > 0) lines.push(`... ${extra} more not shown`)
+  return lines.join('\n')
+}
+
+function formatSkillsListSummary(skills: any[]) {
+  const items = Array.isArray(skills) ? skills : []
+  if (!items.length) return 'No skills available.'
+  return items
+    .slice(0, 80)
+    .map((skill: any) => {
+      const name = safeString(skill && skill.name).trim() || '(unnamed)'
+      const description = safeString(skill && skill.description).trim()
+      return description ? `- ${name} — ${description}` : `- ${name}`
+    })
+    .join('\n')
+}
+
+function formatContextSummary(result: any) {
+  if (!result || typeof result !== 'object') return 'No context found.'
+  const agentsFiles = Array.isArray(result.agentsFiles) ? result.agentsFiles : []
+  const skillRoots = Array.isArray(result.skillRoots) ? result.skillRoots : []
+  const skills = Array.isArray(result.skills) ? result.skills : []
+  const lines = [
+    `target: ${safeString(result.targetPath || result.directory).trim() || '-'}`,
+    `AGENTS.md files: ${agentsFiles.length}`,
+    `skill roots: ${skillRoots.length}`,
+    `skills: ${skills.length}`,
+  ]
+  if (agentsFiles.length) lines.push(...agentsFiles.slice(0, 10).map((entry: any) => `- AGENTS: ${safeString(entry && entry.path).trim()}`))
+  if (skillRoots.length) lines.push(...skillRoots.slice(0, 10).map((entry: any) => `- skill root: ${safeString(entry && entry.path).trim()}`))
+  return lines.join('\n')
+}
+
+function formatWebSearchSummary(result: any) {
+  if (!result || typeof result !== 'object') return 'Web search failed.'
+  const results = Array.isArray(result.results) ? result.results : []
+  const lines = [
+    `query: ${safeString(result.query).trim() || '-'}`,
+    `results: ${results.length}`,
+  ]
+  for (const item of results.slice(0, 5)) {
+    const title = safeString(item && item.title).trim() || '(untitled)'
+    const url = safeString(item && item.url).trim()
+    const snippet = truncateMiddleTextLocal(safeString(item && item.snippet).trim(), 240)
+    lines.push(`- ${title}${url ? `\n  ${url}` : ''}${snippet ? `\n  ${snippet}` : ''}`)
+  }
+  return lines.join('\n')
+}
+
 function literalEnumSchema(values: string[], description = '') {
   const uniqueValues = Array.from(new Set((Array.isArray(values) ? values : []).map((value) => safeString(value).trim()).filter(Boolean)))
   return Type.Union(uniqueValues.map((value) => Type.Literal(value)), {
@@ -1345,13 +1439,9 @@ function createRinBuiltinExtensionTools({
     description: 'Manage the markdown-backed long-term memory library. Prefer recall or progressive memory before resident; use rin_history for verbatim recent transcript.',
     promptSnippet: 'Manage the markdown-backed long-term memory library.',
     promptGuidelines: [
-      'Use rin_memory for long-term reusable memory, not for verbatim recent transcript; use rin_history for exact recent wording.',
-      'Default to caution, but actively store information when it has stable cross-session value.',
-      'Do not skip memory just because resident is too strict: prefer recall first, then progressive, and resident only for the fixed core slots.',
-      'Never create new resident slots. Allowed resident slots: agent_identity, owner_identity, core_voice_style, core_methodology, core_values.',
-      'Do not store transient task state, one-off plans, casual small talk, unconfirmed guesses, or information that only matters in the current turn.',
-      'Before adding a new memory, search for an existing entry and prefer updating or replacing it instead of creating duplicates.',
-      'Resident memory is tiny and global. Progressive memory should expose a short summary plus a file path. Recall memory is the default landing zone.',
+      'Use `rin_memory` for long-term reusable memory, not for verbatim recent transcript; use `rin_history` when exact recent wording matters.',
+      'Before calling `rin_memory` to save memory, search for an existing entry and prefer updating or replacing it instead of creating duplicates.',
+      'When using `rin_memory`, prefer `recall` or `progressive` exposure before `resident`. Never create new resident slots; allowed slots are `agent_identity`, `owner_identity`, `core_voice_style`, `core_methodology`, and `core_values`.',
     ],
     parameters: Type.Object({
       action: literalEnumSchema([
@@ -1408,7 +1498,7 @@ function createRinBuiltinExtensionTools({
     description: 'Send bridge messages, fetch one bridged message by chatKey and messageId, or manage trusted platform identities.',
     promptSnippet: 'Send bridge messages, fetch one bridged message, or manage trusted platform identities.',
     promptGuidelines: [
-      'Use this when the user explicitly wants to send a bridge message, inspect one bridged message, or manage trusted identities.',
+      'Use `rin_koishi` only when the user explicitly wants to send a bridge message, inspect one bridged message, or manage trusted identities.',
     ],
     parameters: Type.Object({
       action: literalEnumSchema([
@@ -1459,7 +1549,7 @@ function createRinBuiltinExtensionTools({
             messageId: safeString(params.messageId),
             signal,
           })
-          return toolResultFromText(JSON.stringify(result.message || {}, null, 2), result)
+          return toolResultFromText(formatBridgeMessageSummary(result.message || {}), result)
         }
         const mappedAction = action === 'trusted_list'
           ? 'list'
@@ -1490,7 +1580,7 @@ function createRinBuiltinExtensionTools({
     description: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
     promptSnippet: 'Read recent raw conversation transcript entries from the active local session or active chat logs.',
     promptGuidelines: [
-      'Use this when exact recent wording or raw transcript/log inspection matters.',
+      'Use `rin_history` only when exact recent wording or raw transcript/log inspection matters.',
     ],
     parameters: Type.Object({
       action: literalEnumSchema([
@@ -1556,7 +1646,7 @@ function createRinBuiltinExtensionTools({
     description: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
     promptSnippet: 'List, create, enable, disable, delete, or run timers and inspect scheduled jobs.',
     promptGuidelines: [
-      'Use this when the user asks to inspect or manage timers, routines, or scheduled inspect jobs.',
+      'Use `rin_schedule` only when the user asks to inspect or manage timers, routines, or scheduled inspect jobs.',
     ],
     parameters: Type.Object({
       kind: literalEnumSchema(['timer', 'inspect'], describeEnumParam('Schedule kind.', ['timer', 'inspect'])),
@@ -1613,8 +1703,7 @@ function createRinBuiltinExtensionTools({
     description: 'Search the live public web through the managed SearXNG backend, exposing SearXNG search controls directly while returning normalized JSON results.',
     promptSnippet: 'Search the live public web through the managed SearXNG backend using explicit SearXNG-style parameters.',
     promptGuidelines: [
-      'Treat this tool as a direct SearXNG search surface: prefer explicit engines/categories/language/pageno/time_range/safesearch controls when the request depends on them.',
-      'This tool always consumes JSON search results; do not request alternate response formats such as csv or rss.',
+      'When using `rin_web_search`, set explicit SearXNG controls like `engines`, `categories`, `language`, `pageno`, `time_range`, and `safesearch` when the request depends on them.',
     ],
     parameters: Type.Object({
       q: Type.String({ description: 'SearXNG search query (`q`).' }),
@@ -1665,7 +1754,7 @@ function createRinBuiltinExtensionTools({
           disabled_engines: Array.isArray(params && params.disabled_engines) ? params.disabled_engines.map((item: any) => safeString(item)) : undefined,
           noCache: Boolean(params && params.noCache),
         })
-        return toolResultFromText(JSON.stringify(result, null, 2), result, !result.ok)
+        return toolResultFromText(formatWebSearchSummary(result), result, !result.ok)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
       }
@@ -2061,6 +2150,18 @@ function createRinBuiltinExtensionTools({
           cost: Number(nextUsage && nextUsage.cost && nextUsage.cost.total || 0),
           contextTokens: Number(nextUsage && nextUsage.totalTokens || 0),
           turns: 1,
+        })
+      }
+      if ((Number(usage.totalTokens) || 0) === 0) {
+        const fallbackUsage = runnerResult && runnerResult.lastAssistantUsage ? runnerResult.lastAssistantUsage : null
+        usage = mergeUsageLocal(usage, {
+          input: Number(fallbackUsage && fallbackUsage.input || 0),
+          output: Number(fallbackUsage && fallbackUsage.output || 0),
+          cacheRead: Number(fallbackUsage && fallbackUsage.cacheRead || 0),
+          cacheWrite: Number(fallbackUsage && fallbackUsage.cacheWrite || 0),
+          cost: Number(fallbackUsage && fallbackUsage.cost && fallbackUsage.cost.total || 0),
+          contextTokens: Number(fallbackUsage && fallbackUsage.totalTokens || 0),
+          turns: fallbackUsage ? 1 : 0,
         })
       }
       const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null
@@ -2599,13 +2700,9 @@ function createRinBuiltinExtensionTools({
     description: 'Delegate one task, a sequential chain, or parallel sub-tasks to temporary worker sessions on specific provider/model pairs, or inspect valid target models first.',
     promptSnippet: 'Run a temporary worker session on a specific provider/model, or list valid subagent target models first.',
     promptGuidelines: [
-      'Use this when the user explicitly wants a different provider/model to handle a subtask without changing the main session model.',
-      'If you are unsure which provider/model IDs are valid, call `rin_subagent` with `action: "list_models"` first and then pick from that result.',
-      'Choose contextMode deliberately: `full` for work that depends on the current thread, `summary` for compressed carry-over, and `empty` for clean isolated exploration.',
-      'Use `chain` for sequential orchestration and `{previous}` placeholders to pass prior output into later steps.',
-      'Use `tasks` for parallel fan-out when the subtasks do not depend on one another.',
-      'Write each delegated task as a self-contained contract: desired outcome, important constraints, and expected output shape.',
-      'Prefer direct delegated work over temporary main-model switching; the result comes back as tool output for the parent session to use.',
+      'Use `rin_subagent` only when the user explicitly wants a different provider/model to handle a subtask without changing the main session model.',
+      'If provider/model IDs are unknown, call `rin_subagent` with `action: "list_models"` first.',
+      'When using `rin_subagent`, write each delegated task as a self-contained contract. Use `chain` for sequential steps and `tasks` for independent parallel subtasks.',
     ],
     parameters: Type.Object({
       action: Type.Optional(literalEnumSchema([
@@ -2638,7 +2735,7 @@ function createRinBuiltinExtensionTools({
         const action = actionRaw === 'list_models' ? 'list_models' : 'run'
         if (action === 'list_models') {
           const result = collectModelsForTool(ctx, params)
-          return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+          return toolResultFromText(formatModelListSummary(result), result, false)
         }
 
         const chain = Array.isArray(params && params.chain) ? params.chain.filter(Boolean) : []
@@ -2747,8 +2844,10 @@ function createRinBuiltinExtensionTools({
           onUpdate,
           runMeta: { mode: 'single' },
         })
+        const usageSummary = formatUsageInlineLocal(singleResult && singleResult.totalUsage ? singleResult.totalUsage : emptyUsageLocal())
+        const baseText = safeString(singleResult && singleResult.text).trim() || '(no output)'
         return toolResultFromText(
-          safeString(singleResult && singleResult.text).trim() || '(no output)',
+          `${baseText}\n\nUSAGE:\n${usageSummary}`,
           {
             mode: 'single',
             result: singleResult && singleResult.details ? singleResult.details : {},
@@ -2772,7 +2871,7 @@ function createRinBuiltinExtensionTools({
     description: 'List available skills or load one skill body, optionally with resolved local markdown references.',
     promptSnippet: 'List available skills or load one skill body when needed.',
     promptGuidelines: [
-      'Use this when you need to inspect available skills or read one skill body instead of guessing its contents.',
+      'Use `rin_skills` when you need to inspect available skills or read one skill body instead of guessing.',
     ],
     parameters: Type.Object({
       action: literalEnumSchema([
@@ -2792,7 +2891,7 @@ function createRinBuiltinExtensionTools({
           ? resourceLoader.getSkills().skills.map((skill: any) => normalizeSkillRecord(skill)).filter(Boolean)
           : []
         if (action === 'list') {
-          return toolResultFromText(JSON.stringify(skills, null, 2), { count: skills.length, skills }, false)
+          return toolResultFromText(formatSkillsListSummary(skills), { count: skills.length, skills }, false)
         }
         if (action === 'get') {
           const requestedName = safeString(params && params.name).trim()
@@ -2828,7 +2927,7 @@ function createRinBuiltinExtensionTools({
     description: 'Inspect Pi-style project context for a target file or directory by listing ancestor AGENTS.md files and discovered project skill paths.',
     promptSnippet: 'Inspect Pi-style project context for a target path by listing ancestor AGENTS.md files and discovered project skill paths.',
     promptGuidelines: [
-      'Use this when a task depends on Pi-style AGENTS.md context files or discovered project skill paths for a target path.',
+      'Use `rin_context` when a task depends on AGENTS.md context or discovered project skill paths for a target path.',
     ],
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: 'Target file or directory. Defaults to the current working directory.' })),
@@ -2836,7 +2935,7 @@ function createRinBuiltinExtensionTools({
     execute: async (_toolCallId: string, params: any, _signal?: AbortSignal) => {
       try {
         const result = collectPiContextInspection(safeString(params && params.path))
-        return toolResultFromText(JSON.stringify(result, null, 2), result, false)
+        return toolResultFromText(formatContextSummary(result), result, false)
       } catch (e: any) {
         return toolResultFromText(safeString(e && e.message ? e.message : e), {}, true)
       }
@@ -3121,11 +3220,9 @@ let piSdkModulePromise: Promise<PiSdkModule> | null = null
 const PI_DEFAULT_OPENING = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.'
 const RIN_OPENING = "You have an independent identity and the freedom to think for yourself. At the same time, you are here to assist the user, whose needs are your highest priority. Carry out the request directly. Do the work yourself unless the task is beyond your capabilities."
 const RIN_RESPONSE_SHAPE = [
-  'Reply naturally, like a real person, not a manual.',
-  'Be brief almost all the time: prefer 1-3 sentences.',
-  'Only expand when the user explicitly asks for more detail.',
-  'For status or result questions, give the answer first.',
-  'Do not pad with workflow narration, repeated context, or mechanical bullet lists unless they are genuinely useful.',
+  'Your default personality and tone is concise, direct, and friendly. You communicate efficiently, always keeping the user clearly informed about ongoing actions without unnecessary detail. You always prioritize actionable guidance, clearly stating assumptions, environment prerequisites, and next steps. Unless explicitly asked, you avoid excessively verbose explanations about your work.',
+  'When a request requires inspecting files, repositories, logs, or search results, gather the relevant information first with tools before giving conclusions.',
+  'Do not proactively provide upfront plans, status updates, recaps, or summary-style preambles unless the user asks for them or they are necessary to explain a blocker or a major decision.',
 ].join('\n')
 
 function safeString(value: any): string {
@@ -3398,8 +3495,7 @@ function createRinResourceLoader({
           sessionRef,
         }),
       }),
-      createProviderContinuationExtension(),
-      createProviderUsageExtension(),
+      createFrozenSystemPromptExtension(),
     ],
     appendSystemPromptOverride: (base: any) => Array.isArray(base) ? base.slice() : [],
   })
@@ -3667,10 +3763,9 @@ function rewriteRinSystemPrompt(base: any, _repoRoot: string, stateRoot: string,
 
   let next = text
   if (next.includes(PI_DEFAULT_OPENING)) {
-    next = next.replace(PI_DEFAULT_OPENING, RIN_OPENING)
-  }
-  if (!next.includes(RIN_RESPONSE_SHAPE)) {
-    next = `${next.trimEnd()}\n\n${RIN_RESPONSE_SHAPE}`
+    next = next.replace(PI_DEFAULT_OPENING, `${RIN_OPENING}\n\n${RIN_RESPONSE_SHAPE}`)
+  } else if (!next.includes(RIN_RESPONSE_SHAPE)) {
+    next = `${RIN_RESPONSE_SHAPE}\n\n${next.trimStart()}`
   }
 
   const memoryBlock = buildCompiledMemoryPrompt(stateRoot)
@@ -4085,6 +4180,15 @@ function extractAssistantText(message: any): string {
     .trim()
 }
 
+async function waitForTurnSettlement(check: () => boolean, timeoutMs = 15000, pollMs = 25): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0)
+  while (Date.now() < deadline) {
+    if (check()) return true
+    await new Promise((resolve) => setTimeout(resolve, Math.max(10, Number(pollMs) || 25)))
+  }
+  return check()
+}
+
 async function runPiSdkTurn({
   repoRoot,
   workspaceRoot,
@@ -4239,12 +4343,16 @@ async function runPiSdkTurn({
       await promptPromise
     }
 
+    if (!killedByTimeout && !promptError && turnStarted && !lastAssistantText && !currentAssistantText) {
+      await waitForTurnSettlement(() => Boolean(lastAssistantText || currentAssistantText || (turnStatus && turnStatus !== 'started')), 15000, 25)
+    }
+
     if (killedByTimeout) {
       turnStatus = 'interrupted'
     } else if (promptError) {
       turnStatus = /abort/i.test(promptError) ? 'interrupted' : 'failed'
-    } else if (!turnStatus) {
-      turnStatus = 'completed'
+    } else if (!turnStatus || turnStatus === 'started') {
+      turnStatus = lastAssistantText || currentAssistantText ? 'completed' : turnStatus || 'completed'
     }
 
     if (promptError && !killedByTimeout) {
